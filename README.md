@@ -1,6 +1,6 @@
 # Vulman
 
-> ❤️ *Made with love by **Human, Codex, Claude** in Tokyo.*
+<p align="center"> ❤️ Made with love by <b>Human, Codex, Claude</b> in Tokyo.</p>
 
 **Vulnerability Management for your projects.** Vulman is a native desktop application written in Go. It includes an encrypted local database and supports English and Japanese. The interface is embedded in the executable and runs in the operating system's WebView.
 
