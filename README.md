@@ -1,5 +1,7 @@
 # Vulman
 
+> ❤️ *Made with love by **Human, Codex, Claude** in Tokyo.*
+
 **Vulnerability Management for your projects.** Vulman is a native desktop application written in Go. It includes an encrypted local database and supports English and Japanese. The interface is embedded in the executable and runs in the operating system's WebView.
 
 ## Run
@@ -299,3 +301,7 @@ internal/remediation/ public and optional AI guidance
 - [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
 - [Claude Messages API](https://platform.claude.com/docs/en/api/messages/create)
 - [Composer audit](https://getcomposer.org/doc/03-cli.md#audit), [npm audit](https://docs.npmjs.com/cli/v8/commands/npm-audit/), [Snyk test](https://docs.snyk.io/developer-tools/snyk-cli/commands/test)
+
+## Give a Star! ⭐
+
+If you like or are using this project, please give it a **star**. Thanks!
