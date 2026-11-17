@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Vulman
+Exec=vulman
+Icon=com.vulman.app
+Terminal=false
+StartupWMClass=com.vulman.app

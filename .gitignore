@@ -1,0 +1,9 @@
+/dist/
+/vulman
+/vulman.exe
+/data/
+*.db
+*.db.lock
+*.key
+node_modules/
+.DS_Store
