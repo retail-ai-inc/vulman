@@ -10,11 +10,13 @@ import (
 	"sync"
 	"time"
 
+	"vulman/internal/cvedb"
 	"vulman/internal/model"
 	"vulman/internal/store"
 )
 
 type Client struct {
+	LocalCVE    *cvedb.Store
 	HTTP        *http.Client
 	mu          sync.Mutex
 	nextNVD     time.Time

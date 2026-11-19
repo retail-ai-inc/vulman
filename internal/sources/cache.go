@@ -290,6 +290,9 @@ func (c *Client) CVE(ctx context.Context, id string, s model.Settings, reports .
 	if len(id) < 4 || id[:4] != "CVE-" {
 		return "", nil, nil
 	}
+	if c.usesLocalCVE(s) {
+		return c.localCVE(ctx, id, s, reports)
+	}
 
 	ctx = withRequest(ctx, "cve", "", reports)
 	result := c.cached(ctx, cacheKey("cve", s.CVEURL, id), s, func() (json.RawMessage, bool, error) {

@@ -8,12 +8,15 @@ import (
 func matchesSeverity(f model.Finding, severity string) bool {
 	return severity == "" || model.NormalizeSeverity(f.Severity) == severity
 }
+
 func inScope(f model.Finding, assetID, severity string) bool {
 	return (assetID == "" || f.AssetID == assetID) && matchesSeverity(f, severity)
 }
+
 func findingKey(f model.Finding) struct{ asset, id string } {
 	return struct{ asset, id string }{f.AssetID, f.ID}
 }
+
 func severityCount(findings []model.Finding, severity string) int {
 	count := 0
 	for _, f := range findings {
@@ -21,6 +24,7 @@ func severityCount(findings []model.Finding, severity string) int {
 			count++
 		}
 	}
+
 	return count
 }
 
@@ -29,6 +33,7 @@ func findingSeverityCounts(findings []model.Finding) map[string]int {
 	for _, finding := range findings {
 		counts[model.NormalizeSeverity(finding.Severity)]++
 	}
+
 	return counts
 }
 
@@ -41,12 +46,14 @@ func severityCandidates(fetched, prior []model.Finding, assetID, severity string
 			oldScope[findingKey(f)] = true
 		}
 	}
+
 	selected := []model.Finding{}
 	for _, f := range fetched {
 		if (assetID == "" || f.AssetID == assetID) && (matchesSeverity(f, severity) || oldScope[findingKey(f)]) {
 			selected = append(selected, f)
 		}
 	}
+
 	return selected
 }
 
@@ -55,10 +62,12 @@ func retainOutsideScope(updates, prior []model.Finding, assetID, severity string
 	for _, f := range updates {
 		updated[findingKey(f)] = true
 	}
+
 	for _, f := range prior {
 		if !inScope(f, assetID, severity) && !updated[findingKey(f)] {
 			updates = append(updates, f)
 		}
 	}
+
 	return sources.Merge(updates)
 }

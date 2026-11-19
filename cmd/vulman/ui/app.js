@@ -255,9 +255,13 @@ function toggleWorkflow(id) {
   else expandedRuns.add(id);
   updateSyncPanels(id);
 }
-function progressSnapshot(st){const {cache_stats,version,...rest}=st;return JSON.stringify({...rest,projects:st.projects.map(p=>({...p,runs:(p.runs||[]).map(({steps,logs,data_checked_at,...run})=>run)}))});}
+function progressSnapshot(st){const {cache_stats,cve_database,version,...rest}=st;return JSON.stringify({...rest,projects:st.projects.map(p=>({...p,runs:(p.runs||[]).map(({steps,logs,data_checked_at,...run})=>run)}))});}
 function applyPollingState(next) {
   const [page, id, view] = route();
+  if (next.cve_database) {
+    state.cve_database = next.cve_database;
+    if (page === 'settings') updateCVEDatabaseStatus(next.cve_database);
+  }
   if (next.projects === undefined) {
     state.cache_stats = next.cache_stats;
     if (page === 'settings') updateCacheMetrics(next.cache_stats);
@@ -509,6 +513,41 @@ function cacheNumber(n){return Number(n||0).toLocaleString(formatLocale());}
 function cacheUsageHTML(stats={}){return `<span>${t('cacheEntries')}: <strong>${cacheNumber(stats.entries)}</strong></span><span>${t('cacheSize')}: <strong>${((stats.bytes||0)/1048576).toFixed(2)} MiB</strong></span>`;}
 function cacheMetricsHTML(stats={}){const hits=stats.hits||0,misses=stats.misses||0,rate=hits+misses?((hits/(hits+misses))*100).toFixed(1)+'%':'—';return `<div><span>${t('cacheHits')}</span><strong>${cacheNumber(hits)}</strong></div><div><span>${t('cacheMisses')}</span><strong>${cacheNumber(misses)}</strong></div><div><span>${t('cacheHitRate')}</span><strong>${rate}</strong></div><div><span>${t('cacheEvictions')}</span><strong>${cacheNumber(stats.evictions)}</strong></div>`;}
 function updateCacheMetrics(stats){const usage=$('#cache-usage'),metrics=$('#cache-metrics');if(usage)usage.innerHTML=cacheUsageHTML(stats);if(metrics)metrics.innerHTML=cacheMetricsHTML(stats);}
+function cveDatabaseStatusHTML(stats = {}) {
+  const phase = stats.phase || (stats.initialized ? 'complete' : stats.resumable ? 'interrupted' : 'idle');
+  const count = stats.initialized ? stats.records : stats.on_demand;
+  const details = [
+    `${t('cveDBRecords')} ${cacheNumber(count)}`,
+    `${t('cacheSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`,
+  ];
+  if (validDate(stats.source_at)) details.push(`${t('sourceDataChecked')} ${fmtDate(stats.source_at)}`);
+  if (validDate(stats.checked_at)) details.push(`${t('cveDBLastCheck')} ${fmtDate(stats.checked_at)}`);
+  if (stats.phase === 'downloading') {
+    details.push(`${((stats.downloaded || 0) / 1048576).toFixed(1)} / ${((stats.download_total || 0) / 1048576).toFixed(1)} MiB`);
+  }
+  if (stats.resumable && stats.imported) details.push(t('cveDBImported').replace('{count}', cacheNumber(stats.imported)));
+  return `<div class="cve-database-summary">${pill(t('cveDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${stats.error ? `<p class="form-error">${esc(stats.error)}</p>` : ''}</div>`;
+}
+function updateCVEDatabaseStatus(stats) {
+  const status = $('#cve-database-status');
+  if (!status) return;
+  status.innerHTML = cveDatabaseStatusHTML(stats);
+  const start = $('[data-action="update-cve-database"]');
+  const stop = $('[data-action="stop-cve-database"]');
+  if (start) start.disabled = Boolean(stats.running);
+  const rebuild = $('[data-action="rebuild-cve-database"]');
+  if (rebuild) rebuild.disabled = Boolean(stats.running);
+  if (stop) stop.hidden = !stats.running;
+}
+function cveDatabaseSettingsHTML() {
+  const stats = state.cve_database || {};
+  const schedule = state.settings.cve_update_schedule || 'daily';
+  return `<section class="settings-section"><h3>${t('cveDBTitle')}</h3><p>${t('cveDBHint')}</p>
+    <div class="form-grid"><label><span>${t('cveDBSchedule')}</span><select name="cve_update_schedule">${['off', 'hourly', 'daily'].map(value => `<option value="${value}" ${schedule === value ? 'selected' : ''}>${t(value)}</option>`).join('')}</select></label>
+    <div class="cve-database-actions"><button type="button" class="button secondary" data-action="update-cve-database" ${stats.running ? 'disabled' : ''}>${t('cveDBUpdate')}</button><button type="button" class="button secondary" data-action="rebuild-cve-database" ${stats.running ? 'disabled' : ''}>${t('cveDBRebuild')}</button><button type="button" class="button secondary" data-action="stop-cve-database" ${stats.running ? '' : 'hidden'}>${t('stop')}</button></div></div>
+    <div id="cve-database-status" role="status" aria-live="polite">${cveDatabaseStatusHTML(stats)}</div>
+    <p class="form-note">${t('cveDBSafety')}</p>${stats.path ? `<dl class="storage-paths"><div><dt>${t('cveDBFile')}</dt><dd><code>${esc(stats.path)}</code></dd></div></dl>` : ''}</section>`;
+}
 function cacheSettingsHTML(){
   const stats=state.cache_stats||{},settings=state.settings,locale=formatLocale(),number=n=>Number(n||0).toLocaleString(locale);
   const entries=settings.cache_max_entries||10000,mib=settings.cache_max_mib||512;
@@ -787,7 +826,7 @@ function credentialSettingsHTML() {
   return `<section class="settings-section"><h3>${t('tokens')}</h3><p>${t('tokensHint')}</p><div class="form-grid">${fields}</div>${back}</section>`;
 }
 
-function renderSettings(){const s=state.settings;clearing=new Set();$('#main').innerHTML=heading(t('settings'),t('settingsSub'))+`<form id="settings-form" class="settings-layout panel"><section class="settings-section"><h3>${t('general')}</h3><div class="form-grid"><label><span>${t('uiLanguage')}</span><select name="language">${languageOptions()}</select></label></div></section><section class="settings-section"><h3>${t('sourceSettings')}</h3><p>${t('sourceSettingsHint')}</p>${['nvd','cve','osv'].map(n=>`<label class="check-row"><input type="checkbox" name="source_${n}" ${s.sources[n]?'checked':''}><span><strong>${{nvd:'NIST NVD',cve:'CVE Program',osv:'OSV.dev'}[n]}</strong><small>${t({nvd:'discovery',cve:'enrichment',osv:'packageMatching'}[n])}</small></span></label>`).join('')}<div class="form-grid">${field('nvd_url','nvdEndpoint',s.nvd_url,'url','required')}${field('cve_url','cveEndpoint',s.cve_url,'url','required')}${field('osv_url','osvEndpoint',s.osv_url,'url','required')}</div></section>${cacheSettingsHTML()}${credentialSettingsHTML()}<section class="settings-section"><h3>${t('aiSettings')}</h3><p>${t('aiSettingsHint')}</p><div class="form-grid"><label><span>${t('defaultProvider')}</span><select name="ai_provider">${providerOptions(s.ai_provider)}</select></label><div></div>${field('openai_model','openaiModel',s.openai_model,'text','placeholder="e.g. a model ID enabled for your API account"')}${field('claude_model','claudeModel',s.claude_model,'text','placeholder="e.g. a model ID enabled for your API account"')}</div></section><section class="settings-section"><h3>${t('scannerSettings')}</h3><p>${t('scannerSettingsHint')}</p><div class="form-grid">${scannerSettingsHTML(s.scanners)}</div></section><section class="settings-section"><p class="storage-note">${t('storageNote')}</p>${storageDirectoryHTML()}${storagePathsHTML()}</section><div class="settings-actions"><button class="button primary" type="submit">${t('saveSettings')}</button><span class="form-error" id="settings-error"></span></div></form>`;$('#settings-form').addEventListener('submit',saveSettings);$$('[data-scanner-check]:checked').forEach(checkScanner);}
+function renderSettings(){const s=state.settings;clearing=new Set();$('#main').innerHTML=heading(t('settings'),t('settingsSub'))+`<form id="settings-form" class="settings-layout panel"><section class="settings-section"><h3>${t('general')}</h3><div class="form-grid"><label><span>${t('uiLanguage')}</span><select name="language">${languageOptions()}</select></label></div></section><section class="settings-section"><h3>${t('sourceSettings')}</h3><p>${t('sourceSettingsHint')}</p>${['nvd','cve','osv'].map(n=>`<label class="check-row"><input type="checkbox" name="source_${n}" ${s.sources[n]?'checked':''}><span><strong>${{nvd:'NIST NVD',cve:'CVE Program',osv:'OSV.dev'}[n]}</strong><small>${t({nvd:'discovery',cve:'enrichment',osv:'packageMatching'}[n])}</small></span></label>`).join('')}<div class="form-grid">${field('nvd_url','nvdEndpoint',s.nvd_url,'url','required')}${field('cve_url','cveEndpoint',s.cve_url,'url','required')}${field('osv_url','osvEndpoint',s.osv_url,'url','required')}</div></section>${cveDatabaseSettingsHTML()}${cacheSettingsHTML()}${credentialSettingsHTML()}<section class="settings-section"><h3>${t('aiSettings')}</h3><p>${t('aiSettingsHint')}</p><div class="form-grid"><label><span>${t('defaultProvider')}</span><select name="ai_provider">${providerOptions(s.ai_provider)}</select></label><div></div>${field('openai_model','openaiModel',s.openai_model,'text','placeholder="e.g. a model ID enabled for your API account"')}${field('claude_model','claudeModel',s.claude_model,'text','placeholder="e.g. a model ID enabled for your API account"')}</div></section><section class="settings-section"><h3>${t('scannerSettings')}</h3><p>${t('scannerSettingsHint')}</p><div class="form-grid">${scannerSettingsHTML(s.scanners)}</div></section><section class="settings-section"><p class="storage-note">${t('storageNote')}</p>${storageDirectoryHTML()}${storagePathsHTML()}</section><div class="settings-actions"><button class="button primary" type="submit">${t('saveSettings')}</button><span class="form-error" id="settings-error"></span></div></form>`;$('#settings-form').addEventListener('submit',saveSettings);$$('[data-scanner-check]:checked').forEach(checkScanner);}
 function render(){if(pendingPageRender)return;renderNav();const [page,id,view]=route();if(location.hash===newProjectHash)renderProjectEditor();else if(page==='projects')$('#main').innerHTML=heading(t('projects'),t('projectsSub'),button('addProject','new-project',true,'plus'))+`<div class="panel"><div class="panel-head"><h2>${t('yourProjects')} <span class="muted">(${state.projects.length})</span></h2></div>${projectList(state.projects, true)}</div>`;else if(page==='vulnerabilities'){$('#main').innerHTML=heading(t('vulnerabilities'),t('vulnsSub'),state.projects.length?syncAllControls(true):'')+filtersHTML(true)+`<div class="panel" id="finding-results">${findingsTable()}</div>`;bindFilters();}else if(page==='activity')$('#main').innerHTML=heading(t('activity'),t('activitySub'))+`<div class="panel">${activityList()}</div>`;else if(page==='settings')renderSettings();else if(page==='project'){if(view==='edit')renderProjectEditor(id);else if(view==='delete')renderProjectDeletion(id);else renderProject(id);}else renderOverview();mountActiveSyncs();}
 function componentFields(a={},removable=true){const el=document.createElement('div');el.className='asset-field';el.dataset.id=a.id||'';el.innerHTML=`<div class="asset-top"><label><span>${t('category')}</span><select data-field="kind">${['language','database','container','docker','webserver','ai','library','other'].map(k=>`<option value="${k}" ${(a.kind||'library')===k?'selected':''}>${t(k)}</option>`).join('')}</select></label><label><span>${t('name')}</span><input data-field="name" value="${esc(a.name)}" required placeholder="org.apache.logging.log4j:log4j-core" maxlength="300"></label><label><span>${t('version')}</span><input data-field="version" value="${esc(a.version)}" required placeholder="2.14.1" maxlength="100"></label>${removable?`<button type="button" class="icon-button asset-remove" aria-label="${t('removeComponent')}">×</button>`:''}</div><div class="asset-bottom"><label><span>${t('ecosystem')}</span><select data-field="ecosystem"><option value="">—</option>${['Go','npm','PyPI','Maven','Packagist','crates.io','RubyGems','NuGet','Hex','Pub','Debian','Alpine','GIT'].map(e=>`<option ${a.ecosystem===e?'selected':''}>${e}</option>`).join('')}</select></label><label><span>${t('cpeLabel')}</span><input data-field="cpe" value="${esc(a.cpe)}" placeholder="cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"></label></div>`;return el;}
 function openComponent(id){const p=state.projects.find(p=>p.id===id);if(!p||p.syncing)return false;componentDraft={...p,assets:p.assets.map(a=>({...a}))};$('#component-form').reset();$('#component-error').textContent='';$('#component-project').textContent=t('componentProject').replace('{project}',p.name);const fields=$('#component-fields');fields.innerHTML='';const el=componentFields({},false);fields.append(el);localize($('#component-dialog'));$('#component-dialog').showModal();el.querySelector('[data-field="name"]').focus();return true;}
@@ -1001,6 +1040,7 @@ async function saveSettings(e) {
   submit.disabled = true;
   const body = {...state.settings, sources:{}, scanners:{}, tokens:{}, clear_tokens:[...clearing]};
   for (const key of ['language','nvd_url','cve_url','osv_url','ai_provider','openai_model','claude_model']) body[key] = form.elements[key].value.trim();
+  if (form.elements.cve_update_schedule) body.cve_update_schedule = form.elements.cve_update_schedule.value;
   for (const key of ['cache_hours','cache_max_entries','cache_max_mib']) body[key] = Number(form.elements[key].value);
   for (const key of ['nvd','cve','osv']) body.sources[key] = form.elements['source_'+key].checked;
   for (const key of Object.keys(scannerLabels)) body.scanners[key] = form.elements['scanner_'+key].checked;
@@ -1067,6 +1107,16 @@ case'focus-snyk-token': {
 }
 case'return-to-project-form':if(projectTokenSetup)location.hash=projectTokenSetup.returnHash;break;
 case'toggle-credential':await toggleCredential(target);break;
+case'update-cve-database':case'stop-cve-database':case'rebuild-cve-database':{
+  const action=target.dataset.action;
+  if(action==='rebuild-cve-database'&&!(await confirmAction(t('cveDBRebuildConfirm'))))break;
+  target.disabled=true;
+  try{
+    await invoke({'update-cve-database':'UpdateCVEDatabase','stop-cve-database':'StopCVEDatabaseUpdate','rebuild-cve-database':'RebuildCVEDatabase'}[action]);
+    const next=await invoke('StateSince',state.version||'');applyPollingState(next);
+  }finally{target.disabled=Boolean(state.cve_database?.running)&&action!=='stop-cve-database';}
+  break;
+}
 case'browse-local-repository':await browseFolder(target.closest('form').elements.local_path,'chooseRepositoryFolder');break;case'use-data-directory':{const input=$('#data-directory');if(!input.value.trim()){input.focus();return;}await changeDataDirectory(input.value);break;}case'reset-data-directory':await changeDataDirectory('');break;case'check-scanner':{const input=$('[data-scanner-check="'+target.dataset.scanner+'"]');if(input)await checkScanner(input);break;}case'advice':await getAdvice($('#advice-provider').value);break;}}catch(err){toast(err.message,true);target.disabled=false;}});
 document.addEventListener('change',e=>{if(e.target.matches('[data-scanner-check]'))checkScanner(e.target);if(e.target.matches('[data-sync-project]'))syncSelection[e.target.dataset.syncProject]=e.target.value;if(e.target.matches('[data-sync-mode-project]'))syncModeSelection[e.target.dataset.syncModeProject]=e.target.value;if(e.target.matches('[data-sync-severity-project]'))syncSeveritySelection[e.target.dataset.syncSeverityProject]=e.target.value;if(e.target.matches('[data-sync-all-severity]'))syncAllSeverity=e.target.value;if(e.target.matches('[data-sync-component-severity]'))componentSyncSeveritySelection.set(stackKey(e.target.dataset.projectId,e.target.dataset.assetId),e.target.value);});
 document.addEventListener('input', e => {

@@ -90,7 +90,7 @@ The interface polls every two seconds while visible. A version check skips decod
 | CVE Program | Enabled | Retrieves original CVE JSON records for CVE IDs discovered by NVD or OSV, adding CNA titles and CNA/ADP references. |
 | OSV.dev | Disabled | Queries exact ecosystem/package/version tuples, follows pagination, skips withdrawn advisories, and collects package-specific fix boundaries. |
 
-NVD and OSV are discovery sources. CVE is an enrichment source in this release, so at least NVD or OSV must remain enabled. Vulman queries services on demand; it does not download or maintain a full mirror of their databases. Source endpoints are configurable HTTPS URLs.
+NVD and OSV discover matching advisories, and CVE enriches their records. At least NVD or OSV must remain enabled. NVD and OSV are queried on demand. The default CVE endpoint also supports a shared local catalogue built from official bulk downloads. Source endpoints are configurable HTTPS URLs.
 
 **Match types matter:**
 
@@ -134,6 +134,24 @@ Oldest entries are evicted whenever either limit is reached. Saving a lower limi
 Configuration shows current usage, **fresh cache hits**, **cache misses**, **hit rate**, and **capacity evictions**, updated during normal polling without replacing unsaved form values. Hits and misses count logical normal/cache-only lookups; expired or missing data counts as a miss, including when a concurrent lookup is shared. Forced refreshes and internal diagnostic reads are excluded. Explicit invalidation of a rejected CVE is not counted as a capacity eviction.
 
 Metrics start at zero on upgrade and accumulate across clean restarts. Hit/miss counters are buffered in memory and checkpointed during writes and clean shutdown. Capacity evictions and usage counters are updated atomically with the affected cache entries. Routine statistics and cache writes use maintained metadata instead of scanning the cache; older databases with missing counters are repaired once on opening.
+
+### Local CVE catalogue
+
+In **Configuration → Local CVE database**, select **Update CVE database** to initialize `vulman-cve.db` from the official [CVE List V5 release archives](https://github.com/CVEProject/cvelistV5#releases). The first full download can be several hundred MiB and needs additional temporary disk space. Vulman stores the titles, references, modification dates, and publication/rejection states used for enrichment. Project inventory, findings, and credentials remain in `vulman.db`.
+
+Choose **Manual only**, **Hourly**, or **Daily** automatic updates. The default is **Daily**. The initial bulk download starts when you explicitly select the update button. After initialization, updates run while Vulman is open and overdue updates run after restart. An interrupted initial import also resumes automatically when its update schedule is enabled. **Update CVE database** resumes it immediately. **Stop** cancels download/import work and leaves the last committed checkpoint available.
+
+Updates apply each missing hourly release in order, including across UTC day boundaries. If the release history has a gap or the catalogue is over seven days behind, Vulman imports a current baseline and the subsequent hourly releases. A remaining gap is reported as an error. Successful archive checkpoints and the final successful check are persisted separately, so a failed update cannot claim coverage of skipped releases. GitHub release downloads have their own availability and rate limits. Rate-limit errors are shown in Configuration and can be retried later.
+
+Project assessments use indexed CVE-ID lookups against the catalogue. Missing records are fetched individually through the existing paced CVE client and saved in an independent on-demand bucket. These records survive shared query-cache eviction. Record freshness follows the catalogue's hourly/daily interval with one hour of allowance for release publication. Manual-only mode uses a 24-hour interval. An overdue initialized catalogue supplies clearly labeled stale enrichment and leaves the assessment incomplete while its updater catches up. This avoids refreshing thousands of existing records individually. **Force refresh** still fetches individual CVE records directly. Custom CVE endpoints continue using the endpoint-specific shared query cache.
+
+The catalogue uses AES-GCM with the existing `vulman.key`. Its record payloads and import metadata are encrypted. Archive downloads contain public CVE data and are removed after a successful import. A verified download can be reused when resuming an interrupted import. SHA-256 digests and sizes from the official release metadata are checked before importing, and ZIP CRCs are checked while reading individual records. Archive members are read directly without extracting their paths.
+
+bbolt's synchronized transactions stay enabled. Imports commit at most 256 records together with the ZIP position in each transaction. A full baseline is built in an inactive bucket, then activated by one atomic metadata transaction after all records validate. An interrupted baseline leaves the previous catalogue available. Incremental updates can expose individually committed changes while their last fully imported release remains the freshness checkpoint. On reopening, bbolt recovers committed transactions and Vulman resumes from the saved ZIP position. A partially downloaded archive is downloaded again and verified before import resumes.
+
+Readers use short transactions and B+tree lookups. Maintained counters make status polling independent of catalogue size. Cleanup uses cursors in bounded transactions, and obsolete baseline pages become reusable after activation. **Rebuild catalogue** starts a new full import after confirmation and keeps the current catalogue available until replacement succeeds. bbolt can retain freed pages, so rebuilding can reuse disk space without shrinking the physical file.
+
+Configuration shows the catalogue path, record count, size, release timestamp, last update check, download/import progress, and errors. The catalogue has no independent encryption key. Include `vulman-cve.db` with `vulman.db` and `vulman.key` to back up the downloaded data while Vulman is stopped. You can rebuild the catalogue from the public source if it is omitted from a backup.
 
 ## Scheduling
 
@@ -210,6 +228,7 @@ Use `--dir` for a local folder or `--repo` for an HTTPS GitHub.com repository UR
 The embedded OSS database is [bbolt](https://github.com/etcd-io/bbolt), linked into the Go executable with no separate database service. State is encrypted with AES-256-GCM. The data directory contains:
 
 - `vulman.db`: projects, inventory, findings, assessment history, configuration, encrypted credentials.
+- `vulman-cve.db`: shared encrypted CVE catalogue, on-demand records, and resumable import metadata.
 - `vulman.key`: the encryption key. **Back up both files together while Vulman is stopped.** Losing the key makes the database unreadable.
 
 **Configuration** displays the active data directory and the absolute paths to both files beneath the local-storage note.
@@ -287,6 +306,7 @@ swift packaging/macos/render-icon.swift cmd/vulman/ui/icon.svg dist/windows-icon
 cmd/vulman/           Wails launcher, workspace operations, native bridge, embedded UI
 internal/model/      inventory, findings, validation, defaults
 internal/store/      encrypted embedded bbolt storage
+internal/cvedb/      encrypted CVE catalogue and resumable official release imports
 internal/sources/    NVD, CVE, OSV HTTP clients and normalization
 internal/engine/     asynchronous assessments and persisted scheduling
 internal/scanner/    fixed scanner commands and report adapters

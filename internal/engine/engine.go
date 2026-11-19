@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"vulman/internal/cvedb"
 	"vulman/internal/model"
 	"vulman/internal/scanner"
 	"vulman/internal/sources"
@@ -18,14 +19,17 @@ import (
 )
 
 type Engine struct {
-	Store   *store.Store
-	Sources *sources.Client
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	mu      sync.Mutex
-	closed  bool
-	active  map[string]activeRun
+	CVE            *cvedb.Updater
+	cveClose       sync.Once
+	lastCVEAttempt time.Time
+	Store          *store.Store
+	Sources        *sources.Client
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	mu             sync.Mutex
+	closed         bool
+	active         map[string]activeRun
 }
 
 type activeRun struct {
@@ -40,9 +44,15 @@ var ErrInvalidSeverity = errors.New("invalid sync severity")
 const codeScanMode = "code"
 
 func New(s *store.Store) (*Engine, error) {
+	catalogue, err := s.OpenCVEDatabase()
+	if err != nil {
+		return nil, fmt.Errorf("could not open the local CVE catalogue: %w", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{Store: s, Sources: sources.New(s), ctx: ctx, cancel: cancel, active: map[string]activeRun{}}
-	err := s.Update(func(st *model.State) error {
+	e.CVE = cvedb.NewUpdater(catalogue)
+	e.Sources.LocalCVE = catalogue
+	err = s.Update(func(st *model.State) error {
 		for i := range st.Projects {
 			p := &st.Projects[i]
 			p.Syncing = false
@@ -63,7 +73,7 @@ func New(s *store.Store) (*Engine, error) {
 
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, errors.Join(err, e.CVE.Close())
 	}
 
 	e.wg.Add(1)
@@ -71,12 +81,26 @@ func New(s *store.Store) (*Engine, error) {
 	return e, nil
 }
 
-func (e *Engine) Close() { e.mu.Lock(); e.closed = true; e.cancel(); e.mu.Unlock(); e.wg.Wait() }
+func (e *Engine) Close() {
+	e.mu.Lock()
+	e.closed = true
+	e.cancel()
+	e.mu.Unlock()
+	e.wg.Wait()
+	e.cveClose.Do(func() {
+		if err := e.CVE.Close(); err != nil {
+			log.Printf("Closing CVE catalogue: %v", err)
+		}
+	})
+}
 
 func (e *Engine) loop() {
 	defer e.wg.Done()
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
+	if st, err := e.Store.Read(); err == nil {
+		e.updateCVEDue(time.Now(), st.Settings)
+	}
 	for {
 		select {
 		case <-e.ctx.Done():
@@ -86,6 +110,7 @@ func (e *Engine) loop() {
 			if err != nil {
 				continue
 			}
+			e.updateCVEDue(now, st.Settings)
 			for _, id := range dueProjects(st, now) {
 				_ = e.Start(id, "schedule")
 			}

@@ -42,6 +42,7 @@ func addLog(r *model.Run, stepID, event, detail string) *model.SyncLog {
 	if len(r.Logs) > model.MaxSyncLogs {
 		r.Logs = r.Logs[len(r.Logs)-model.MaxSyncLogs:]
 	}
+
 	return &r.Logs[len(r.Logs)-1]
 }
 
@@ -78,6 +79,7 @@ func (t *runTracker) update(fn func(*model.Run)) {
 			if p.ID != t.projectID {
 				continue
 			}
+
 			for j := range p.Runs {
 				r := &p.Runs[j]
 				if r.ID == t.runID {
@@ -112,6 +114,7 @@ func (t *runTracker) start(id string) {
 				case "scanner":
 					step.Progress.Phase = "queued"
 				}
+
 				addLog(r, id, "started", step.Component)
 				return
 			}
@@ -221,6 +224,7 @@ func (t *runTracker) scannerSetup(p model.Project, tools []string, skipReason st
 			}
 			return
 		}
+
 		addLog(r, "scanner", skipReason, "")
 		for i := range r.Steps {
 			if r.Steps[i].Kind == "scanner" {
@@ -242,12 +246,15 @@ func (t *runTracker) scannerEvent(event scanner.ScanEvent) {
 			}
 			detail += event.Err.Error()
 		}
+
 		entry := addLog(r, "scanner", event.Phase, detail)
 		entry.ScanTarget = event.Target
 		entry.ScanRepository = event.Repository
+
 		if event.Phase == "scanner_completed" {
 			entry.Findings = &event.Found
 		}
+
 		for i := range r.Steps {
 			step := &r.Steps[i]
 			if step.Kind != "scanner" {
@@ -278,6 +285,7 @@ func (t *runTracker) finish(id string, found int, err error) {
 			if step.ID != id {
 				continue
 			}
+
 			step.FinishedAt = time.Now()
 			step.Progress.Found = found
 			step.Progress.WaitSeconds = 0
@@ -285,6 +293,7 @@ func (t *runTracker) finish(id string, found int, err error) {
 			if err != nil {
 				step.Status = "failed"
 				event := "failed"
+
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					step.Status = "interrupted"
 					event = "interrupted"

@@ -119,19 +119,20 @@ type Project struct {
 }
 
 type Settings struct {
-	CacheHours      int               `json:"cache_hours"`
-	CacheMaxEntries int               `json:"cache_max_entries"`
-	CacheMaxMiB     int               `json:"cache_max_mib"`
-	Language        string            `json:"language"`
-	Sources         map[string]bool   `json:"sources"`
-	NVDURL          string            `json:"nvd_url"`
-	CVEURL          string            `json:"cve_url"`
-	OSVURL          string            `json:"osv_url"`
-	AIProvider      string            `json:"ai_provider"`
-	OpenAIModel     string            `json:"openai_model"`
-	ClaudeModel     string            `json:"claude_model"`
-	Scanners        map[string]bool   `json:"scanners"`
-	Tokens          map[string]string `json:"tokens,omitempty"`
+	CVEUpdateSchedule string            `json:"cve_update_schedule"`
+	CacheHours        int               `json:"cache_hours"`
+	CacheMaxEntries   int               `json:"cache_max_entries"`
+	CacheMaxMiB       int               `json:"cache_max_mib"`
+	Language          string            `json:"language"`
+	Sources           map[string]bool   `json:"sources"`
+	NVDURL            string            `json:"nvd_url"`
+	CVEURL            string            `json:"cve_url"`
+	OSVURL            string            `json:"osv_url"`
+	AIProvider        string            `json:"ai_provider"`
+	OpenAIModel       string            `json:"openai_model"`
+	ClaudeModel       string            `json:"claude_model"`
+	Scanners          map[string]bool   `json:"scanners"`
+	Tokens            map[string]string `json:"tokens,omitempty"`
 }
 
 type State struct {
@@ -140,6 +141,7 @@ type State struct {
 }
 
 const DefaultCacheMaxEntries = 10000
+const DefaultCVEURL = "https://cveawg.mitre.org/api/cve"
 const DefaultCacheMaxMiB = 512
 const MinCacheMaxEntries = 100
 const MaxCacheMaxEntries = 1000000
@@ -161,11 +163,12 @@ func CacheLimits(s Settings) (uint64, uint64) {
 
 func Defaults() State {
 	return State{Projects: []Project{}, Settings: Settings{
-		CacheHours:      6,
-		CacheMaxEntries: DefaultCacheMaxEntries, CacheMaxMiB: DefaultCacheMaxMiB,
+		CVEUpdateSchedule: "daily",
+		CacheHours:        6,
+		CacheMaxEntries:   DefaultCacheMaxEntries, CacheMaxMiB: DefaultCacheMaxMiB,
 		Language: "en", Sources: map[string]bool{"nvd": true, "cve": true, "osv": false},
 		NVDURL: "https://services.nvd.nist.gov/rest/json/cves/2.0",
-		CVEURL: "https://cveawg.mitre.org/api/cve", OSVURL: "https://api.osv.dev/v1/query",
+		CVEURL: DefaultCVEURL, OSVURL: "https://api.osv.dev/v1/query",
 		AIProvider: "public", Scanners: map[string]bool{}, Tokens: map[string]string{},
 	}}
 }

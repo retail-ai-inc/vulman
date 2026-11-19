@@ -23,6 +23,11 @@
 .workflow-logs::-webkit-scrollbar-thumb { background: #74886a; border: 2px solid #e7eddf; border-radius: 8px; }
 .workflow-logs::-webkit-scrollbar-thumb:hover,
 .workflow-logs::-webkit-scrollbar-thumb:active { background: #576d4f; }
+.cve-database-actions { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+.cve-database-actions [hidden] { display: none; }
+.cve-database-summary { margin-top: 16px; }
+.cve-database-summary p { margin-top: 8px; color: var(--muted); font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
+.cve-database-summary .form-error { color: var(--red); }
 
 .workflow-severity { margin-top: 12px; color: var(--muted); font-size: 10px; }
 .severity-counts { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 7px 0 0; padding: 0; list-style: none; }

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"vulman/internal/cvedb"
 	"vulman/internal/engine"
 	"vulman/internal/model"
 	"vulman/internal/remediation"
@@ -38,6 +39,7 @@ type ScanRepository struct {
 }
 
 type State struct {
+	CVEDatabase *cvedb.Stats `json:"cve_database,omitempty"`
 	*model.State
 	Version              string                      `json:"version"`
 	TokenStatus          map[string]bool             `json:"token_status"`
@@ -78,6 +80,13 @@ func (d *Desktop) StateSince(since string) (State, error) {
 	}
 
 	result := State{State: st, Version: prefix + version, CacheStats: cacheStats}
+	if d.engine != nil {
+		stats, err := d.engine.CVE.Stats()
+		if err != nil {
+			return State{}, errors.New("could not read the CVE database status")
+		}
+		result.CVEDatabase = &stats
+	}
 	if st != nil {
 		result.TokenStatus = map[string]bool{}
 		result.SavedTokenStatus = map[string]bool{}
@@ -317,6 +326,34 @@ func (d *Desktop) CheckScanner(ctx context.Context, name string) (scanner.CheckR
 	return scanner.Check(ctx, name)
 }
 
+func (d *Desktop) UpdateCVEDatabase() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed || d.engine == nil {
+		return errors.New("application is stopping")
+	}
+	return d.engine.UpdateCVEDatabase()
+}
+
+func (d *Desktop) StopCVEDatabaseUpdate() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed || d.engine == nil {
+		return errors.New("application is stopping")
+	}
+	d.engine.CVE.Stop()
+	return nil
+}
+
+func (d *Desktop) RebuildCVEDatabase() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed || d.engine == nil {
+		return errors.New("application is stopping")
+	}
+	return d.engine.RebuildCVEDatabase()
+}
+
 type SettingsInput struct {
 	model.Settings
 	ClearTokens []string `json:"clear_tokens"`
@@ -360,6 +397,9 @@ func (d *Desktop) SaveSettings(in SettingsInput) error {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	cfg := in.Settings
+	if cfg.CVEUpdateSchedule != "" && cfg.CVEUpdateSchedule != "off" && cfg.CVEUpdateSchedule != "hourly" && cfg.CVEUpdateSchedule != "daily" {
+		return errors.New("CVE database schedule must be manual, hourly, or daily")
+	}
 	if cfg.CacheHours == 0 {
 		cfg.CacheHours = 6
 	}
@@ -423,6 +463,12 @@ func (d *Desktop) SaveSettings(in SettingsInput) error {
 	}
 
 	err := d.store.Update(func(st *model.State) error {
+		if cfg.CVEUpdateSchedule == "" {
+			cfg.CVEUpdateSchedule = st.Settings.CVEUpdateSchedule
+			if cfg.CVEUpdateSchedule == "" {
+				cfg.CVEUpdateSchedule = "daily"
+			}
+		}
 		tokens := st.Settings.Tokens
 		if cfg.CacheMaxEntries == 0 {
 			cfg.CacheMaxEntries = st.Settings.CacheMaxEntries
@@ -453,6 +499,9 @@ func (d *Desktop) SaveSettings(in SettingsInput) error {
 
 	if err != nil {
 		return errors.New("could not save settings")
+	}
+	if d.engine != nil && (!cfg.Sources["cve"] || strings.TrimRight(cfg.CVEURL, "/") != model.DefaultCVEURL) {
+		d.engine.CVE.Stop()
 	}
 
 	return nil

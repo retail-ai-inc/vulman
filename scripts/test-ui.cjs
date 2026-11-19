@@ -226,6 +226,54 @@ test('idle polling sends the last version and keeps findings when cache metrics 
   assert.equal(run('state.settings.language'), 'en');
 });
 
+test('CVE database progress updates without replacing an unsaved Configuration form', () => {
+  const run = app();
+  run(`
+    state = {version:'1', projects:[], settings:{language:'en', sources:{}, scanners:{}, cve_update_schedule:'daily'}, token_status:{}};
+    location.hash = '#settings';
+    renderSettings();
+    const formHTML = $('#main').innerHTML;
+    $('#settings-form').draft = 'unsaved token';
+    applyPollingState({version:'1', cache_stats:{}, cve_database:{running:true, phase:'importing', imported:512, records:1000, bytes:1048576, resumable:true}});
+  `);
+  assert.equal(run(`$('#main').innerHTML === formHTML`), true);
+  assert.equal(run(`$('#settings-form').draft`), 'unsaved token');
+  assert.match(run(`$('#cve-database-status').innerHTML`), /Importing CVE records/);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /512 archive entries processed/);
+  assert.equal(run(`$('[data-action="update-cve-database"]').disabled`), true);
+  assert.equal(run(`$('[data-action="stop-cve-database"]').hidden`), false);
+  assert.match(run('cveDatabaseSettingsHTML()'), /name="cve_update_schedule"[^]*?value="daily" selected/);
+  run(`updateCVEDatabaseStatus({phase:'failed',error:'<private>',running:false});`);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /&lt;private&gt;/);
+  assert.equal(run(`$('[data-action="update-cve-database"]').disabled`), false);
+  run(`lang='ja';`);
+  assert.match(run('cveDatabaseSettingsHTML()'), /ローカル CVE データベース/);
+});
+
+test('CVE database actions call the native bridge and rebuilding requires confirmation', async () => {
+  const run = app();
+  run(`
+    state = {version:'1', projects:[], settings:{language:'en'}, cache_stats:{}};
+    location.hash = '#settings';
+    const requests = [];
+    invoke = async (...args) => { requests.push(args); return {version:'1',cache_stats:{},cve_database:{running:false,phase:'interrupted'}}; };
+    var allowRebuild = false;
+    confirmAction = async () => allowRebuild;
+    var action = {dataset:{action:'rebuild-cve-database'},closest:selector => selector === '[data-action]' ? action : null};
+  `);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests.length'), 0);
+  run('allowRebuild = true');
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[0][0]'), 'RebuildCVEDatabase');
+  run(`action.dataset.action = 'update-cve-database';`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[2][0]'), 'UpdateCVEDatabase');
+  run(`action.dataset.action = 'stop-cve-database';`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[4][0]'), 'StopCVEDatabaseUpdate');
+});
+
 test('configuration switches the data directory and shows a fallback warning', async () => {
   const requests = [];
   const run = app(async (...args) => {
