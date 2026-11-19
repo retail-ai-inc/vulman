@@ -374,13 +374,20 @@ printf '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CV
 		t.Fatalf("unexpected target versions: %+v", versions)
 	}
 	completed := map[string]bool{}
+	cleaned := map[string]bool{}
 	for _, entry := range p.Runs[0].Logs {
-		if entry.Event == "scanner_completed" {
+		switch entry.Event {
+		case "scanner_completed":
 			completed[entry.ScanTarget] = true
+		case "scanner_cleanup_completed":
+			if !completed[entry.ScanTarget] {
+				t.Fatalf("cleanup preceded scanner completion for %s", entry.ScanTarget)
+			}
+			cleaned[entry.ScanTarget] = true
 		}
 	}
-	if !completed["local"] || !completed["remote"] {
-		t.Fatalf("missing target-specific scanner logs: %+v", p.Runs[0].Logs)
+	if !cleaned["local"] || !cleaned["remote"] {
+		t.Fatalf("missing target-specific cleanup logs: %+v", p.Runs[0].Logs)
 	}
 	assertScanScratchEmpty(t, cloneRoot)
 
@@ -401,16 +408,19 @@ printf '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CV
 	}
 	p = awaitRun(t, s)
 	assertScanScratchEmpty(t, cloneRoot)
-	var localFailed, remoteFailed, legacyRejected bool
+	var localFailed, remoteFailed, legacyRejected, cleanedAfterFailure bool
 	remoteCompleted := map[string]bool{}
 	for _, entry := range p.Runs[0].Logs {
 		localFailed = localFailed || (entry.Event == "scanner_target_failed" && entry.ScanTarget == "local")
 		remoteFailed = remoteFailed || (entry.Event == "scanner_target_failed" && entry.ScanRepository == "github.com/owner/missing.git")
+		if entry.Event == "scanner_cleanup_completed" && entry.ScanRepository == "github.com/owner/missing.git" {
+			cleanedAfterFailure = remoteFailed
+		}
 		if entry.ScanRepository == "gitlab.com/owner/legacy.git" {
 			if entry.Event == "clone" {
 				t.Fatal("legacy non-GitHub repository reached the clone step")
 			}
-			legacyRejected = entry.Event == "scanner_target_failed"
+			legacyRejected = legacyRejected || entry.Event == "scanner_target_failed"
 		}
 		if entry.Event == "scanner_completed" && entry.ScanTarget == "remote" {
 			remoteCompleted[entry.ScanRepository] = true
@@ -418,6 +428,9 @@ printf '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CV
 	}
 	if p.Runs[0].Status != "partial" || !localFailed || !remoteFailed || !legacyRejected || !remoteCompleted["github.com/owner/project.git"] || !remoteCompleted["github.com/owner/second.git"] || len(p.Findings) != 3 {
 		t.Fatalf("target failures blocked the other scans or removed prior findings: %+v", p)
+	}
+	if !cleanedAfterFailure {
+		t.Fatal("temporary file cleanup was not logged after the failed clone")
 	}
 	remoteVersions := map[string]string{}
 	for _, finding := range p.Findings {

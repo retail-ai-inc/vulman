@@ -301,6 +301,8 @@
     "event_scanner_failed": "スキャナーが失敗",
     "event_scanner_interrupted": "スキャナーが中断",
     "event_scanner_target_failed": "スキャン対象を開けませんでした",
+    "event_scanner_cleanup_completed": "スキャンの一時ファイルを削除しました",
+    "event_scanner_cleanup_failed": "スキャンの一時ファイルを削除できませんでした",
     "phase_clone_auth": "GitHub 認証でリポジトリを複製中",
     "event_clone_auth": "GitHub 認証で再試行",
     "githubTokenLabel": "GitHub パーソナルアクセストークン",

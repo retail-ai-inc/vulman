@@ -463,15 +463,90 @@ test('changing project narrows the stack options and clears incompatible selecti
   assert.equal(run('filter.stack'),run(`stackKey('q','shared')`));
 });
 
-test('scanner components and removed inventory remain filterable',()=>{
+test('older inventory remains filterable and unattributed scanner findings stay in the Code scanner match filter',()=>{
   const run=app();inventory(run);
   const options=run(`techStackFilterHTML('p')`);
-  assert.match(options,/Code scanner · indirect 2/);
+  assert.doesNotMatch(options,/Code scanner · indirect 2/);
   assert.match(options,/Previous inventory · retired-library 0.1/);
-  run(`filter.stack=stackKey('p','code:indirect')`);
+  run(`filter.match='scanner'`);
   assert.deepEqual(findingIDs(run(`findingsTable('p')`)),['CVE-CODE']);
-  run(`filter.stack=stackKey('p','retired')`);
+  run(`filter.match=''; filter.stack=stackKey('p','retired')`);
   assert.deepEqual(findingIDs(run(`findingsTable('p')`)),['CVE-OLD']);
+});
+
+test('scanner findings are grouped under registered repositories and use location-specific severity counts', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const firstRepo = 'remote:' + 'a'.repeat(64);
+    const secondRepo = 'remote:' + 'b'.repeat(64);
+    const unregisteredRepo = 'remote:' + 'c'.repeat(64);
+    const repoLabel = 'github.com/owner/main';
+    const [first, second] = state.projects;
+    first.local_path = '/checkout';
+    state.scan_repositories = {
+      p:[{key:firstRepo,label:repoLabel},{key:secondRepo,label:'github.com/owner/empty'}],
+      q:[{key:firstRepo,label:repoLabel}],
+    };
+    const codeFinding = (id, asset_id, component, severity, repository=repoLabel) =>
+      ({id, asset_id, component, severity, title:id, match:'scanner', scan_repository:repository, sources:['Trivy']});
+    first.findings.push(
+      codeFinding('CVE-R1','code:'+firstRepo+':dependency-one','dependency-one','CRITICAL'),
+      codeFinding('CVE-R2','code:'+firstRepo+':dependency-two','dependency-two','HIGH'),
+      codeFinding('CVE-LEGACY','code:legacy-package','legacy-package','LOW'),
+      codeFinding('CVE-REMOVED','code:'+unregisteredRepo+':old','old','CRITICAL','github.com/owner/removed'),
+      {...codeFinding('CVE-LOCAL','code:local:dependency-three','dependency-three','MEDIUM',''), scan_target:'local'},
+    );
+    second.findings.push(codeFinding('CVE-OTHER-PROJECT','code:'+firstRepo+':dependency-one','dependency-one','CRITICAL'));
+  `);
+  const global = run('techStackFilterHTML()');
+  assert.match(global, /Project One · Code scanner · github\.com\/owner\/main/);
+  assert.match(global, /Project Two · Code scanner · github\.com\/owner\/main/);
+  assert.match(global, /Project One · Code scanner · Local folder/);
+  const local = run(`techStackFilterHTML('p')`);
+  assert.equal((local.match(/Code scanner · github\.com\/owner\/main/g) || []).length, 1);
+  assert.match(local, /Code scanner · github\.com\/owner\/empty/);
+  assert.doesNotMatch(local, /dependency-|legacy-package|indirect|owner\/removed|Project Two/);
+
+  run(`filter.stack=scanLocationKey('p', firstRepo);`);
+  let table = run('findingsTable()');
+  assert.deepEqual(findingIDs(table), ['CVE-R1','CVE-R2','CVE-LEGACY']);
+  assert.match(table, /Critical <strong>1<\/strong>/);
+  assert.match(table, /High <strong>1<\/strong>/);
+  assert.match(table, /Medium <strong>0<\/strong>/);
+  assert.match(table, /Low <strong>1<\/strong>/);
+  assert.match(table, /Unrated <strong>0<\/strong>/);
+  run(`filter.severity='HIGH';`);
+  table = run(`findingsTable('p')`);
+  assert.deepEqual(findingIDs(table), ['CVE-R2']);
+  assert.match(table, /Showing 1 match /);
+  assert.match(table, /Critical <strong>1<\/strong>/);
+  run(`filter.search='dependency-two';`);
+  assert.match(run(`findingsTable('p')`), /Critical <strong>0<\/strong>/);
+  run(`filter.search=''; filter.severity=''; filter.stack=scanLocationKey('p', secondRepo);`);
+  table = run(`findingsTable('p')`);
+  assert.match(table, /Showing 0 matches /);
+  assert.equal([...table.matchAll(/<strong>0<\/strong>/g)].length, 5);
+  run(`filter.stack=scanLocationKey('p','local');`);
+  assert.deepEqual(findingIDs(run(`findingsTable('p')`)), ['CVE-LOCAL']);
+});
+
+test('repositories sharing a display label keep their scanner findings separate', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const first = 'remote:' + 'a'.repeat(64), second = 'remote:' + 'b'.repeat(64);
+    const label = 'github.com/owner/demo';
+    state.scan_repositories = {p:[{key:first,label},{key:second,label}]};
+    state.projects[0].findings = [first, second, 'legacy'].map((target, i) => ({
+      id:'CVE-'+i, asset_id:'code:'+target+':demo', scan_repository:label, match:'scanner', severity:'HIGH', sources:['Trivy'],
+    }));
+    filter.stack = scanLocationKey('p', second);
+  `);
+  const options = run(`techStackFilterHTML('p')`);
+  assert.match(options, /github\.com\/owner\/demo \(1\)/);
+  assert.match(options, /github\.com\/owner\/demo \(2\)/);
+  assert.deepEqual(findingIDs(run(`findingsTable('p')`)), ['CVE-1']);
 });
 
 test('stack filters localize labels and escape component and project names',()=>{
@@ -641,6 +716,7 @@ test('show more expands vertical steps and timestamped logs and show less shrink
   assert.match(html,/workflow-stepper/);
   assert.match(html,/CVE Program/);
   assert.match(html,/Workflow run logs/);
+  assert.match(html,/<ol class="workflow-logs" tabindex="0" aria-label="Workflow run logs">/);
   assert.match(html,/<time>/);
   run(`workflow.steps[0].progress.phase='page'`);
   assert.match(run('workflowBody(project,workflow)'),/Show less/);
@@ -741,19 +817,25 @@ test('code scanner findings and workflow logs identify each repository location'
     const locations = ['local', 'remote'];
     workflow.logs = locations.map(scan_target => ({at:workflow.started_at, step_id:'scanner', event:'scanner_completed', detail:'trivy', scan_target, findings:1}));
     workflow.logs.push({at:workflow.started_at, step_id:'scanner', event:'scanner_target_failed', detail:'repository folder is unavailable', scan_target:'local'});
+    workflow.logs.push(
+      {at:workflow.started_at, step_id:'scanner', event:'scanner_cleanup_completed', scan_target:'remote', scan_repository:'github.com/owner/repo'},
+      {at:workflow.started_at, step_id:'scanner', event:'scanner_cleanup_failed', scan_target:'local', detail:'<permission denied>'},
+    );
     const findings = locations.map((scan_target, i) => ({id:'CVE-both', asset_id:'code:'+scan_target+':demo', scan_target, component:'demo', version:String(i+1), title:'Advisory', match:'scanner', severity:'HIGH', sources:['Trivy']}));
-    state = {projects:[{...project, assets:[], findings}]};
+    state = {projects:[{...project, assets:[], findings, local_path:'/checkout'}]};
     expandedRuns.add(workflow.id);
   `);
   const logs = run('workflowBody(project,workflow)');
   assert.match(logs,/Local folder · Scanner completed · Trivy/);
   assert.match(logs,/Remote repository · Scanner completed · Trivy/);
   assert.match(logs,/class="workflow-log-error"[^]*?Local folder · Could not open scan target/);
+  assert.match(logs,/<strong>Code scanners · github\.com\/owner\/repo · Temporary scan files removed<\/strong>/);
+  assert.match(logs,/class="workflow-log-error"><time>[^<]+<\/time><span><strong>Code scanners · Local folder · Could not remove temporary scan files · &lt;permission denied&gt;<\/strong>/);
   const table = run(`findingsTable('p')`);
   assert.equal(findingIDs(table).length,2);
   assert.match(table,/1 · Local folder/);
   assert.match(table,/2 · Remote repository/);
-  run(`filter.stack=stackKey('p','code:remote:demo')`);
+  run(`filter.stack=scanLocationKey('p','local')`);
   assert.equal(findingIDs(run(`findingsTable('p')`)).length,1);
 });
 
@@ -1401,7 +1483,7 @@ test('Projects list opens the editor directly and polling leaves its draft mount
   assert.equal(run('mounts.length'), 1);
 });
 
-test('Projects list shows configured URL counts and each project’s Critical findings', () => {
+test('Overview and Projects show the same repository URL and Critical finding counts', () => {
   const run = app();
   inventory(run);
   run(`
@@ -1411,19 +1493,21 @@ test('Projects list shows configured URL counts and each project’s Critical fi
     first.findings[0].severity = first.findings[2].severity = 'CRITICAL';
     first.runs = [{status:'complete', count:99}];
     second.repository = 'https://github.com/owner/legacy';
+    state.settings = {language:'en', sources:{}};
     filter.severity = 'LOW';
-    location.hash = '#projects';
-    render();
   `);
-  const projectRows = run(`$('#main').innerHTML`).split('<div class="project-list-row">').slice(1);
-  assert.match(projectRows[0], /<span>2 components<\/span><span>2 repository URLs<\/span><span class="pill critical">Critical 2<\/span>/);
-  assert.match(projectRows[1], /<span>1 repository URL<\/span><span class="pill ">Critical 0<\/span>/);
+  for (const page of ['projects', 'overview']) {
+    run(`location.hash = '#${page}'; render();`);
+    const summaries = run(`$('#main').innerHTML`).match(/<p class="project-list-summary">.*?<\/p>/g) || [];
+    assert.equal(summaries.length, 2);
+    assert.match(summaries[0], /<span>2 components<\/span><span>2 repository URLs<\/span><span class="pill critical">Critical 2<\/span>/);
+    assert.match(summaries[1], /<span>1 repository URL<\/span><span class="pill ">Critical 0<\/span>/);
+  }
 
   run(`second.repository_urls = []; second.local_path = '/checkout';`);
-  assert.doesNotMatch(run('projectList([second], true)'), /repository URL/);
-  assert.doesNotMatch(run('projectList([first])'), /project-list-summary/);
+  assert.doesNotMatch(run('projectList([second])'), /repository URL/);
   run(`lang = 'ja'; first.findings = Array.from({length:1001}, () => ({severity:'CRITICAL'}));`);
-  assert.match(run('projectList([first], true)'), /リポジトリ URL 2 件<\/span><span class="pill critical">緊急 1,001<\/span>/);
+  assert.match(run('projectList([first])'), /リポジトリ URL 2 件<\/span><span class="pill critical">緊急 1,001<\/span>/);
 });
 
 test('Edit project opens a dedicated deletion page and cancelling restores the draft', async () => {
@@ -1657,9 +1741,33 @@ test('partial workflows keep the short badge and show a localized completion mes
 test('polling preserves paused and finished workflow panels until their details are toggled',()=>{
   for (const status of ['paused', 'partial']) {
     const run=app();workflowFixture(run);
-    run(`workflow.status=${JSON.stringify(status)};state={projects:[{...project,runs:[workflow]}]};var panel={dataset:{syncProjectId:'p',syncRun:'run-1'},innerHTML:'existing DOM'};document.querySelectorAll=()=>[panel];updateSyncPanels()`);
+    run(`workflow.status=${JSON.stringify(status)};state={projects:[{...project,runs:[workflow]}]};var panel={dataset:{syncProjectId:'p',syncRun:'run-1'},innerHTML:'existing DOM',querySelector:()=>null};document.querySelectorAll=()=>[panel];updateSyncPanels()`);
     assert.equal(run('panel.innerHTML'),'existing DOM');
     run(`toggleWorkflow('run-1')`);
     assert.match(run('panel.innerHTML'),/Show less/);
   }
+});
+
+test('live workflow updates preserve the log scroll position and keyboard focus', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    state = {projects:[{...project,runs:[workflow]}]};
+    const originalLogs = {scrollTop:148};
+    const updatedLogs = {scrollTop:0,focus(options){this.focusOptions = options;}};
+    let refreshed = false;
+    const panel = {
+      dataset:{syncProjectId:'p',syncRun:'run-1'},
+      set innerHTML(value) {refreshed = true;},
+      querySelector(selector) {
+        if (selector === '.workflow-logs') return refreshed ? updatedLogs : originalLogs;
+        return null;
+      },
+    };
+    document.activeElement = originalLogs;
+    document.querySelectorAll = () => [panel];
+    updateSyncPanels();
+  `);
+  assert.equal(run('updatedLogs.scrollTop'), 148);
+  assert.equal(run('updatedLogs.focusOptions.preventScroll'), true);
 });

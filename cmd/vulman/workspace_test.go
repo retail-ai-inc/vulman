@@ -12,6 +12,7 @@ import (
 
 	"vulman/internal/engine"
 	"vulman/internal/model"
+	"vulman/internal/scanner"
 	"vulman/internal/store"
 )
 
@@ -71,7 +72,7 @@ func TestStateSinceReturnsDataOnlyAfterACommittedChange(t *testing.T) {
 
 func TestProjectRepositoryURLsPersistThroughDesktopUpdate(t *testing.T) {
 	desktop := &Desktop{store: newTestStore(t)}
-	urls := []string{"https://github.com/owner/first.git", "https://github.com/owner/second.git"}
+	urls := []string{"https://github.com/owner/first.git", "https://github.com/owner/second.git?tab=readme#overview"}
 	project, err := desktop.CreateProject(ProjectInput{Name: "Demo", Schedule: "off", Repository: urls[0], ScanCode: true})
 	if err != nil {
 		t.Fatal(err)
@@ -85,6 +86,13 @@ func TestProjectRepositoryURLsPersistThroughDesktopUpdate(t *testing.T) {
 	}
 	if stored := state.Projects[0]; !reflect.DeepEqual(stored.Repositories(), urls) || stored.Repository != urls[0] {
 		t.Fatalf("unexpected saved repository URLs: %+v", stored.Repositories())
+	}
+	want := []ScanRepository{
+		{Key: scanner.RemoteTargetKey(urls[0]), Label: "github.com/owner/first.git"},
+		{Key: scanner.RemoteTargetKey(urls[1]), Label: "github.com/owner/second.git"},
+	}
+	if got := state.ScanRepositories[project.ID]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected scan repository identifiers in the workspace: %+v", got)
 	}
 }
 

@@ -212,7 +212,10 @@ func scanRepository(ctx context.Context, root *os.Root, kind, location string, e
 	defer func() {
 		if err := scratch.remove(); err != nil {
 			warnings = append(warnings, fmt.Sprintf("Could not remove temporary scan files: %v", err))
+			report(ScanEvent{Phase: "scanner_cleanup_failed", Err: err})
+			return
 		}
+		report(ScanEvent{Phase: "scanner_cleanup_completed"})
 	}()
 	dir := location
 	if kind == "remote" {

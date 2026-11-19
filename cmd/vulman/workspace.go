@@ -32,16 +32,22 @@ type Desktop struct {
 	chooseDirectory     func(title, directory string) (string, error)
 }
 
+type ScanRepository struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
 type State struct {
 	*model.State
-	Version              string           `json:"version"`
-	TokenStatus          map[string]bool  `json:"token_status"`
-	SavedTokenStatus     map[string]bool  `json:"saved_token_status,omitempty"`
-	StoragePaths         store.Paths      `json:"storage_paths,omitzero"`
-	CacheStats           store.CacheStats `json:"cache_stats"`
-	DataDirectory        string           `json:"data_directory,omitempty"`
-	DefaultDataDirectory string           `json:"default_data_directory,omitempty"`
-	StorageWarning       string           `json:"storage_warning,omitempty"`
+	Version              string                      `json:"version"`
+	TokenStatus          map[string]bool             `json:"token_status"`
+	SavedTokenStatus     map[string]bool             `json:"saved_token_status,omitempty"`
+	ScanRepositories     map[string][]ScanRepository `json:"scan_repositories,omitempty"`
+	StoragePaths         store.Paths                 `json:"storage_paths,omitzero"`
+	CacheStats           store.CacheStats            `json:"cache_stats"`
+	DataDirectory        string                      `json:"data_directory,omitempty"`
+	DefaultDataDirectory string                      `json:"default_data_directory,omitempty"`
+	StorageWarning       string                      `json:"storage_warning,omitempty"`
 }
 
 func (d *Desktop) State() (State, error) {
@@ -78,6 +84,17 @@ func (d *Desktop) StateSince(since string) (State, error) {
 			}
 		}
 		st.Settings.Tokens = nil
+		result.ScanRepositories = make(map[string][]ScanRepository)
+		for _, project := range st.Projects {
+			for _, repository := range project.Repositories() {
+				label := scanner.RepositoryLabel(repository)
+				if label != "" {
+					result.ScanRepositories[project.ID] = append(result.ScanRepositories[project.ID], ScanRepository{
+						Key: scanner.RemoteTargetKey(repository), Label: label,
+					})
+				}
+			}
+		}
 		result.StoragePaths = d.store.Paths()
 		result.DataDirectory = filepath.Dir(result.StoragePaths.Database)
 		result.DefaultDataDirectory = d.defaultDirectory

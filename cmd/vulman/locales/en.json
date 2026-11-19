@@ -301,6 +301,8 @@
     "event_scanner_failed": "Scanner failed",
     "event_scanner_interrupted": "Scanner interrupted",
     "event_scanner_target_failed": "Could not open scan target",
+    "event_scanner_cleanup_completed": "Temporary scan files removed",
+    "event_scanner_cleanup_failed": "Could not remove temporary scan files",
     "phase_clone_auth": "Cloning with GitHub authentication",
     "event_clone_auth": "Retrying with GitHub authentication",
     "githubTokenLabel": "GitHub personal access token",

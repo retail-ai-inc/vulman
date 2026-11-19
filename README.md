@@ -60,7 +60,7 @@ Severity-specific syncs leave the full-project last-complete timestamp, assessed
 
 Both a project's **Vulnerabilities** tab and the left-side **Vulnerabilities** view include a **Tech stack** filter, defaulting to **All tech stacks**. Select a component to show only its findings, combined with the existing search, severity, and match filters.
 
-The global view includes project names in component labels. Its project filter narrows the tech-stack options and clears an incompatible selection. Scanner-reported components and retained findings from removed inventory remain selectable. Filtering changes the displayed list only; it does not trigger a sync.
+The global view includes project names in the option labels. Its project filter narrows the options and clears an incompatible selection. Code scanner options represent registered repository URLs and local folders. Select a scan location to see counts for every severity across its findings that match your search and match-type filters. The severity filter narrows the table rows. Use the **Code scanner** match filter to review older findings whose scan location was unavailable.
 
 Both views show a live result count above the list, such as **Showing 3 of 12 vulnerabilities**, including zero matches. The project's tab compares against all findings in that project; the global view compares against findings across all projects. The count updates for search, tech stack, severity, project, and match-type filters.
 
