@@ -15,6 +15,8 @@ import (
 	"vulman/internal/cvedb"
 	"vulman/internal/engine"
 	"vulman/internal/model"
+	"vulman/internal/nvddb"
+	"vulman/internal/osvdb"
 	"vulman/internal/remediation"
 	"vulman/internal/scanner"
 	"vulman/internal/store"
@@ -39,7 +41,11 @@ type ScanRepository struct {
 }
 
 type State struct {
-	CVEDatabase *cvedb.Stats `json:"cve_database,omitempty"`
+	OSVDatabase            *osvdb.Stats `json:"osv_database,omitempty"`
+	OSVEcosystemOptions    []string     `json:"osv_ecosystem_options,omitempty"`
+	OSVSuggestedEcosystems []string     `json:"osv_suggested_ecosystems,omitempty"`
+	NVDDatabase            *nvddb.Stats `json:"nvd_database,omitempty"`
+	CVEDatabase            *cvedb.Stats `json:"cve_database,omitempty"`
 	*model.State
 	Version              string                      `json:"version"`
 	TokenStatus          map[string]bool             `json:"token_status"`
@@ -86,8 +92,29 @@ func (d *Desktop) StateSince(since string) (State, error) {
 			return State{}, errors.New("could not read the CVE database status")
 		}
 		result.CVEDatabase = &stats
+		nvdStats, err := d.engine.NVD.Stats()
+		if err != nil {
+			return State{}, errors.New("could not read the NVD database status")
+		}
+		result.NVDDatabase = &nvdStats
+		osvStats, err := d.engine.OSV.Stats()
+		if err != nil {
+			return State{}, errors.New("could not read the OSV database status")
+		}
+
+		result.OSVDatabase = &osvStats
 	}
 	if st != nil {
+		result.OSVEcosystemOptions = slices.Clone(osvdb.Ecosystems)
+		suggestions := *st
+		suggestions.Settings.OSVEcosystems = nil
+		result.OSVSuggestedEcosystems = engine.OSVEcosystems(suggestions)
+		for _, value := range append(slices.Clone(result.OSVSuggestedEcosystems), st.Settings.OSVEcosystems...) {
+			if !slices.Contains(result.OSVEcosystemOptions, value) {
+				result.OSVEcosystemOptions = append(result.OSVEcosystemOptions, value)
+			}
+		}
+
 		result.TokenStatus = map[string]bool{}
 		result.SavedTokenStatus = map[string]bool{}
 		for k, v := range model.EffectiveSettings(st.Settings).Tokens {
@@ -149,6 +176,7 @@ func (d *Desktop) CreateProject(in ProjectInput) (model.Project, error) {
 	p.UpdatedAt = p.CreatedAt
 	p.Findings = []model.Finding{}
 	p.Runs = []model.Run{}
+	markChangedComponents(model.Project{}, &p)
 	if d := model.Interval(p.Schedule); d > 0 {
 		p.NextRun = p.CreatedAt.Add(d)
 	}
@@ -197,6 +225,7 @@ func (d *Desktop) UpdateProject(id string, in ProjectInput) (model.Project, erro
 				return err
 			}
 
+			markChangedComponents(*old, &p)
 			removeProjectResults(old, p)
 			old.Name = p.Name
 			old.Description = p.Description
@@ -354,6 +383,63 @@ func (d *Desktop) RebuildCVEDatabase() error {
 	return d.engine.RebuildCVEDatabase()
 }
 
+func (d *Desktop) UpdateNVDDatabase() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed || d.engine == nil {
+		return errors.New("application is stopping")
+	}
+	return d.engine.UpdateNVDDatabase()
+}
+func (d *Desktop) RebuildNVDDatabase() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed || d.engine == nil {
+		return errors.New("application is stopping")
+	}
+	return d.engine.RebuildNVDDatabase()
+}
+func (d *Desktop) StopNVDDatabaseUpdate() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed || d.engine == nil {
+		return errors.New("application is stopping")
+	}
+	d.engine.NVD.Stop()
+	return nil
+}
+
+func (d *Desktop) UpdateOSVDatabase() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed || d.engine == nil {
+		return errors.New("application is stopping")
+	}
+
+	return d.engine.UpdateOSVDatabase()
+}
+
+func (d *Desktop) RebuildOSVDatabase() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed || d.engine == nil {
+		return errors.New("application is stopping")
+	}
+
+	return d.engine.RebuildOSVDatabase()
+}
+
+func (d *Desktop) StopOSVDatabaseUpdate() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed || d.engine == nil {
+		return errors.New("application is stopping")
+	}
+
+	d.engine.OSV.Stop()
+	return nil
+}
+
 type SettingsInput struct {
 	model.Settings
 	ClearTokens []string `json:"clear_tokens"`
@@ -397,6 +483,22 @@ func (d *Desktop) SaveSettings(in SettingsInput) error {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	cfg := in.Settings
+	if cfg.OSVUpdateSchedule != "" && cfg.OSVUpdateSchedule != "off" && cfg.OSVUpdateSchedule != "hourly" && cfg.OSVUpdateSchedule != "daily" {
+		return errors.New("OSV database schedule must be manual, hourly, or daily")
+	}
+
+	if cfg.OSVEcosystems != nil {
+		selected, err := osvdb.NormalizeEcosystems(cfg.OSVEcosystems)
+		if err != nil {
+			return err
+		}
+
+		cfg.OSVEcosystems = append([]string{}, selected...)
+	}
+
+	if cfg.NVDUpdateSchedule != "" && cfg.NVDUpdateSchedule != "off" && cfg.NVDUpdateSchedule != "two_hourly" && cfg.NVDUpdateSchedule != "daily" {
+		return errors.New("NVD database schedule must be manual, every two hours, or daily")
+	}
 	if cfg.CVEUpdateSchedule != "" && cfg.CVEUpdateSchedule != "off" && cfg.CVEUpdateSchedule != "hourly" && cfg.CVEUpdateSchedule != "daily" {
 		return errors.New("CVE database schedule must be manual, hourly, or daily")
 	}
@@ -463,6 +565,23 @@ func (d *Desktop) SaveSettings(in SettingsInput) error {
 	}
 
 	err := d.store.Update(func(st *model.State) error {
+		if cfg.OSVUpdateSchedule == "" {
+			cfg.OSVUpdateSchedule = st.Settings.OSVUpdateSchedule
+			if cfg.OSVUpdateSchedule == "" {
+				cfg.OSVUpdateSchedule = "daily"
+			}
+		}
+
+		if cfg.OSVEcosystems == nil {
+			cfg.OSVEcosystems = st.Settings.OSVEcosystems
+		}
+
+		if cfg.NVDUpdateSchedule == "" {
+			cfg.NVDUpdateSchedule = st.Settings.NVDUpdateSchedule
+			if cfg.NVDUpdateSchedule == "" {
+				cfg.NVDUpdateSchedule = "daily"
+			}
+		}
 		if cfg.CVEUpdateSchedule == "" {
 			cfg.CVEUpdateSchedule = st.Settings.CVEUpdateSchedule
 			if cfg.CVEUpdateSchedule == "" {
@@ -502,6 +621,23 @@ func (d *Desktop) SaveSettings(in SettingsInput) error {
 	}
 	if d.engine != nil && (!cfg.Sources["cve"] || strings.TrimRight(cfg.CVEURL, "/") != model.DefaultCVEURL) {
 		d.engine.CVE.Stop()
+	}
+	if d.engine != nil && (!cfg.Sources["nvd"] || strings.TrimRight(cfg.NVDURL, "/") != model.DefaultNVDURL) {
+		d.engine.NVD.Stop()
+	}
+	if d.engine != nil {
+		// Apply a new selection on the next update. Cancellation leaves committed
+		// catalogues available and cannot publish an incomplete replacement.
+		stats, readErr := d.engine.OSV.Stats()
+		selection := engine.OSVEcosystems(model.State{Settings: cfg})
+		changed := false
+		for _, item := range stats.Ecosystems {
+			changed = changed || item.Running && cfg.OSVEcosystems != nil && !slices.Contains(selection, item.Ecosystem)
+		}
+
+		if !cfg.Sources["osv"] || strings.TrimRight(cfg.OSVURL, "/") != model.DefaultOSVURL || readErr == nil && changed {
+			d.engine.OSV.Stop()
+		}
 	}
 
 	return nil

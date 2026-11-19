@@ -119,6 +119,55 @@ func TestVerifiedImportResumesSavedCursorAndSupportsNestedZIP(t *testing.T) {
 	}
 }
 
+func TestImportProgressReportsArchiveEntriesAndCommittedCheckpointAfterFailure(t *testing.T) {
+	s := testCatalogue(t)
+	var out bytes.Buffer
+	z := zip.NewWriter(&out)
+	readme, err := z.Create("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := io.WriteString(readme, "Public CVE data"); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 600; i++ {
+		id := fmt.Sprintf("CVE-2026-%04d", i+1)
+		file, err := z.Create("cves/2026/0xxx/" + id + ".json")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		payload := fmt.Sprintf(`{"cveMetadata":{"cveId":%q,"state":"PUBLISHED"},"containers":{"cna":{"title":"Example"}}}`, id)
+		if i == 300 {
+			payload = "invalid JSON"
+		}
+
+		if _, err := io.WriteString(file, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := z.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.root.WriteFile(downloadFile, out.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	u := NewUpdater(s)
+	if err := u.importArchive(context.Background(), testArchive(out.Bytes(), true, time.Now().UTC())); err == nil {
+		t.Fatal("invalid record was accepted")
+	}
+
+	stats, err := u.Stats()
+	if err != nil || stats.ImportTotal != 601 || stats.Imported != 257 || stats.Initialized {
+		t.Fatalf("progress confused archive entries with records or uncommitted work: %+v %v", stats, err)
+	}
+}
+
 func TestFailedDownloadKeepsActiveCatalogueAndCheckpoint(t *testing.T) {
 	s := testCatalogue(t)
 	r := testRecord("CVE-2026-9999")

@@ -12,10 +12,14 @@ import (
 
 	"vulman/internal/cvedb"
 	"vulman/internal/model"
+	"vulman/internal/nvddb"
+	"vulman/internal/osvdb"
 	"vulman/internal/store"
 )
 
 type Client struct {
+	LocalOSV    *osvdb.Store
+	LocalNVD    *nvddb.Store
 	LocalCVE    *cvedb.Store
 	HTTP        *http.Client
 	mu          sync.Mutex
@@ -71,21 +75,7 @@ func (c *Client) pace(ctx context.Context, key string, reports ...func(model.Syn
 	}
 }
 
-type nvdMetric struct {
-	CVSSData struct {
-		BaseScore    float64 `json:"baseScore"`
-		BaseSeverity string  `json:"baseSeverity"`
-	} `json:"cvssData"`
-}
-type nvdRecord struct {
-	ID           string                         `json:"id"`
-	VulnStatus   string                         `json:"vulnStatus"`
-	Descriptions []struct{ Lang, Value string } `json:"descriptions"`
-	References   []struct {
-		URL string `json:"url"`
-	} `json:"references"`
-	Metrics map[string][]nvdMetric `json:"metrics"`
-}
+type nvdRecord = nvddb.Record
 
 func (c *Client) fetchNVD(ctx context.Context, a model.Asset, s model.Settings, reports ...func(model.SyncProgress)) ([]model.Finding, error) {
 	out := []model.Finding{}
@@ -134,27 +124,7 @@ func (c *Client) fetchNVD(ctx context.Context, a model.Asset, s model.Settings, 
 			if strings.EqualFold(v.VulnStatus, "Rejected") {
 				continue
 			}
-			f := model.Finding{ID: v.ID, AssetID: a.ID, Component: a.Name, Version: a.Version, Severity: "UNKNOWN", Sources: []string{"NVD"}, Match: match, References: []string{}, FixedVersions: []string{}}
-			for _, d := range v.Descriptions {
-				if d.Lang == "en" {
-					f.Description = d.Value
-					break
-				}
-			}
-			f.Title = f.Description
-			if len(f.Title) > 180 {
-				f.Title = truncate(f.Title, 180) + "…"
-			}
-			for _, k := range []string{"cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"} {
-				if ms := v.Metrics[k]; len(ms) > 0 {
-					f.Score = ms[0].CVSSData.BaseScore
-					f.Severity = model.Severity(f.Score)
-					break
-				}
-			}
-			for _, r := range v.References {
-				f.References = Unique(f.References, r.URL)
-			}
+			f := nvdFinding(v, a, match)
 			out = append(out, f)
 		}
 		start += len(data.Vulnerabilities)
@@ -167,6 +137,31 @@ func (c *Client) fetchNVD(ctx context.Context, a model.Asset, s model.Settings, 
 		}
 	}
 	return out, fmt.Errorf("NVD result limit reached; narrow the query using an exact CPE")
+}
+
+func nvdFinding(v nvdRecord, a model.Asset, match string) model.Finding {
+	f := model.Finding{ID: v.ID, AssetID: a.ID, Component: a.Name, Version: a.Version, Severity: "UNKNOWN", Sources: []string{"NVD"}, Match: match, References: []string{}, FixedVersions: []string{}}
+	for _, d := range v.Descriptions {
+		if d.Lang == "en" {
+			f.Description = d.Value
+			break
+		}
+	}
+	f.Title = f.Description
+	if len(f.Title) > 180 {
+		f.Title = truncate(f.Title, 180) + "…"
+	}
+	for _, k := range []string{"cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"} {
+		if ms := v.Metrics[k]; len(ms) > 0 {
+			f.Score = ms[0].CVSSData.BaseScore
+			f.Severity = model.Severity(f.Score)
+			break
+		}
+	}
+	for _, r := range v.References {
+		f.References = Unique(f.References, r.URL)
+	}
+	return f
 }
 
 func truncate(s string, n int) string {
@@ -215,27 +210,7 @@ func (c *Client) fetchCVE(ctx context.Context, id string, s model.Settings) (str
 	return data.Containers.CNA.Title, refs, nil
 }
 
-type osvRecord struct {
-	ID, Summary, Details string
-	Withdrawn            string   `json:"withdrawn"`
-	Aliases              []string `json:"aliases"`
-	DatabaseSpecific     struct {
-		Severity string `json:"severity"`
-	} `json:"database_specific"`
-	References []struct{ URL string } `json:"references"`
-	Affected   []struct {
-		Package           struct{ Name, Ecosystem string } `json:"package"`
-		EcosystemSpecific struct {
-			Severity string `json:"severity"`
-		} `json:"ecosystem_specific"`
-		Ranges []struct {
-			Type   string `json:"type"`
-			Events []struct {
-				Fixed string `json:"fixed"`
-			} `json:"events"`
-		} `json:"ranges"`
-	} `json:"affected"`
-}
+type osvRecord = osvdb.Record
 
 func (c *Client) fetchOSV(ctx context.Context, a model.Asset, s model.Settings, reports ...func(model.SyncProgress)) ([]model.Finding, error) {
 	out := []model.Finding{}
@@ -265,44 +240,7 @@ func (c *Client) fetchOSV(ctx context.Context, a model.Asset, s model.Settings, 
 			if v.Withdrawn != "" {
 				continue
 			}
-			sev := strings.ToUpper(v.DatabaseSpecific.Severity)
-			f := model.Finding{ID: v.ID, AssetID: a.ID, Component: a.Name, Version: a.Version, Title: v.Summary, Description: v.Details, Severity: sev, Sources: []string{"OSV"}, Match: "package", Aliases: v.Aliases, References: []string{}, FixedVersions: []string{}}
-			if f.Title == "" {
-				f.Title = truncate(v.Details, 180)
-			}
-			for _, alias := range v.Aliases {
-				if strings.HasPrefix(alias, "CVE-") {
-					f.ID = alias
-					break
-				}
-			}
-			for _, r := range v.References {
-				f.References = Unique(f.References, r.URL)
-			}
-			for _, a2 := range v.Affected {
-				if a2.Package.Name != a.Name || a2.Package.Ecosystem != a.Ecosystem {
-					continue
-				}
-				if f.Severity == "" {
-					f.Severity = strings.ToUpper(a2.EcosystemSpecific.Severity)
-				}
-				for _, r := range a2.Ranges {
-					if r.Type == "GIT" {
-						continue
-					}
-					for _, e := range r.Events {
-						if e.Fixed != "" {
-							f.FixedVersions = Unique(f.FixedVersions, e.Fixed)
-						}
-					}
-				}
-			}
-			if f.Severity == "MODERATE" {
-				f.Severity = "MEDIUM"
-			}
-			if model.Rank(f.Severity) == 1 {
-				f.Severity = "UNKNOWN"
-			}
+			f := osvFinding(v, a)
 			out = append(out, f)
 		}
 		notify(reports, model.SyncProgress{Phase: "page", Processed: len(out), Found: len(out)})
@@ -316,6 +254,49 @@ func (c *Client) fetchOSV(ctx context.Context, a model.Asset, s model.Settings, 
 		token = data.Next
 	}
 	return out, fmt.Errorf("OSV pagination limit reached")
+}
+
+func osvFinding(v osvRecord, a model.Asset) model.Finding {
+	sev := strings.ToUpper(v.DatabaseSpecific.Severity)
+	f := model.Finding{ID: v.ID, AssetID: a.ID, Component: a.Name, Version: a.Version, Title: v.Summary, Description: v.Details, Severity: sev, Sources: []string{"OSV"}, Match: "package", Aliases: v.Aliases, References: []string{}, FixedVersions: []string{}}
+	if f.Title == "" {
+		f.Title = truncate(v.Details, 180)
+	}
+	for _, alias := range v.Aliases {
+		if strings.HasPrefix(alias, "CVE-") {
+			f.ID = alias
+			break
+		}
+	}
+	for _, r := range v.References {
+		f.References = Unique(f.References, r.URL)
+	}
+	for _, a2 := range v.Affected {
+		if a2.Package.Name != a.Name || a2.Package.Ecosystem != a.Ecosystem {
+			continue
+		}
+		if f.Severity == "" {
+			f.Severity = strings.ToUpper(a2.EcosystemSpecific.Severity)
+		}
+		for _, r := range a2.Ranges {
+			if r.Type == "GIT" {
+				continue
+			}
+			for _, e := range r.Events {
+				if e.Fixed != "" {
+					f.FixedVersions = Unique(f.FixedVersions, e.Fixed)
+				}
+			}
+		}
+	}
+	if f.Severity == "MODERATE" {
+		f.Severity = "MEDIUM"
+	}
+	if model.Rank(f.Severity) == 1 {
+		f.Severity = "UNKNOWN"
+	}
+
+	return f
 }
 
 func Unique(values []string, more ...string) []string {

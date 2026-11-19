@@ -13,12 +13,13 @@ import (
 )
 
 type Asset struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	Version   string `json:"version"`
-	Ecosystem string `json:"ecosystem"`
-	CPE       string `json:"cpe"`
+	NeedsAssessment bool   `json:"needs_assessment,omitempty"`
+	ID              string `json:"id"`
+	Kind            string `json:"kind"`
+	Name            string `json:"name"`
+	Version         string `json:"version"`
+	Ecosystem       string `json:"ecosystem"`
+	CPE             string `json:"cpe"`
 }
 
 type Finding struct {
@@ -58,6 +59,13 @@ type Run struct {
 	DataCheckedAt  time.Time      `json:"data_checked_at"`
 	PausedAt       time.Time      `json:"paused_at"`
 	PausedSeconds  float64        `json:"paused_seconds,omitempty"`
+	DatabaseWaits  []DatabaseWait `json:"database_waits,omitempty"`
+}
+
+type DatabaseWait struct {
+	Source string `json:"source"`
+	Status string `json:"status"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // SyncProgress reports work performed, never an estimate of elapsed completion.
@@ -118,7 +126,31 @@ type Project struct {
 	Syncing          bool      `json:"syncing"`
 }
 
+// MarkOutdatedComponents recognizes results saved before component freshness
+// was tracked explicitly, without discarding the previous assessment.
+func (p *Project) MarkOutdatedComponents() {
+	assets := make(map[string]int, len(p.Assets))
+	for i, asset := range p.Assets {
+		assets[asset.ID] = i
+	}
+
+	for _, finding := range p.Findings {
+		index, ok := assets[finding.AssetID]
+		if !ok || finding.Match == "scanner" {
+			continue
+		}
+
+		asset := &p.Assets[index]
+		if finding.Version != "" && finding.Version != asset.Version || finding.Component != "" && finding.Component != asset.Name {
+			asset.NeedsAssessment = true
+		}
+	}
+}
+
 type Settings struct {
+	OSVUpdateSchedule string            `json:"osv_update_schedule"`
+	OSVEcosystems     []string          `json:"osv_ecosystems"`
+	NVDUpdateSchedule string            `json:"nvd_update_schedule"`
 	CVEUpdateSchedule string            `json:"cve_update_schedule"`
 	CacheHours        int               `json:"cache_hours"`
 	CacheMaxEntries   int               `json:"cache_max_entries"`
@@ -142,6 +174,8 @@ type State struct {
 
 const DefaultCacheMaxEntries = 10000
 const DefaultCVEURL = "https://cveawg.mitre.org/api/cve"
+const DefaultNVDURL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+const DefaultOSVURL = "https://api.osv.dev/v1/query"
 const DefaultCacheMaxMiB = 512
 const MinCacheMaxEntries = 100
 const MaxCacheMaxEntries = 1000000
@@ -163,14 +197,26 @@ func CacheLimits(s Settings) (uint64, uint64) {
 
 func Defaults() State {
 	return State{Projects: []Project{}, Settings: Settings{
+		OSVUpdateSchedule: "daily",
+		NVDUpdateSchedule: "daily",
 		CVEUpdateSchedule: "daily",
 		CacheHours:        6,
 		CacheMaxEntries:   DefaultCacheMaxEntries, CacheMaxMiB: DefaultCacheMaxMiB,
 		Language: "en", Sources: map[string]bool{"nvd": true, "cve": true, "osv": false},
-		NVDURL: "https://services.nvd.nist.gov/rest/json/cves/2.0",
-		CVEURL: DefaultCVEURL, OSVURL: "https://api.osv.dev/v1/query",
+		NVDURL: DefaultNVDURL,
+		CVEURL: DefaultCVEURL, OSVURL: DefaultOSVURL,
 		AIProvider: "public", Scanners: map[string]bool{}, Tokens: map[string]string{},
 	}}
+}
+
+func NVDInterval(schedule string) time.Duration {
+	if schedule == "two_hourly" {
+		return 2 * time.Hour
+	}
+	if schedule == "" || schedule == "daily" {
+		return 24 * time.Hour
+	}
+	return 0
 }
 
 func NewID() string {

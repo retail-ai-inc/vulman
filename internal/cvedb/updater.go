@@ -85,6 +85,7 @@ type Updater struct {
 	closed            bool
 	phase             string
 	downloaded, total int64
+	importTotal       int
 	lastError         string
 }
 
@@ -107,6 +108,16 @@ func NewUpdater(s *Store) *Updater {
 func (u *Updater) progress(phase string, downloaded, total int64) {
 	u.mu.Lock()
 	u.phase, u.downloaded, u.total = phase, downloaded, total
+	if phase != "importing" {
+		u.importTotal = 0
+	}
+
+	u.mu.Unlock()
+}
+
+func (u *Updater) importProgress(total int) {
+	u.mu.Lock()
+	u.importTotal = total
 	u.mu.Unlock()
 }
 
@@ -115,6 +126,7 @@ func (u *Updater) Stats() (Stats, error) {
 	u.mu.Lock()
 	s.Running, s.Phase = u.cancel != nil, u.phase
 	s.Downloaded, s.DownloadTotal, s.Error = u.downloaded, u.total, u.lastError
+	s.ImportTotal = u.importTotal
 	u.mu.Unlock()
 	if !s.Running && s.Resumable && s.Error == "" {
 		s.Phase = "interrupted"
@@ -142,6 +154,7 @@ func (u *Updater) start(parent context.Context, rebuild bool) error {
 	ctx, cancel := context.WithCancel(parent)
 	u.cancel, u.phase, u.lastError = cancel, "checking", ""
 	u.downloaded, u.total = 0, 0
+	u.importTotal = 0
 	u.wg.Add(1)
 	go func() {
 		defer u.wg.Done()
@@ -493,6 +506,9 @@ func (u *Updater) importArchive(ctx context.Context, a Archive) error {
 	if pending.Next > len(z.File) {
 		return errors.New("CVE archive does not match saved import checkpoint")
 	}
+
+	// The durable checkpoint counts ZIP entries, including non-record members.
+	u.importProgress(len(z.File))
 	batch := make([]Record, 0, batchSize)
 	var batchBytes uint64
 	for i := pending.Next; i < len(z.File); i++ {
@@ -524,6 +540,8 @@ func (u *Updater) importArchive(ctx context.Context, a Archive) error {
 	if err := u.store.finish(ctx); err != nil {
 		return err
 	}
+
+	u.progress("cleaning", 0, 0)
 	// The import is already durable. A leftover download is harmless and reused
 	// or overwritten on the next update if cleanup is interrupted.
 	_ = u.store.root.Remove(downloadFile)

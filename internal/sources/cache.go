@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"vulman/internal/model"
@@ -279,10 +280,17 @@ func (c *Client) query(ctx context.Context, kind string, a model.Asset, s model.
 }
 
 func (c *Client) NVD(ctx context.Context, a model.Asset, s model.Settings, reports ...func(model.SyncProgress)) ([]model.Finding, error) {
+	if c.usesLocalNVD(s) && modeFor(ctx) != "refresh" {
+		return c.localNVD(ctx, a, s, reports)
+	}
 	return c.query(ctx, "nvd", a, s, reports)
 }
 
 func (c *Client) OSV(ctx context.Context, a model.Asset, s model.Settings, reports ...func(model.SyncProgress)) ([]model.Finding, error) {
+	if c.LocalOSV != nil && modeFor(ctx) != "refresh" && strings.TrimRight(s.OSVURL, "/") == model.DefaultOSVURL {
+		return c.localOSV(ctx, a, s, reports)
+	}
+
 	return c.query(ctx, "osv", a, s, reports)
 }
 

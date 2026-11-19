@@ -84,6 +84,8 @@ const dismissedRuns=new Set();
 function canDismissWorkflow(run){return !!run&&['complete','partial','failed','interrupted','stopped'].includes(run.status);}
 function stepLabel(step){return ({nvd:'NIST NVD',osv:'OSV.dev',cve:'CVE Program',scanner:t('codeScanners'),save:t('saveResults')}[step.kind]||step.kind)+(step.component?' · '+step.component:'');}
 function interruptionMessage(run, fullProject = false) {
+  if (run.logs?.some(entry => entry.event === 'queue_interrupted')) return t('event_queue_interrupted');
+
   const step = run.steps?.find(step => step.status === 'interrupted');
   const key = fullProject ? 'fullSyncInterrupted' : 'syncInterrupted';
   return step ? t(key + 'During').replace('{step}', () => stepLabel(step)) : t(key);
@@ -121,6 +123,7 @@ function workflowLogs(run, steps) {
     const source = scanner ? t('codeScanners') : step && stepLabel(step);
     let event = entry.event;
     let detail = event === 'run_finished' ? t(entry.detail) : entry.detail;
+    if (event.startsWith('database_wait_')) detail = databaseLabel(detail);
     if (scanner && event === 'scanner_configured') {
       if (detail) detail = detail.split(',').map(name => scannerLabels[name] || name).join(', ');
       else event = 'scanner_none_configured';
@@ -138,7 +141,7 @@ function workflowLogs(run, steps) {
       parts.push(t(key).replace('{count}', entry.findings.toLocaleString(formatLocale())));
     }
     const cleanup = event === 'scanner_cleanup_completed' || event === 'scanner_cleanup_failed';
-    const error = ['failed', 'interrupted', 'scanner_failed', 'scanner_interrupted', 'scanner_target_failed', 'scanner_cleanup_failed'].includes(event);
+    const error = ['failed', 'interrupted', 'scanner_failed', 'scanner_interrupted', 'scanner_target_failed', 'scanner_cleanup_failed', 'database_wait_failed', 'database_wait_interrupted'].includes(event);
     const time = entry.at ? `<time>${esc(new Date(entry.at).toLocaleTimeString(formatLocale(),{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}))}</time>` : '<time>—</time>';
     const text = esc(parts.filter(Boolean).join(' · '));
     return `<li class="${error ? 'workflow-log-error' : ''}">${time}<span>${cleanup ? `<strong>${text}</strong>` : text}</span></li>`;
@@ -176,8 +179,115 @@ function stepProgress(step) {
   if (validDate(progress.checked_at)) parts.push(t('sourceDataChecked') + ' ' + fmtDate(progress.checked_at));
   return parts.join(' · ');
 }
-function workflowControls(project,run){if(!['running','pausing','paused','stopping'].includes(run.status))return '';const control=(action,label,danger=false)=>`<button type="button" class="button ${danger?'danger':'secondary'} small" data-action="control-sync" data-control="${action}" data-id="${esc(project.id)}" data-run="${esc(run.id)}" ${run.status==='stopping'?'disabled':''}>${t(label)}</button>`;return (run.status==='stopping'?'':control(run.status==='running'?'pause':'resume',run.status==='running'?'pauseSync':'resumeSync'))+control('stop','stopSync',true);}
-async function controlWorkflow(projectID,runID,action){if(action==='stop'&&!(await confirmAction(t('confirmStopSync'))))return false;await invoke('ControlRun',projectID,runID,action);await refresh();toast(t('control_'+action));return true;}
+function queuedWorkflow(run) {
+  return ['queued', 'waiting_databases'].includes(run.status);
+}
+
+function databaseLabel(source) {
+  if (source === 'osv' || source.startsWith('osv:')) return t('osvDBTitle') + (source.startsWith('osv:') ? ' · ' + source.slice(4) : '');
+
+  return source === 'nvd' ? t('queueNVDLabel') : source === 'cve' ? t('queueCVELabel') : source;
+}
+
+function databaseProgressNumber(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function databaseProgressBar(label, current = 0, total = 0) {
+  const attributes = total > 0 ? `max="${total}" value="${Math.min(current, total)}"` : '';
+  return `<progress class="database-update-progress" ${attributes} aria-label="${esc(label)}"></progress>`;
+}
+
+function databaseUpdateProgressHTML(source, stats = {}) {
+  const phase = stats.phase;
+  const title = databaseLabel(source);
+  const phaseKey = source === 'nvd' ? 'nvdDBPhase_' : source.startsWith('osv') ? 'osvDBPhase_' : 'cveDBPhase_';
+  const label = t(phaseKey + (phase || 'checking'));
+  const parts = [];
+  let progress = '';
+
+  if (phase === 'downloading') {
+    const downloaded = databaseProgressNumber(stats.downloaded);
+    const total = databaseProgressNumber(stats.download_total);
+    const doneMiB = (downloaded / 1048576).toLocaleString(formatLocale(), {minimumFractionDigits:1, maximumFractionDigits:1});
+    const totalMiB = (total / 1048576).toLocaleString(formatLocale(), {minimumFractionDigits:1, maximumFractionDigits:1});
+    const text = total > 0 ? t('queueDownloadBytes').replace('{done}', doneMiB).replace('{total}', totalMiB) : t('queueDownloadedBytes').replace('{done}', doneMiB);
+    const percent = total > 0 ? ` · ${Math.min(100, Math.floor(downloaded / total * 100))}%` : '';
+
+    progress = databaseProgressBar(title + ' · ' + label, downloaded, total);
+    parts.push(text + percent);
+  } else if (phase === 'importing') {
+    const imported = databaseProgressNumber(stats.imported);
+    const total = databaseProgressNumber(stats.import_total);
+    const countKey = source === 'cve' ? 'queueArchiveEntries' : 'queueImportedRecords';
+    const text = total > 0 ? t(countKey + 'Total').replace('{done}', cacheNumber(imported)).replace('{total}', cacheNumber(total)) : t(countKey).replace('{done}', cacheNumber(imported));
+
+    progress = databaseProgressBar(title + ' · ' + label, imported, total);
+    parts.push(text);
+  } else if (stats?.running) {
+    progress = databaseProgressBar(title + ' · ' + label);
+  }
+
+  if (source === 'nvd' && stats.feed) {
+    parts.unshift(stats.feed === 'dictionary' ? t('queueCPEFeed') : t('queueNVDFeed').replace('{feed}', stats.feed));
+  }
+
+  if (source.startsWith('osv') && stats.feed) parts.unshift(t('osvDBCurrentEcosystem').replace('{ecosystem}', stats.feed));
+
+  const feedsDone = databaseProgressNumber(stats?.feeds_done);
+  const feedsTotal = databaseProgressNumber(stats?.feeds_total);
+  const feeds = (source === 'nvd' || source.startsWith('osv')) && stats.resumable && feedsTotal > 0 ? `<div class="database-feed-progress"><span>${esc(t(source.startsWith('osv') ? 'osvDBFeedProgress' : 'nvdDBFeedProgress').replace('{done}', cacheNumber(feedsDone)).replace('{total}', cacheNumber(feedsTotal)))}</span>${databaseProgressBar(title + ' · ' + t('queueFeedsProgress'), feedsDone, feedsTotal)}</div>` : '';
+
+  if (!parts.length && !progress && !feeds) return '';
+
+  return `<div class="database-update-details">${parts.length ? `<p>${esc(parts.join(' · '))}</p>` : ''}${progress}${feeds}</div>`;
+}
+
+function databaseWaitProgress(wait) {
+  const baseStats = wait.source.startsWith('osv:') ? state?.osv_database : state?.[wait.source + '_database'];
+  const ecosystem = wait.source.startsWith('osv:') ? wait.source.slice(4) : '';
+  const item = ecosystem && baseStats?.ecosystems?.find(item => item.ecosystem === ecosystem);
+  const stats = item ? {...(baseStats.feed === ecosystem ? baseStats : {}), ...item, feed:ecosystem} : baseStats;
+  const phase = stats?.phase;
+  const title = databaseLabel(wait.source);
+  const phaseKey = wait.source === 'nvd' ? 'nvdDBPhase_' : wait.source.startsWith('osv') ? 'osvDBPhase_' : 'cveDBPhase_';
+  const label = phase ? t(phaseKey + phase) : t('databaseWait_' + wait.status);
+  const detail = phase ? stats.error : wait.detail;
+  const failed = phase ? ['failed', 'interrupted'].includes(phase) : ['failed', 'interrupted'].includes(wait.status);
+
+  return `<li class="database-wait-card"><div class="database-wait-heading"><strong>${esc(title)}</strong>${pill(label, failed ? 'partial' : stats?.running ? 'running' : '')}</div>${databaseUpdateProgressHTML(wait.source, stats)}${detail ? `<p class="form-error">${esc(detail)}</p>` : ''}</li>`;
+}
+
+function databaseWaitNotice(run) {
+  if (!queuedWorkflow(run)) return '';
+
+  const waits = (run.database_waits || []).map(databaseWaitProgress).join('');
+
+  return `<div class="workflow-database-wait"><ul>${waits}</ul><p>${esc(t('queueAvailableHint'))}</p></div>`;
+}
+
+function workflowControls(project, run) {
+  const control = (action, label, danger = false) => `<button type="button" class="button ${danger ? 'danger' : 'secondary'} small" data-action="control-sync" data-control="${action}" data-id="${esc(project.id)}" data-run="${esc(run.id)}" ${run.status === 'stopping' ? 'disabled' : ''}>${t(label)}</button>`;
+
+  if (queuedWorkflow(run)) {
+    const recovery = run.status === 'waiting_databases' ? control('retry-databases', 'retryDatabases') + control('use-available', 'useAvailableData') : '';
+    return recovery + control('cancel-queued', 'cancelQueuedSync', true);
+  }
+
+  if (!['running', 'pausing', 'paused', 'stopping'].includes(run.status)) return '';
+
+  return (run.status === 'stopping' ? '' : control(run.status === 'running' ? 'pause' : 'resume', run.status === 'running' ? 'pauseSync' : 'resumeSync')) + control('stop', 'stopSync', true);
+}
+
+async function controlWorkflow(projectID, runID, action) {
+  if (action === 'stop' && !(await confirmAction(t('confirmStopSync')))) return false;
+  if (action === 'use-available' && !(await confirmAction(t('confirmUseAvailableData')))) return false;
+
+  await invoke('ControlRun', projectID, runID, action);
+  await refresh();
+  toast(t('control_' + action));
+  return true;
+}
 function codeScanSeverityBreakdown(project, run) {
   if (run.mode !== 'code' || run.status !== 'complete') return '';
   let counts = run.severity_counts;
@@ -213,12 +323,12 @@ function workflowBody(project,run,dismissible=false){
   const steps=run.steps||[],done=steps.filter(s=>!['pending','running'].includes(s.status)).length;
   const current=steps.find(s=>s.status==='running')||(run.status==='running'?steps.find(s=>s.status==='pending'):null);
   const expanded=expandedRuns.has(run.id),detailsID='workflow-details-'+run.id;
-  const statusMessage = {pausing:'pauseHint', paused:'pausedHint', stopping:'stoppingHint', partial:'assessmentPartial'}[run.status];
+  const statusMessage = {pausing:'pauseHint', paused:'pausedHint', stopping:'stoppingHint', partial:'assessmentPartial', queued:'queuedSyncHint', waiting_databases:'blockedSyncHint'}[run.status];
   const summary = run.status === 'interrupted' ? interruptionMessage(run) : statusMessage && t(statusMessage);
   const codeScan = run.mode === 'code';
   const scope = codeScan ? syncSeverityLabel(run.severity) : `${run.asset_name || t('syncEverything')} · ${syncSeverityLabel(run.severity)} · ${t('mode_' + (run.mode || 'auto'))}`;
   const progress=t('stepsFinished').replace('{done}',done).replace('{total}',steps.length);
-  return `<div class="workflow-heading"><div><h3>${t(codeScan ? 'codeScanWorkflow' : 'workflow')} · ${esc(project.name)}</h3><p>${esc(scope)} · ${t('elapsed')} ${workflowElapsed(run)}</p>${validDate(run.data_checked_at)?`<p title="${t('sourceDataHint')}">${t('sourceDataChecked')}: ${fmtDate(run.data_checked_at)}</p>`:''}</div><div class="workflow-actions">${pill(t(run.status),run.status)}${workflowControls(project,run)}<button type="button" class="button secondary small" data-toggle-workflow="${esc(run.id)}" aria-expanded="${expanded}" aria-controls="${esc(detailsID)}">${t(expanded?'showLess':'showMore')}</button>${dismissible&&canDismissWorkflow(run)?`<button type="button" class="icon-button workflow-close" data-dismiss-workflow="${esc(run.id)}" data-project-id="${esc(project.id)}" aria-label="${t('closeWorkflow')}" title="${t('closeWorkflow')}">×</button>`:''}</div></div><div class="workflow-progress"><progress max="${Math.max(1,steps.length)}" value="${done}" aria-label="${esc(progress)}"></progress><span>${esc(progress)}</span></div><div class="workflow-current" role="status">${summary?esc(summary):current?`${esc(stepLabel(current))}<span>${esc(stepProgress(current)||t('phase_queued'))}</span>`:esc(t(run.status==='running'?'finishing':run.status))}</div>${codeScanSeverityBreakdown(project, run)}<div class="workflow-details" id="${esc(detailsID)}" ${expanded?'':'hidden'}>${expanded?`<ol class="workflow-stepper">${steps.map(step=>`<li class="workflow-step ${esc(step.status)}"><span class="workflow-step-marker" aria-hidden="true">${{complete:'✓',running:'↻',failed:'!',interrupted:'!',stopped:'■',skipped:'–',pending:'·'}[step.status]||'·'}</span><div><strong>${esc(stepLabel(step))}</strong><p>${esc(stepProgress(step))}</p></div>${pill(t(step.status),step.status)}</li>`).join('')}</ol><div class="workflow-log-heading"><h3>${t('workflowLogs')}</h3><small>${t('workflowLogsHint')}</small></div><ol class="workflow-logs" tabindex="0" aria-label="${esc(t('workflowLogs'))}">${workflowLogs(run, steps)}</ol>`:''}</div>`;
+  return `<div class="workflow-heading"><div><h3>${t(codeScan ? 'codeScanWorkflow' : 'workflow')} · ${esc(project.name)}</h3><p>${esc(scope)} · ${t('elapsed')} ${workflowElapsed(run)}</p>${validDate(run.data_checked_at)?`<p title="${t('sourceDataHint')}">${t('sourceDataChecked')}: ${fmtDate(run.data_checked_at)}</p>`:''}</div><div class="workflow-actions">${pill(t(run.status),run.status)}${workflowControls(project,run)}<button type="button" class="button secondary small" data-toggle-workflow="${esc(run.id)}" aria-expanded="${expanded}" aria-controls="${esc(detailsID)}">${t(expanded?'showLess':'showMore')}</button>${dismissible&&canDismissWorkflow(run)?`<button type="button" class="icon-button workflow-close" data-dismiss-workflow="${esc(run.id)}" data-project-id="${esc(project.id)}" aria-label="${t('closeWorkflow')}" title="${t('closeWorkflow')}">×</button>`:''}</div></div><div class="workflow-progress"><progress max="${Math.max(1,steps.length)}" value="${done}" aria-label="${esc(progress)}"></progress><span>${esc(progress)}</span></div><div class="workflow-current" role="status">${summary?esc(summary):current?`${esc(stepLabel(current))}<span>${esc(stepProgress(current)||t('phase_queued'))}</span>`:esc(t(run.status==='running'?'finishing':run.status))}</div>${databaseWaitNotice(run)}${codeScanSeverityBreakdown(project, run)}<div class="workflow-details" id="${esc(detailsID)}" ${expanded?'':'hidden'}>${expanded?`<ol class="workflow-stepper">${steps.map(step=>`<li class="workflow-step ${esc(step.status)}"><span class="workflow-step-marker" aria-hidden="true">${{complete:'✓',running:'↻',failed:'!',interrupted:'!',stopped:'■',skipped:'–',pending:'·'}[step.status]||'·'}</span><div><strong>${esc(stepLabel(step))}</strong><p>${esc(stepProgress(step))}</p></div>${pill(t(step.status),step.status)}</li>`).join('')}</ol><div class="workflow-log-heading"><h3>${t('workflowLogs')}</h3><small>${t('workflowLogsHint')}</small></div><ol class="workflow-logs" tabindex="0" aria-label="${esc(t('workflowLogs'))}">${workflowLogs(run, steps)}</ol>`:''}</div>`;
 }
 function workflowRun(project,run,dismissible=false){if(dismissible&&canDismissWorkflow(run)&&dismissedRuns.has(run.id))return '';return run?.steps?.length?`<section class="sync-workflow ${esc(run.status)}" data-sync-project-id="${esc(project.id)}" data-sync-run="${esc(run.id)}" data-sync-scope="${run.asset_id || run.severity || run.mode === 'code' ? 'scoped' : 'full'}" data-workflow-dismissible="${dismissible}">${workflowBody(project,run,dismissible)}</section>`:'';}
 function mountActiveSyncs(){if(['project','settings','activity'].includes(route()[0]))return;const html=state.projects.filter(p=>p.syncing).map(p=>workflowRun(p,p.runs?.[0])).join('');$('.page-heading')?.insertAdjacentHTML('afterend','<div id="active-syncs">'+html+'</div>');}
@@ -255,9 +365,18 @@ function toggleWorkflow(id) {
   else expandedRuns.add(id);
   updateSyncPanels(id);
 }
-function progressSnapshot(st){const {cache_stats,cve_database,version,...rest}=st;return JSON.stringify({...rest,projects:st.projects.map(p=>({...p,runs:(p.runs||[]).map(({steps,logs,data_checked_at,...run})=>run)}))});}
+function progressSnapshot(st){const {cache_stats,cve_database,nvd_database,osv_database,version,...rest}=st;return JSON.stringify({...rest,projects:st.projects.map(p=>({...p,runs:(p.runs||[]).map(({steps,logs,data_checked_at,...run})=>run)}))});}
 function applyPollingState(next) {
   const [page, id, view] = route();
+  if (next.osv_database) {
+    state.osv_database = next.osv_database;
+    if (page === 'settings') updateOSVDatabaseStatus(next.osv_database);
+  }
+
+  if (next.nvd_database) {
+    state.nvd_database = next.nvd_database;
+    if (page === 'settings') updateNVDDatabaseStatus(next.nvd_database);
+  }
   if (next.cve_database) {
     state.cve_database = next.cve_database;
     if (page === 'settings') updateCVEDatabaseStatus(next.cve_database);
@@ -292,11 +411,15 @@ function applyPollingState(next) {
   }
 }
 function latestFullRun(p){return p.runs?.find(r=>!r.asset_id&&!r.severity&&r.mode!=='code');}
-function projectStatus(p){const full=latestFullRun(p);if(p.syncing){const status=p.runs?.[0]?.status;return ['pausing','paused','stopping'].includes(status)?pill(t(status),status):pill(t(p.runs?.[0]?.mode==='code'?'scanningCode':'syncing'),'running pulse');}if(full&&full.status!=='complete')return pill(t(full.status),full.status);if(p.revision!==p.assessed_revision&&p.assessed_revision)return pill(t('stale'),'review');if(!validDate(p.last_sync))return pill(t('fullAssessmentNeeded'));return pill(t('complete'));}
+function projectNeedsAssessment(project) {
+  return (project.assets || []).some(asset => asset.needs_assessment);
+}
+
+function projectStatus(p){const full=latestFullRun(p);if(p.syncing){const status=p.runs?.[0]?.status;return ['pausing','paused','stopping','queued','waiting_databases'].includes(status)?pill(t(status),status):pill(t(p.runs?.[0]?.mode==='code'?'scanningCode':'syncing'),'running pulse');}if(projectNeedsAssessment(p))return pill(t(p.runs?.length||p.findings?.length?'stale':'fullAssessmentNeeded'),'review');if(full&&full.status!=='complete')return pill(t(full.status),full.status);if(p.revision!==p.assessed_revision&&p.assessed_revision)return pill(t('stale'),'review');if(!validDate(p.last_sync))return pill(t('fullAssessmentNeeded'));return pill(t('complete'));}
 function syncSeverityLabel(severity){return severity?t(severityKey(severity)):t('anySeverity');}
 function severityOptions(selected=''){return `<option value="">${t('anySeverity')}</option>`+findingSeverities.map(value=>`<option value="${value}" ${selected===value?'selected':''}>${syncSeverityLabel(value)}</option>`).join('');}
 function syncAllControls(primary=false){return `<div class="sync-all-controls"><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-all-severity" data-sync-all-severity aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}">${severityOptions(syncAllSeverity)}</select></label>${button('syncAll','sync-all',primary,'refresh')}</div>`;}
-function syncControls(p){const selected=p.assets.some(a=>a.id===syncSelection[p.id])?syncSelection[p.id]:'';return `<div class="sync-controls"><label class="sync-scope"><span>${t('syncScope')}</span><select id="sync-asset" data-sync-project="${p.id}" aria-label="${t('syncScope')}" ${p.syncing?'disabled':''}><option value="">${t('syncEverything')}</option>${p.assets.map(a=>`<option value="${esc(a.id)}" ${selected===a.id?'selected':''}>${esc(t(a.kind)+' · '+a.name+' '+a.version)}</option>`).join('')}</select></label><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-severity" data-sync-severity-project="${p.id}" aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}" ${p.syncing?'disabled':''}>${severityOptions(syncSeveritySelection[p.id]||'')}</select></label><label class="sync-scope sync-mode"><span>${t('syncMode')}</span><select id="sync-mode" data-sync-mode-project="${p.id}" aria-label="${t('syncMode')}" ${p.syncing?'disabled':''}>${['auto','local','refresh'].map(mode=>`<option value="${mode}" ${(syncModeSelection[p.id]||'auto')===mode?'selected':''}>${t('mode_'+mode)}</option>`).join('')}</select></label><button class="button primary" data-action="sync" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('refresh')}${t(p.syncing&&p.runs?.[0]?.mode!=='code'?'syncing':'sync')}</button></div>`;}
+function syncControls(p){const selected=p.assets.some(a=>a.id===syncSelection[p.id])?syncSelection[p.id]:'';return `<div class="sync-controls"><label class="sync-scope"><span>${t('syncScope')}</span><select id="sync-asset" data-sync-project="${p.id}" aria-label="${t('syncScope')}" ${p.syncing?'disabled':''}><option value="">${t('syncEverything')}</option>${p.assets.map(a=>`<option value="${esc(a.id)}" ${selected===a.id?'selected':''}>${esc(t(a.kind)+' · '+a.name+' '+a.version)}</option>`).join('')}</select></label><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-severity" data-sync-severity-project="${p.id}" aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}" ${p.syncing?'disabled':''}>${severityOptions(syncSeveritySelection[p.id]||'')}</select></label><label class="sync-scope sync-mode"><span>${t('syncMode')}</span><select id="sync-mode" data-sync-mode-project="${p.id}" aria-label="${t('syncMode')}" ${p.syncing?'disabled':''}>${['auto','local','refresh'].map(mode=>`<option value="${mode}" ${(syncModeSelection[p.id]||'auto')===mode?'selected':''}>${t('mode_'+mode)}</option>`).join('')}</select></label><button class="button primary" data-action="sync" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('refresh')}${t(p.syncing&&p.runs?.[0]&&queuedWorkflow(p.runs[0])?p.runs[0].status:p.syncing&&p.runs?.[0]?.mode!=='code'?'syncing':'sync')}</button></div>`;}
 
 function projectList(projects = state.projects, showEdit = false) {
   if (!projects.length) return empty('noProjects','noProjectsSub','projects',button('firstProject','new-project',true,'plus')+`<button class="sample-button" data-action="sample">${t('sample')}</button>`);
@@ -320,7 +443,7 @@ function projectListSummary(project, components) {
   for (const finding of project.findings || []) {
     if (finding.severity === 'CRITICAL') critical++;
   }
-  return `<p class="project-list-summary"><span>${components}</span>${repositories}${pill(t('critical') + ' ' + formatResultNumber(critical), critical ? 'critical' : '')}</p>`;
+  return `<p class="project-list-summary"><span>${components}</span>${repositories}${pill(t('critical') + ' ' + formatResultNumber(critical), critical ? 'critical' : '')}${projectNeedsAssessment(project) ? pill(t('severityCountsOutdated'), 'review') : ''}</p>`;
 }
 function sourcesPanel(){return `<div class="panel sources-panel"><div class="panel-head"><div><h2>${t('dataSources')}</h2><p>${t('sourcesSub')}</p></div>${icon('stack')}</div>${[['nvd','NVD','discovery'],['cve','CVE','enrichment'],['osv','OSV','packageMatching']].map(([id,name,note])=>`<div class="source-item"><span class="source-symbol">${name}</span><div><strong>${name==='NVD'?'NIST NVD':name==='CVE'?'CVE Program':'OSV.dev'}</strong><small>${t(note)} · ${t(state.settings.sources[id]?'enabled':'disabled')}</small></div><span class="status-dot ${state.settings.sources[id]?'':'off'}"></span></div>`).join('')}<p class="source-note">${t('sourceNote')}</p></div>`;}
 function breakdown(counts) {
@@ -497,7 +620,15 @@ function turnFindingPage(direction) {
   button?.focus({preventScroll:true});
 }
 function componentSyncControls(project,asset){const selected=componentSyncSeveritySelection.get(stackKey(project.id,asset.id))||'';return `<div class="stack-sync-controls"><label class="sync-scope stack-sync-severity"><span>${t('syncSeverity')}</span><select data-sync-component-severity data-project-id="${esc(project.id)}" data-asset-id="${esc(asset.id)}" title="${t('severitySyncHint')}" ${project.syncing?'disabled':''}>${severityOptions(selected)}</select></label><button class="button secondary small stack-sync" data-action="sync-asset" data-id="${esc(project.id)}" data-asset="${esc(asset.id)}" ${project.syncing?'disabled':''}>${icon('refresh')}${t('sync')}</button></div>`;}
-function componentCriticalCount(project,asset){const count=(project.findings||[]).filter(f=>f.asset_id===asset.id&&f.severity==='CRITICAL').length;return `<div class="stack-critical-count"><span>${t('critical')}</span>${pill(count.toLocaleString(formatLocale()),count?'critical':'')}</div>`;}
+function componentCriticalCount(project, asset) {
+  if (asset.needs_assessment) {
+    return `<div class="stack-critical-count"><span>${t('critical')}</span><span class="pill review" title="${esc(t('componentResyncHint'))}">${t('componentSyncNeeded')}</span></div><p class="component-resync-note">${esc(t('componentResyncHint'))}</p>`;
+  }
+
+  const count = (project.findings || []).filter(finding => finding.asset_id === asset.id && finding.severity === 'CRITICAL').length;
+  return `<div class="stack-critical-count"><span>${t('critical')}</span>${pill(count.toLocaleString(formatLocale()), count ? 'critical' : '')}</div>`;
+}
+
 function renderProject(id){const p=state.projects.find(p=>p.id===id);if(!p){location.hash='projects';return;}
   const latestRun = p.runs?.[0];
   const fullRun = latestFullRun(p);
@@ -506,7 +637,7 @@ function renderProject(id){const p=state.projects.find(p=>p.id===id);if(!p){loca
   if (!p.syncing && fullRun?.status === 'interrupted') {
     statusBadge = pill(interruptionMessage(fullRun, true), 'interrupted full-sync-interruption');
   }
-  $('#main').innerHTML=heading(p.name,p.description||t('projectPanelSub'),`<button class="button secondary" data-action="edit-project" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('edit')}${t('editProject')}</button><button type="button" class="button secondary" data-action="scan-code" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${icon('scanCode')}${t('runCodeScan')}</button>${syncControls(p)}`)+`<div class="project-meta">${statusBadge}${pill(t(p.schedule))}${validDate(p.last_sync)?pill(t('lastSync')+' · '+fmtDate(p.last_sync)):''}${validDate(p.data_checked_at)?pill(t('sourceDataChecked')+' · '+fmtDate(p.data_checked_at)):''}${validDate(p.next_run)?pill(t('nextRun')+' · '+fmtDate(p.next_run)):''}${projectRepositoryLinks(p)}</div>${workflow}<div class="tabs">${['vulnerabilities','techStack','activity'].map(tab=>`<button class="tab ${projectTab===tab?'active':''}" data-tab="${tab}">${t(tab)}${tab==='vulnerabilities'?' ('+(p.findings?.length||0)+')':''}</button>`).join('')}</div>${fullRun&&['partial','failed','interrupted','stopped'].includes(fullRun.status)?`<div class="notice">${t('incomplete')}</div>`:''}${(latestRun?.asset_id||latestRun?.severity||latestRun?.mode==='code')&&['partial','failed','interrupted','stopped'].includes(latestRun.status)?`<div class="notice">${t(latestRun.mode==='code'?'codeScanIncomplete':'scopedSyncIncomplete')}</div>`:''}${p.assessed_revision!==p.revision&&p.assessed_revision?`<div class="notice info">${t('inventoryChanged')}</div>`:''}<div id="project-tab-content"></div>`;const content=$('#project-tab-content');if(projectTab==='vulnerabilities'){content.innerHTML=filtersHTML(false,id)+`<div class="panel" id="finding-results">${findingsTable(id)}</div>`;bindFilters(id);}else if(projectTab==='techStack'){content.innerHTML=`<div class="stack-toolbar"><button type="button" class="button primary" data-action="add-component" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${t('addComponent')}</button></div>`+(p.assets.length?`<div class="stack-grid">${p.assets.map(a=>`<div class="stack-card"><div class="eyebrow">${t(a.kind)}</div><strong>${esc(a.name)}</strong><p>${esc(a.version)}${a.ecosystem?' · '+esc(a.ecosystem):''}</p>${a.cpe?`<code>${esc(a.cpe)}</code>`:''}${componentCriticalCount(p,a)}${componentSyncControls(p,a)}</div>`).join('')}</div>`:empty('noStack','noStackSub','stack'));}else content.innerHTML=`<div class="panel">${activityList(allRuns().filter(r=>r.project_id===id))}</div>`;}
+  $('#main').innerHTML=heading(p.name,p.description||t('projectPanelSub'),`<button class="button secondary" data-action="edit-project" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('edit')}${t('editProject')}</button><button type="button" class="button secondary" data-action="scan-code" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${icon('scanCode')}${t('runCodeScan')}</button>${syncControls(p)}`)+`<div class="project-meta">${statusBadge}${pill(t(p.schedule))}${validDate(p.last_sync)?pill(t('lastSync')+' · '+fmtDate(p.last_sync)):''}${validDate(p.data_checked_at)?pill(t('sourceDataChecked')+' · '+fmtDate(p.data_checked_at)):''}${validDate(p.next_run)?pill(t('nextRun')+' · '+fmtDate(p.next_run)):''}${projectRepositoryLinks(p)}</div>${workflow}<div class="tabs">${['vulnerabilities','techStack','activity'].map(tab=>`<button class="tab ${projectTab===tab?'active':''}" data-tab="${tab}">${t(tab)}${tab==='vulnerabilities'?' ('+(p.findings?.length||0)+')':''}</button>`).join('')}</div>${fullRun&&['partial','failed','interrupted','stopped'].includes(fullRun.status)?`<div class="notice">${t('incomplete')}</div>`:''}${(latestRun?.asset_id||latestRun?.severity||latestRun?.mode==='code')&&['partial','failed','interrupted','stopped'].includes(latestRun.status)?`<div class="notice">${t(latestRun.mode==='code'?'codeScanIncomplete':'scopedSyncIncomplete')}</div>`:''}${projectNeedsAssessment(p)?`<div class="notice" role="status">${t('techStackResyncHint')}</div>`:p.assessed_revision!==p.revision&&p.assessed_revision?`<div class="notice info">${t('inventoryChanged')}</div>`:''}<div id="project-tab-content"></div>`;const content=$('#project-tab-content');if(projectTab==='vulnerabilities'){content.innerHTML=filtersHTML(false,id)+`<div class="panel" id="finding-results">${findingsTable(id)}</div>`;bindFilters(id);}else if(projectTab==='techStack'){content.innerHTML=`<div class="stack-toolbar"><button type="button" class="button primary" data-action="add-component" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${t('addComponent')}</button></div>`+(p.assets.length?`<div class="stack-grid">${p.assets.map(a=>`<div class="stack-card"><div class="eyebrow">${t(a.kind)}</div><strong>${esc(a.name)}</strong><p>${esc(a.version)}${a.ecosystem?' · '+esc(a.ecosystem):''}</p>${a.cpe?`<code>${esc(a.cpe)}</code>`:''}${componentCriticalCount(p,a)}${componentSyncControls(p,a)}</div>`).join('')}</div>`:empty('noStack','noStackSub','stack'));}else content.innerHTML=`<div class="panel">${activityList(allRuns().filter(r=>r.project_id===id))}</div>`;}
 function field(name,label,value='',type='text',extra=''){return `<label><span>${t(label)}</span><input type="${type}" name="${name}" value="${esc(value)}" ${extra}></label>`;}
 function providerOptions(selected){return ['public','openai','claude'].map(v=>`<option value="${v}" ${selected===v?'selected':''}>${t(v)}</option>`).join('');}
 function cacheNumber(n){return Number(n||0).toLocaleString(formatLocale());}
@@ -522,11 +653,9 @@ function cveDatabaseStatusHTML(stats = {}) {
   ];
   if (validDate(stats.source_at)) details.push(`${t('sourceDataChecked')} ${fmtDate(stats.source_at)}`);
   if (validDate(stats.checked_at)) details.push(`${t('cveDBLastCheck')} ${fmtDate(stats.checked_at)}`);
-  if (stats.phase === 'downloading') {
-    details.push(`${((stats.downloaded || 0) / 1048576).toFixed(1)} / ${((stats.download_total || 0) / 1048576).toFixed(1)} MiB`);
-  }
-  if (stats.resumable && stats.imported) details.push(t('cveDBImported').replace('{count}', cacheNumber(stats.imported)));
-  return `<div class="cve-database-summary">${pill(t('cveDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${stats.error ? `<p class="form-error">${esc(stats.error)}</p>` : ''}</div>`;
+  if (phase !== 'importing' && stats.resumable && stats.imported) details.push(t('cveDBImported').replace('{count}', cacheNumber(stats.imported)));
+
+  return `<div class="cve-database-summary">${pill(t('cveDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${databaseUpdateProgressHTML('cve', stats)}${stats.error ? `<p class="form-error">${esc(stats.error)}</p>` : ''}</div>`;
 }
 function updateCVEDatabaseStatus(stats) {
   const status = $('#cve-database-status');
@@ -548,6 +677,83 @@ function cveDatabaseSettingsHTML() {
     <div id="cve-database-status" role="status" aria-live="polite">${cveDatabaseStatusHTML(stats)}</div>
     <p class="form-note">${t('cveDBSafety')}</p>${stats.path ? `<dl class="storage-paths"><div><dt>${t('cveDBFile')}</dt><dd><code>${esc(stats.path)}</code></dd></div></dl>` : ''}</section>`;
 }
+function nvdDatabaseStatusHTML(stats = {}) {
+  const phase = stats.phase || (stats.initialized ? 'complete' : stats.resumable ? 'interrupted' : 'idle');
+  const details = [
+    `${t('nvdDBRecords')} ${cacheNumber(stats.records)}`,
+    `${t('nvdDBCPEs')} ${cacheNumber(stats.cpes)}`,
+    `${t('cacheSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`,
+  ];
+  if (validDate(stats.source_at)) details.push(`${t('sourceDataChecked')} ${fmtDate(stats.source_at)}`);
+  if (validDate(stats.cpe_at)) details.push(`${t('nvdDBCPEChecked')} ${fmtDate(stats.cpe_at)}`);
+  if (validDate(stats.checked_at)) details.push(`${t('cveDBLastCheck')} ${fmtDate(stats.checked_at)}`);
+  if (phase !== 'importing' && stats.imported) details.push(t('queueImportedRecords').replace('{done}', cacheNumber(stats.imported)));
+
+  return `<div class="cve-database-summary">${pill(t('nvdDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${databaseUpdateProgressHTML('nvd', stats)}${stats.error ? `<p class="form-error">${esc(stats.error)}</p>` : ''}</div>`;
+}
+function updateNVDDatabaseStatus(stats) {
+  const status = $('#nvd-database-status');
+  if (!status) return;
+  status.innerHTML = nvdDatabaseStatusHTML(stats);
+  for (const action of ['update', 'rebuild']) {
+    const button = $(`[data-action="${action}-nvd-database"]`);
+    if (button) button.disabled = Boolean(stats.running);
+  }
+  const stop = $('[data-action="stop-nvd-database"]');
+  if (stop) stop.hidden = !stats.running;
+}
+function nvdDatabaseSettingsHTML() {
+  const stats = state.nvd_database || {};
+  const schedule = state.settings.nvd_update_schedule || 'daily';
+  return `<section class="settings-section"><h3>${t('nvdDBTitle')}</h3><p>${t('nvdDBHint')}</p>
+    <div class="form-grid"><label><span>${t('cveDBSchedule')}</span><select name="nvd_update_schedule">${['off', 'two_hourly', 'daily'].map(value => `<option value="${value}" ${schedule === value ? 'selected' : ''}>${t(value)}</option>`).join('')}</select></label>
+    <div class="cve-database-actions"><button type="button" class="button secondary" data-action="update-nvd-database" ${stats.running ? 'disabled' : ''}>${t('nvdDBUpdate')}</button><button type="button" class="button secondary" data-action="rebuild-nvd-database" ${stats.running ? 'disabled' : ''}>${t('cveDBRebuild')}</button><button type="button" class="button secondary" data-action="stop-nvd-database" ${stats.running ? '' : 'hidden'}>${t('stop')}</button></div></div>
+    <div id="nvd-database-status" role="status" aria-live="polite">${nvdDatabaseStatusHTML(stats)}</div><p class="form-note">${t('nvdDBSafety')}</p>
+    ${stats.path ? `<dl class="storage-paths"><div><dt>${t('nvdDBFile')}</dt><dd><code>${esc(stats.path)}</code></dd></div></dl>` : ''}</section>`;
+}
+function suggestedOSVEcosystems() {
+  if (state.osv_suggested_ecosystems) return state.osv_suggested_ecosystems;
+
+  return [...new Set((state.projects || []).flatMap(project => (project.assets || []).map(asset => asset.ecosystem?.split(':')[0]).filter(Boolean)))].sort();
+}
+
+function osvDatabaseStatusHTML(stats = {}) {
+  const phase = stats.phase || (stats.resumable ? 'interrupted' : stats.initialized ? 'complete' : 'idle');
+  const details = `${t('osvDBRecords')} ${cacheNumber(stats.records)} · ${t('cacheSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`;
+  const ecosystems = (stats.ecosystems || []).map(item => `<li><strong>${esc(item.ecosystem)}</strong> · ${cacheNumber(item.records)} · ${esc(t('osvDBPhase_' + (item.phase || 'idle')))}${validDate(item.checked_at) ? ` · ${esc(t('sourceDataChecked'))} ${esc(fmtDate(item.checked_at))}` : ''}</li>`).join('');
+
+  return `<div class="cve-database-summary">${pill(t('osvDBPhase_' + phase), stats.running ? 'running' : ['failed','interrupted'].includes(phase) ? 'partial' : '')}<p>${esc(details)}</p>${databaseUpdateProgressHTML('osv', stats)}${ecosystems ? `<ul class="osv-ecosystem-status">${ecosystems}</ul>` : ''}${stats.error ? `<p class="form-error">${esc(stats.error)}</p>` : ''}</div>`;
+}
+
+function updateOSVDatabaseStatus(stats) {
+  const status = $('#osv-database-status');
+  if (!status) return;
+
+  status.innerHTML = osvDatabaseStatusHTML(stats);
+  for (const action of ['update','rebuild']) {
+    const button = $(`[data-action="${action}-osv-database"]`);
+    if (button) button.disabled = Boolean(stats.running);
+  }
+
+  const stop = $('[data-action="stop-osv-database"]');
+  if (stop) stop.hidden = !stats.running;
+}
+
+function osvDatabaseSettingsHTML() {
+  const stats = state.osv_database || {};
+  const suggested = suggestedOSVEcosystems();
+  const selected = state.settings.osv_ecosystems ?? suggested;
+  const options = [...new Set([...(state.osv_ecosystem_options || []), ...suggested, ...selected])].sort();
+
+  return `<section class="settings-section"><h3>${t('osvDBTitle')}</h3><p>${t('osvDBHint')}</p>
+    <div class="form-grid"><label><span>${t('cveDBSchedule')}</span><select name="osv_update_schedule">${['off','hourly','daily'].map(value => `<option value="${value}" ${(state.settings.osv_update_schedule || 'daily') === value ? 'selected' : ''}>${t(value)}</option>`).join('')}</select></label>
+    <div class="cve-database-actions"><button type="button" class="button secondary" data-action="update-osv-database" ${stats.running ? 'disabled' : ''}>${t('osvDBUpdate')}</button><button type="button" class="button secondary" data-action="rebuild-osv-database" ${stats.running ? 'disabled' : ''}>${t('cveDBRebuild')}</button><button type="button" class="button secondary" data-action="stop-osv-database" ${stats.running ? '' : 'hidden'}>${t('stop')}</button></div></div>
+    <div class="section-heading"><h3>${t('osvDBEcosystems')}</h3><button type="button" class="button secondary small" data-action="suggest-osv-ecosystems">${t('osvDBSuggest')}</button></div>
+    <div class="osv-ecosystems-grid">${options.map(value => `<label class="check-row"><input type="checkbox" data-osv-ecosystem value="${esc(value)}" ${selected.includes(value) ? 'checked' : ''}><span>${esc(value)}</span></label>`).join('')}</div>
+    <p class="form-note">${t('osvDBSaveFirst')}</p><div id="osv-database-status" role="status" aria-live="polite">${osvDatabaseStatusHTML(stats)}</div><p class="form-note">${t('osvDBSafety')}</p>
+    ${stats.path ? `<dl class="storage-paths"><div><dt>${t('osvDBFile')}</dt><dd><code>${esc(stats.path)}</code></dd></div></dl>` : ''}</section>`;
+}
+
 function cacheSettingsHTML(){
   const stats=state.cache_stats||{},settings=state.settings,locale=formatLocale(),number=n=>Number(n||0).toLocaleString(locale);
   const entries=settings.cache_max_entries||10000,mib=settings.cache_max_mib||512;
@@ -826,7 +1032,7 @@ function credentialSettingsHTML() {
   return `<section class="settings-section"><h3>${t('tokens')}</h3><p>${t('tokensHint')}</p><div class="form-grid">${fields}</div>${back}</section>`;
 }
 
-function renderSettings(){const s=state.settings;clearing=new Set();$('#main').innerHTML=heading(t('settings'),t('settingsSub'))+`<form id="settings-form" class="settings-layout panel"><section class="settings-section"><h3>${t('general')}</h3><div class="form-grid"><label><span>${t('uiLanguage')}</span><select name="language">${languageOptions()}</select></label></div></section><section class="settings-section"><h3>${t('sourceSettings')}</h3><p>${t('sourceSettingsHint')}</p>${['nvd','cve','osv'].map(n=>`<label class="check-row"><input type="checkbox" name="source_${n}" ${s.sources[n]?'checked':''}><span><strong>${{nvd:'NIST NVD',cve:'CVE Program',osv:'OSV.dev'}[n]}</strong><small>${t({nvd:'discovery',cve:'enrichment',osv:'packageMatching'}[n])}</small></span></label>`).join('')}<div class="form-grid">${field('nvd_url','nvdEndpoint',s.nvd_url,'url','required')}${field('cve_url','cveEndpoint',s.cve_url,'url','required')}${field('osv_url','osvEndpoint',s.osv_url,'url','required')}</div></section>${cveDatabaseSettingsHTML()}${cacheSettingsHTML()}${credentialSettingsHTML()}<section class="settings-section"><h3>${t('aiSettings')}</h3><p>${t('aiSettingsHint')}</p><div class="form-grid"><label><span>${t('defaultProvider')}</span><select name="ai_provider">${providerOptions(s.ai_provider)}</select></label><div></div>${field('openai_model','openaiModel',s.openai_model,'text','placeholder="e.g. a model ID enabled for your API account"')}${field('claude_model','claudeModel',s.claude_model,'text','placeholder="e.g. a model ID enabled for your API account"')}</div></section><section class="settings-section"><h3>${t('scannerSettings')}</h3><p>${t('scannerSettingsHint')}</p><div class="form-grid">${scannerSettingsHTML(s.scanners)}</div></section><section class="settings-section"><p class="storage-note">${t('storageNote')}</p>${storageDirectoryHTML()}${storagePathsHTML()}</section><div class="settings-actions"><button class="button primary" type="submit">${t('saveSettings')}</button><span class="form-error" id="settings-error"></span></div></form>`;$('#settings-form').addEventListener('submit',saveSettings);$$('[data-scanner-check]:checked').forEach(checkScanner);}
+function renderSettings(){const s=state.settings;clearing=new Set();$('#main').innerHTML=heading(t('settings'),t('settingsSub'))+`<form id="settings-form" class="settings-layout panel"><section class="settings-section"><h3>${t('general')}</h3><div class="form-grid"><label><span>${t('uiLanguage')}</span><select name="language">${languageOptions()}</select></label></div></section><section class="settings-section"><h3>${t('sourceSettings')}</h3><p>${t('sourceSettingsHint')}</p>${['nvd','cve','osv'].map(n=>`<label class="check-row"><input type="checkbox" name="source_${n}" ${s.sources[n]?'checked':''}><span><strong>${{nvd:'NIST NVD',cve:'CVE Program',osv:'OSV.dev'}[n]}</strong><small>${t({nvd:'discovery',cve:'enrichment',osv:'packageMatching'}[n])}</small></span></label>`).join('')}<div class="form-grid">${field('nvd_url','nvdEndpoint',s.nvd_url,'url','required')}${field('cve_url','cveEndpoint',s.cve_url,'url','required')}${field('osv_url','osvEndpoint',s.osv_url,'url','required')}</div></section>${cveDatabaseSettingsHTML()}${nvdDatabaseSettingsHTML()}${osvDatabaseSettingsHTML()}${cacheSettingsHTML()}${credentialSettingsHTML()}<section class="settings-section"><h3>${t('aiSettings')}</h3><p>${t('aiSettingsHint')}</p><div class="form-grid"><label><span>${t('defaultProvider')}</span><select name="ai_provider">${providerOptions(s.ai_provider)}</select></label><div></div>${field('openai_model','openaiModel',s.openai_model,'text','placeholder="e.g. a model ID enabled for your API account"')}${field('claude_model','claudeModel',s.claude_model,'text','placeholder="e.g. a model ID enabled for your API account"')}</div></section><section class="settings-section"><h3>${t('scannerSettings')}</h3><p>${t('scannerSettingsHint')}</p><div class="form-grid">${scannerSettingsHTML(s.scanners)}</div></section><section class="settings-section"><p class="storage-note">${t('storageNote')}</p>${storageDirectoryHTML()}${storagePathsHTML()}</section><div class="settings-actions"><button class="button primary" type="submit">${t('saveSettings')}</button><span class="form-error" id="settings-error"></span></div></form>`;$('#settings-form').addEventListener('submit',saveSettings);$$('[data-scanner-check]:checked').forEach(checkScanner);}
 function render(){if(pendingPageRender)return;renderNav();const [page,id,view]=route();if(location.hash===newProjectHash)renderProjectEditor();else if(page==='projects')$('#main').innerHTML=heading(t('projects'),t('projectsSub'),button('addProject','new-project',true,'plus'))+`<div class="panel"><div class="panel-head"><h2>${t('yourProjects')} <span class="muted">(${state.projects.length})</span></h2></div>${projectList(state.projects, true)}</div>`;else if(page==='vulnerabilities'){$('#main').innerHTML=heading(t('vulnerabilities'),t('vulnsSub'),state.projects.length?syncAllControls(true):'')+filtersHTML(true)+`<div class="panel" id="finding-results">${findingsTable()}</div>`;bindFilters();}else if(page==='activity')$('#main').innerHTML=heading(t('activity'),t('activitySub'))+`<div class="panel">${activityList()}</div>`;else if(page==='settings')renderSettings();else if(page==='project'){if(view==='edit')renderProjectEditor(id);else if(view==='delete')renderProjectDeletion(id);else renderProject(id);}else renderOverview();mountActiveSyncs();}
 function componentFields(a={},removable=true){const el=document.createElement('div');el.className='asset-field';el.dataset.id=a.id||'';el.innerHTML=`<div class="asset-top"><label><span>${t('category')}</span><select data-field="kind">${['language','database','container','docker','webserver','ai','library','other'].map(k=>`<option value="${k}" ${(a.kind||'library')===k?'selected':''}>${t(k)}</option>`).join('')}</select></label><label><span>${t('name')}</span><input data-field="name" value="${esc(a.name)}" required placeholder="org.apache.logging.log4j:log4j-core" maxlength="300"></label><label><span>${t('version')}</span><input data-field="version" value="${esc(a.version)}" required placeholder="2.14.1" maxlength="100"></label>${removable?`<button type="button" class="icon-button asset-remove" aria-label="${t('removeComponent')}">×</button>`:''}</div><div class="asset-bottom"><label><span>${t('ecosystem')}</span><select data-field="ecosystem"><option value="">—</option>${['Go','npm','PyPI','Maven','Packagist','crates.io','RubyGems','NuGet','Hex','Pub','Debian','Alpine','GIT'].map(e=>`<option ${a.ecosystem===e?'selected':''}>${e}</option>`).join('')}</select></label><label><span>${t('cpeLabel')}</span><input data-field="cpe" value="${esc(a.cpe)}" placeholder="cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"></label></div>`;return el;}
 function openComponent(id){const p=state.projects.find(p=>p.id===id);if(!p||p.syncing)return false;componentDraft={...p,assets:p.assets.map(a=>({...a}))};$('#component-form').reset();$('#component-error').textContent='';$('#component-project').textContent=t('componentProject').replace('{project}',p.name);const fields=$('#component-fields');fields.innerHTML='';const el=componentFields({},false);fields.append(el);localize($('#component-dialog'));$('#component-dialog').showModal();el.querySelector('[data-field="name"]').focus();return true;}
@@ -1025,7 +1231,7 @@ async function saveProject(e) {
     } else {
       render();
     }
-    toast(t('saved'));
+    toast(t(projectNeedsAssessment(project) ? 'projectSavedResyncNeeded' : 'saved'));
   } catch (err) {
     error.textContent = err.message;
   } finally {
@@ -1040,6 +1246,12 @@ async function saveSettings(e) {
   submit.disabled = true;
   const body = {...state.settings, sources:{}, scanners:{}, tokens:{}, clear_tokens:[...clearing]};
   for (const key of ['language','nvd_url','cve_url','osv_url','ai_provider','openai_model','claude_model']) body[key] = form.elements[key].value.trim();
+  if (form.elements.osv_update_schedule) {
+    body.osv_update_schedule = form.elements.osv_update_schedule.value;
+    body.osv_ecosystems = $$('[data-osv-ecosystem]:checked', form).map(input => input.value);
+  }
+
+  if (form.elements.nvd_update_schedule) body.nvd_update_schedule = form.elements.nvd_update_schedule.value;
   if (form.elements.cve_update_schedule) body.cve_update_schedule = form.elements.cve_update_schedule.value;
   for (const key of ['cache_hours','cache_max_entries','cache_max_mib']) body[key] = Number(form.elements[key].value);
   for (const key of ['nvd','cve','osv']) body.sources[key] = form.elements['source_'+key].checked;
@@ -1074,7 +1286,17 @@ async function scanProjectCode(id) {
   await refresh();
   toast(t('codeScanStarted'));
 }
-async function syncProject(id,assetID='',mode='auto',severity=''){const options=assetID?{asset_id:assetID}:{};if(mode!=='auto')options.mode=mode;if(severity)options.severity=severity;await invoke('Sync',id,options);await refresh();toast(t('syncStarted'));}
+async function syncProject(id, assetID = '', mode = 'auto', severity = '') {
+  const options = assetID ? {asset_id:assetID} : {};
+  if (mode !== 'auto') options.mode = mode;
+  if (severity) options.severity = severity;
+
+  await invoke('Sync', id, options);
+  await refresh();
+
+  const run = state?.projects?.find(project => project.id === id)?.runs?.[0];
+  toast(t(run && queuedWorkflow(run) ? 'syncQueued' : 'syncStarted'));
+}
 async function sample(){const p=await invoke('CreateProject',{name:'Sample · Java service',description:t('sampleDescription'),repository:'',local_path:'',scan_code:false,schedule:'off',assets:[{id:'',kind:'library',name:'org.apache.logging.log4j:log4j-core',version:'2.14.1',ecosystem:'Maven',cpe:'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*'}]});await refresh(false);location.hash='project/'+p.id;projectTab='techStack';render();toast(t('sampleAdded'));}
 function showFinding(id,asset,project){
   const p = state.projects.find(p => p.id === project);
@@ -1083,7 +1305,7 @@ function showFinding(id,asset,project){
   const f = {...finding, project_id:p.id, project_name:p.name};
   currentFinding=f;$('#detail-body').innerHTML=`<div class="detail-tags">${pill(t(severityKey(f.severity)),severityKey(f.severity))}${pill(f.id)}${pill(t(f.match),f.match==='review'?'review':'')}${f.score?pill(t('score')+' '+f.score):''}</div><h2 class="detail-title">${esc(f.title||f.id)}</h2><p class="subtitle">${esc(f.component)} ${esc(findingVersionLabel(f))} · ${esc(f.project_name)} · ${esc(f.sources.join(' + '))}</p>${f.match==='review'?`<div class="notice">${t('reviewWarning')}</div>`:f.match==='cpe'?`<div class="notice info">${t('cpeWarning')}</div>`:''}<p class="detail-description">${esc(f.description)}</p><div class="detail-section"><h3>${t('remediation')}</h3><div id="advice-result"></div><div class="advice-actions"><select id="advice-provider" aria-label="${t('defaultProvider')}">${providerOptions(state.settings.ai_provider)}</select><button class="button primary small" data-action="advice">${t('getAdvice')}</button></div><p class="form-note">${t('aiDisclosure')}</p></div><div class="detail-section"><h3>${t('references')}</h3><ul class="reference-list">${f.references?.length?f.references.map(u=>safeURL(u)?`<li><a href="${safeURL(u)}" target="_blank" rel="noreferrer">${esc(u)} ↗</a></li>`:'').join(''):`<li class="muted">${t('noReferences')}</li>`}</ul></div>`;$('#detail-dialog').showModal();getAdvice('public');}
 async function getAdvice(provider){const f=currentFinding,container=$('#advice-result');container.innerHTML=`<div class="advice-box"><p>${t('generating')}</p></div>`;const btn=$('[data-action="advice"]');if(btn)btn.disabled=true;try{const a=await invoke('Advice',f.project_id,{finding_id:f.id,asset_id:f.asset_id,provider});if(currentFinding!==f)return;container.innerHTML=`<div class="advice-box"><h3>${t(a.provider)}</h3><p>${esc(a.text)}</p>${a.warning?`<p class="form-error">${esc(a.warning)}</p>`:''}${a.provider!=='public'?`<p class="form-note">${t('aiReview')}</p>`:''}</div>`;}catch(err){container.innerHTML=`<p class="form-error">${esc(err.message)}</p>`;}finally{if(btn)btn.disabled=false;}}
-document.addEventListener('click',async e=>{if(changingDataDirectory)return;const pageButton=e.target.closest('[data-finding-page]');if(pageButton){if(!pageButton.disabled)turnFindingPage(pageButton.dataset.findingPage);return;}const close=e.target.closest('.close-dialog');if(close){close.closest('dialog').close();return;}if(e.target.closest('.asset-remove')){e.target.closest('.asset-field').remove();return;}const clear=e.target.closest('[data-clear-token]');if(clear){clearCredential(clear);return;}const dismiss=e.target.closest('[data-dismiss-workflow]');if(dismiss){dismissWorkflow(dismiss.dataset.projectId,dismiss.dataset.dismissWorkflow);return;}const toggle=e.target.closest('[data-toggle-workflow]');if(toggle){toggleWorkflow(toggle.dataset.toggleWorkflow);return;}const tab=e.target.closest('[data-tab]');if(tab){if(projectTab!==tab.dataset.tab)expandedRuns.clear();projectTab=tab.dataset.tab;render();return;}const row=e.target.closest('[data-finding]');if(row){showFinding(row.dataset.finding,row.dataset.asset,row.dataset.project);return;}const target=e.target.closest('[data-action]');if(!target)return;try{switch(target.dataset.action){case'new-project':openNewProject();break;case'edit-project':location.hash='project/'+target.dataset.id+'/edit';break;case'cancel-project':cancelProject(target.closest('form'));break;case'add-project-asset':{const asset=componentFields();$('[data-project-assets]',target.closest('form')).append(asset);$('[data-field="name"]',asset).focus();break;}case'add-component':openComponent(target.dataset.id);break;case'scan-code':target.disabled=true;await scanProjectCode(target.dataset.id);break;case'sync':target.disabled=true;await syncProject(target.dataset.id,$('#sync-asset')?.value||'', $('#sync-mode')?.value||'auto',$('#sync-severity')?.value||'');break;case'sync-asset':target.disabled=true;await syncProject(target.dataset.id,target.dataset.asset,'auto',componentSyncSeveritySelection.get(stackKey(target.dataset.id,target.dataset.asset))||'');break;case'sync-all':{const severity=syncAllSeverity;target.disabled=true;for(const p of state.projects)if(!p.syncing)await invoke('Sync',p.id,severity?{severity}:{});await refresh();toast(t('syncStarted'));break;}case'sample':target.disabled=true;await sample();break;case'delete-project':openProjectDeletion(target.dataset.id);break;
+document.addEventListener('click',async e=>{if(changingDataDirectory)return;const pageButton=e.target.closest('[data-finding-page]');if(pageButton){if(!pageButton.disabled)turnFindingPage(pageButton.dataset.findingPage);return;}const close=e.target.closest('.close-dialog');if(close){close.closest('dialog').close();return;}if(e.target.closest('.asset-remove')){e.target.closest('.asset-field').remove();return;}const clear=e.target.closest('[data-clear-token]');if(clear){clearCredential(clear);return;}const dismiss=e.target.closest('[data-dismiss-workflow]');if(dismiss){dismissWorkflow(dismiss.dataset.projectId,dismiss.dataset.dismissWorkflow);return;}const toggle=e.target.closest('[data-toggle-workflow]');if(toggle){toggleWorkflow(toggle.dataset.toggleWorkflow);return;}const tab=e.target.closest('[data-tab]');if(tab){if(projectTab!==tab.dataset.tab)expandedRuns.clear();projectTab=tab.dataset.tab;render();return;}const row=e.target.closest('[data-finding]');if(row){showFinding(row.dataset.finding,row.dataset.asset,row.dataset.project);return;}const target=e.target.closest('[data-action]');if(!target)return;try{switch(target.dataset.action){case'new-project':openNewProject();break;case'edit-project':location.hash='project/'+target.dataset.id+'/edit';break;case'cancel-project':cancelProject(target.closest('form'));break;case'add-project-asset':{const asset=componentFields();$('[data-project-assets]',target.closest('form')).append(asset);$('[data-field="name"]',asset).focus();break;}case'add-component':openComponent(target.dataset.id);break;case'scan-code':target.disabled=true;await scanProjectCode(target.dataset.id);break;case'sync':target.disabled=true;await syncProject(target.dataset.id,$('#sync-asset')?.value||'', $('#sync-mode')?.value||'auto',$('#sync-severity')?.value||'');break;case'sync-asset':target.disabled=true;await syncProject(target.dataset.id,target.dataset.asset,'auto',componentSyncSeveritySelection.get(stackKey(target.dataset.id,target.dataset.asset))||'');break;case'sync-all':{const severity=syncAllSeverity;target.disabled=true;for(const p of state.projects)if(!p.syncing)await invoke('Sync',p.id,severity?{severity}:{});await refresh();toast(t(state.projects.some(p=>p.runs?.[0]&&queuedWorkflow(p.runs[0]))?'syncRequestsSubmitted':'syncStarted'));break;}case'sample':target.disabled=true;await sample();break;case'delete-project':openProjectDeletion(target.dataset.id);break;
 case'cancel-project-deletion':location.hash='project/'+target.closest('form').dataset.projectId+'/edit';break;
 case'control-sync':target.disabled=true;try{await controlWorkflow(target.dataset.id,target.dataset.run,target.dataset.control);}finally{target.disabled=false;}break;case'delete-activity':target.disabled=true;try{await deleteActivity(target.dataset.id,target.dataset.run);}finally{target.disabled=false;}break;case'browse-data-directory':await browseFolder($('#data-directory'),'chooseDataDirectory',state.data_directory);break;case'add-repository': {
   const row = repositoryField();
@@ -1107,6 +1329,38 @@ case'focus-snyk-token': {
 }
 case'return-to-project-form':if(projectTokenSetup)location.hash=projectTokenSetup.returnHash;break;
 case'toggle-credential':await toggleCredential(target);break;
+case'suggest-osv-ecosystems': {
+    const selected = suggestedOSVEcosystems();
+    $$('[data-osv-ecosystem]').forEach(input => {input.checked = selected.includes(input.value);});
+    break;
+  }
+case'update-osv-database':case'stop-osv-database':case'rebuild-osv-database': {
+    const action = target.dataset.action;
+    if (action !== 'stop-osv-database') {
+      const saved = state.settings.osv_ecosystems ?? suggestedOSVEcosystems();
+      const selected = $$('[data-osv-ecosystem]:checked').map(input => input.value);
+      if (JSON.stringify([...saved].sort()) !== JSON.stringify([...selected].sort())) throw new Error(t('osvDBSaveFirst'));
+    }
+    if (action === 'rebuild-osv-database' && !(await confirmAction(t('osvDBRebuildConfirm')))) break;
+    target.disabled = true;
+    try {
+      await invoke({'update-osv-database':'UpdateOSVDatabase','stop-osv-database':'StopOSVDatabaseUpdate','rebuild-osv-database':'RebuildOSVDatabase'}[action]);
+      applyPollingState(await invoke('StateSince', state.version || ''));
+    } finally {
+      target.disabled = Boolean(state.osv_database?.running) && action !== 'stop-osv-database';
+    }
+    break;
+  }
+case'update-nvd-database':case'stop-nvd-database':case'rebuild-nvd-database':{
+  const action=target.dataset.action;
+  if(action==='rebuild-nvd-database'&&!(await confirmAction(t('nvdDBRebuildConfirm'))))break;
+  target.disabled=true;
+  try{
+    await invoke({'update-nvd-database':'UpdateNVDDatabase','stop-nvd-database':'StopNVDDatabaseUpdate','rebuild-nvd-database':'RebuildNVDDatabase'}[action]);
+    const next=await invoke('StateSince',state.version||'');applyPollingState(next);
+  }finally{target.disabled=Boolean(state.nvd_database?.running)&&action!=='stop-nvd-database';}
+  break;
+}
 case'update-cve-database':case'stop-cve-database':case'rebuild-cve-database':{
   const action=target.dataset.action;
   if(action==='rebuild-cve-database'&&!(await confirmAction(t('cveDBRebuildConfirm'))))break;

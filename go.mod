@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/wailsapp/wails/v3 v3.1.0
 	go.etcd.io/bbolt v1.4.3
+	golang.org/x/mod v0.43.0
 	golang.org/x/sys v0.48.0
 )
 

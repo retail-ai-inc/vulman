@@ -12,6 +12,8 @@ import (
 
 	"vulman/internal/cvedb"
 	"vulman/internal/model"
+	"vulman/internal/nvddb"
+	"vulman/internal/osvdb"
 	"vulman/internal/scanner"
 	"vulman/internal/sources"
 	"vulman/internal/store"
@@ -19,6 +21,10 @@ import (
 )
 
 type Engine struct {
+	OSV            *osvdb.Updater
+	lastOSVAttempt time.Time
+	NVD            *nvddb.Updater
+	lastNVDAttempt time.Time
 	CVE            *cvedb.Updater
 	cveClose       sync.Once
 	lastCVEAttempt time.Time
@@ -35,6 +41,7 @@ type Engine struct {
 type activeRun struct {
 	id      string
 	control *workflow.Control
+	queued  *queuedSync
 }
 
 var ErrAssetNotFound = errors.New("tech stack component not found")
@@ -48,22 +55,42 @@ func New(s *store.Store) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not open the local CVE catalogue: %w", err)
 	}
+	nvd, err := s.OpenNVDDatabase()
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("could not open the local NVD catalogue: %w", err), catalogue.Close())
+	}
 	ctx, cancel := context.WithCancel(context.Background())
+	osv, err := s.OpenOSVDatabase()
+	if err != nil {
+		cancel()
+		return nil, errors.Join(fmt.Errorf("could not open the local OSV catalogue: %w", err), catalogue.Close(), nvd.Close())
+	}
+
 	e := &Engine{Store: s, Sources: sources.New(s), ctx: ctx, cancel: cancel, active: map[string]activeRun{}}
+	e.OSV = osvdb.NewUpdater(osv)
+	e.Sources.LocalOSV = osv
 	e.CVE = cvedb.NewUpdater(catalogue)
+	e.NVD = nvddb.NewUpdater(nvd)
+	e.Sources.LocalNVD = nvd
 	e.Sources.LocalCVE = catalogue
 	err = s.Update(func(st *model.State) error {
 		for i := range st.Projects {
 			p := &st.Projects[i]
+			p.MarkOutdatedComponents()
 			p.Syncing = false
 			for j := range p.Runs {
 				if activeStatus(p.Runs[j].Status) {
+					queued := p.Runs[j].Status == "queued" || p.Runs[j].Status == "waiting_databases"
 					finishPause(&p.Runs[j])
 					p.Runs[j].Status = "interrupted"
 					p.Runs[j].FinishedAt = time.Now()
 					p.Runs[j].Warnings = append(p.Runs[j].Warnings, "Application stopped before assessment finished.")
 					interruptSteps(&p.Runs[j])
-					addLog(&p.Runs[j], "", "interrupted", "")
+					if queued {
+						addLog(&p.Runs[j], "", "queue_interrupted", "")
+					} else {
+						addLog(&p.Runs[j], "", "interrupted", "")
+					}
 				}
 			}
 		}
@@ -73,7 +100,7 @@ func New(s *store.Store) (*Engine, error) {
 
 	if err != nil {
 		cancel()
-		return nil, errors.Join(err, e.CVE.Close())
+		return nil, errors.Join(err, e.CVE.Close(), e.NVD.Close(), e.OSV.Close())
 	}
 
 	e.wg.Add(1)
@@ -88,6 +115,13 @@ func (e *Engine) Close() {
 	e.mu.Unlock()
 	e.wg.Wait()
 	e.cveClose.Do(func() {
+		if err := e.OSV.Close(); err != nil {
+			log.Printf("Closing OSV catalogue: %v", err)
+		}
+
+		if err := e.NVD.Close(); err != nil {
+			log.Printf("Closing NVD catalogue: %v", err)
+		}
 		if err := e.CVE.Close(); err != nil {
 			log.Printf("Closing CVE catalogue: %v", err)
 		}
@@ -100,6 +134,8 @@ func (e *Engine) loop() {
 	defer ticker.Stop()
 	if st, err := e.Store.Read(); err == nil {
 		e.updateCVEDue(time.Now(), st.Settings)
+		e.updateNVDDue(time.Now(), st.Settings)
+		e.updateOSVDue(time.Now(), st)
 	}
 	for {
 		select {
@@ -111,6 +147,8 @@ func (e *Engine) loop() {
 				continue
 			}
 			e.updateCVEDue(now, st.Settings)
+			e.updateNVDDue(now, st.Settings)
+			e.updateOSVDue(now, st)
 			for _, id := range dueProjects(st, now) {
 				_ = e.Start(id, "schedule")
 			}
@@ -178,6 +216,7 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 
 	var snapshot model.Project
 	var settings model.Settings
+	var queued *queuedSync
 	runID := model.NewID()
 
 	err := e.Store.Update(func(st *model.State) error {
@@ -218,7 +257,21 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 			p.Syncing = true
 			now := time.Now()
 			run := model.Run{ID: runID, StartedAt: now, Status: "running", Trigger: trigger, AssetID: assetID, AssetName: assetName, Mode: mode, Severity: severity, Warnings: []string{}, Steps: planSteps(*p, settings, assetID)}
-			addLog(&run, "", "run_started", assetName)
+			waits, err := e.databaseDependenciesForAsset(*p, settings, mode, assetID)
+			if err != nil {
+				return err
+			}
+
+			if len(waits) > 0 {
+				queued = &queuedSync{waits: waits}
+				run.Status = "queued"
+				run.PausedAt = now
+				run.DatabaseWaits = waits
+				addLog(&run, "", "sync_queued", "")
+			} else {
+				addLog(&run, "", "run_started", assetName)
+			}
+
 			p.Runs = append([]model.Run{run}, p.Runs...)
 			if len(p.Runs) > 30 {
 				p.Runs = p.Runs[:30]
@@ -241,10 +294,22 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 
 	e.wg.Add(1)
 	control := workflow.New(e.ctx, 20*time.Minute, func() { e.acknowledgePause(id, runID) })
-	e.active[id] = activeRun{id: runID, control: control}
+	if queued != nil {
+		control.Pause()
+	}
+
+	e.active[id] = activeRun{id: runID, control: control, queued: queued}
 	go func() {
 		defer e.wg.Done()
 		defer control.Close()
+		if queued != nil {
+			var ready bool
+			mode, ready = e.awaitDatabases(id, runID, queued, control, mode)
+			if !ready {
+				return
+			}
+		}
+
 		e.assess(snapshot, settings, runID, assetID, mode, severity, control)
 	}()
 
@@ -504,6 +569,14 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 
 			current.Syncing = false
 			current.Findings = all
+			if status == "complete" && severity == "" && mode != codeScanMode && current.Revision == p.Revision && (s.Sources["nvd"] || s.Sources["osv"]) {
+				for k := range current.Assets {
+					if assetID == "" || current.Assets[k].ID == assetID {
+						current.Assets[k].NeedsAssessment = false
+					}
+				}
+			}
+
 			if fullAssessmentComplete {
 				current.LastSync = time.Now()
 				current.AssessedRevision = p.Revision

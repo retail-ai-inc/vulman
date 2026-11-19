@@ -12,7 +12,7 @@ var ErrRunNotActive = errors.New("assessment is no longer active; reload its wor
 var ErrInvalidControl = errors.New("invalid workflow action")
 
 func activeStatus(status string) bool {
-	return status == "running" || status == "pausing" || status == "paused" || status == "stopping"
+	return status == "running" || status == "pausing" || status == "paused" || status == "stopping" || status == "queued" || status == "waiting_databases"
 }
 
 func finishPause(run *model.Run) {
@@ -34,7 +34,7 @@ func (e *Engine) acknowledgePause(projectID, runID string) {
 
 // Control addresses an exact run so a stale tab cannot stop a newer assessment.
 func (e *Engine) Control(projectID, runID, action string) error {
-	if action != "pause" && action != "resume" && action != "stop" {
+	if action != "pause" && action != "resume" && action != "stop" && action != "cancel-queued" && action != "retry-databases" && action != "use-available" {
 		return ErrInvalidControl
 	}
 
@@ -42,6 +42,14 @@ func (e *Engine) Control(projectID, runID, action string) error {
 	defer e.mu.Unlock()
 	a, ok := e.active[projectID]
 	if !ok || a.id != runID || e.closed || a.control.Context().Err() != nil {
+		return ErrRunNotActive
+	}
+
+	if a.queued != nil {
+		return e.controlQueued(projectID, a, action)
+	}
+
+	if action == "cancel-queued" || action == "retry-databases" || action == "use-available" {
 		return ErrRunNotActive
 	}
 

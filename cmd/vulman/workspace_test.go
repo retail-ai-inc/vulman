@@ -380,6 +380,43 @@ func TestDesktopCacheConfiguration(t *testing.T) {
 	}
 }
 
+func TestDesktopOSVConfigurationNormalizesAndPreservesExplicitSelections(t *testing.T) {
+	desktop := &Desktop{store: newTestStore(t)}
+	cfg := model.Defaults().Settings
+	cfg.OSVEcosystems = []string{"Go", "Debian:12", "Go"}
+	if err := desktop.SaveSettings(SettingsInput{Settings: cfg}); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := desktop.State()
+	if err != nil || !reflect.DeepEqual(state.Settings.OSVEcosystems, []string{"Debian", "Go"}) || state.Settings.OSVUpdateSchedule != "daily" {
+		t.Fatalf("unexpected OSV configuration: %+v %v", state.Settings, err)
+	}
+
+	for _, values := range [][]string{{"../Go"}, {"https://host"}, {"Go/../../"}} {
+		invalid := cfg
+		invalid.OSVEcosystems = values
+		if err := desktop.SaveSettings(SettingsInput{Settings: invalid}); err == nil {
+			t.Fatalf("invalid ecosystem accepted: %v", values)
+		}
+	}
+
+	cfg.OSVEcosystems = []string{}
+	if err := desktop.SaveSettings(SettingsInput{Settings: cfg}); err != nil {
+		t.Fatal(err)
+	}
+
+	stored, err := desktop.store.Read()
+	if err != nil || stored.Settings.OSVEcosystems == nil || len(stored.Settings.OSVEcosystems) != 0 {
+		t.Fatal("an explicit empty selection was replaced by automatic project suggestions")
+	}
+
+	cfg.OSVUpdateSchedule = "weekly"
+	if err := desktop.SaveSettings(SettingsInput{Settings: cfg}); err == nil {
+		t.Fatal("unsupported OSV schedule accepted")
+	}
+}
+
 func TestDesktopRejectsUnsafeExternalLinks(t *testing.T) {
 	var opened []string
 	desktop := &Desktop{openBrowser: func(raw string) error {

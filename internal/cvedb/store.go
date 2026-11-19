@@ -54,6 +54,7 @@ type Stats struct {
 	CheckedAt     time.Time `json:"checked_at"`
 	Resumable     bool      `json:"resumable"`
 	Imported      int       `json:"imported"`
+	ImportTotal   int       `json:"import_total"`
 	Running       bool      `json:"running"`
 	Phase         string    `json:"phase"`
 	Downloaded    int64     `json:"downloaded"`

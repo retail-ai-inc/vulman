@@ -226,6 +226,58 @@ test('idle polling sends the last version and keeps findings when cache metrics 
   assert.equal(run('state.settings.language'), 'en');
 });
 
+test('NVD catalogue progress preserves Configuration drafts and controls both datasets', async () => {
+  const run = app();
+  run(`
+    state = {version:'1', projects:[], settings:{language:'en',sources:{},scanners:{},nvd_update_schedule:'two_hourly'},token_status:{}};
+    location.hash = '#settings';
+    renderSettings();
+    const savedHTML = $('#main').innerHTML;
+    $('#settings-form').draft = 'keep this unsaved token';
+    applyPollingState({version:'1',cache_stats:{},nvd_database:{running:true,phase:'importing',records:1200,cpes:100000,imported:512,import_total:1024,feed:'2026',feeds_done:2,feeds_total:28,resumable:true}});
+  `);
+  assert.equal(run(`$('#main').innerHTML === savedHTML`), true);
+  assert.equal(run(`$('#settings-form').draft`), 'keep this unsaved token');
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /NVD advisories 1,200/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /CPE dictionary entries 100,000/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /2 of 28 feeds complete/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /Records imported: 512 \/ 1,024/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /class="database-update-progress" max="1024" value="512"/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /max="28" value="2"/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /Current feed: NVD 2026/);
+  assert.equal(run(`$('[data-action="update-nvd-database"]').disabled`), true);
+  assert.equal(run(`$('[data-action="stop-nvd-database"]').hidden`), false);
+  assert.match(run('nvdDatabaseSettingsHTML()'), /value="two_hourly" selected/);
+  run(`applyPollingState({version:'1',cache_stats:{},nvd_database:{running:true,phase:'downloading',feed:'dictionary',downloaded:1048576,download_total:4194304,feeds_done:27,feeds_total:28,resumable:true}})`);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /Downloaded 1\.0 \/ 4\.0 MiB · 25%/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /max="4194304" value="1048576"/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /Current feed: CPE dictionary/);
+  assert.equal(run(`$('#main').innerHTML === savedHTML`), true);
+  assert.equal(run(`$('#settings-form').draft`), 'keep this unsaved token');
+  run(`
+    const requests = [];
+    var allow = false;
+    confirmAction = async () => allow;
+    invoke = async (...args) => {requests.push(args);return {version:'1',cache_stats:{},nvd_database:{running:false,phase:'interrupted'}};};
+    var action = {dataset:{action:'rebuild-nvd-database'},closest:selector => selector === '[data-action]' ? action : null};
+  `);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests.length'), 0);
+  run('allow = true');
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[0][0]'), 'RebuildNVDDatabase');
+  run(`action.dataset.action = 'update-nvd-database';`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[2][0]'), 'UpdateNVDDatabase');
+  run(`action.dataset.action = 'stop-nvd-database';`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[4][0]'), 'StopNVDDatabaseUpdate');
+  run(`updateNVDDatabaseStatus({running:false,phase:'failed',error:'<unsafe>'});lang = 'ja';`);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /&lt;unsafe&gt;/);
+  assert.doesNotMatch(run(`$('#nvd-database-status').innerHTML`), /<progress/);
+  assert.match(run('nvdDatabaseSettingsHTML()'), /ローカル NVD データベースと CPE 辞書/);
+});
+
 test('CVE database progress updates without replacing an unsaved Configuration form', () => {
   const run = app();
   run(`
@@ -234,20 +286,103 @@ test('CVE database progress updates without replacing an unsaved Configuration f
     renderSettings();
     const formHTML = $('#main').innerHTML;
     $('#settings-form').draft = 'unsaved token';
-    applyPollingState({version:'1', cache_stats:{}, cve_database:{running:true, phase:'importing', imported:512, records:1000, bytes:1048576, resumable:true}});
+    applyPollingState({version:'1', cache_stats:{}, cve_database:{running:true, phase:'importing', imported:512, import_total:2048, records:1000, bytes:1048576, resumable:true}});
   `);
   assert.equal(run(`$('#main').innerHTML === formHTML`), true);
   assert.equal(run(`$('#settings-form').draft`), 'unsaved token');
   assert.match(run(`$('#cve-database-status').innerHTML`), /Importing CVE records/);
-  assert.match(run(`$('#cve-database-status').innerHTML`), /512 archive entries processed/);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /Archive entries processed: 512 \/ 2,048/);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /class="database-update-progress" max="2048" value="512"/);
   assert.equal(run(`$('[data-action="update-cve-database"]').disabled`), true);
   assert.equal(run(`$('[data-action="stop-cve-database"]').hidden`), false);
   assert.match(run('cveDatabaseSettingsHTML()'), /name="cve_update_schedule"[^]*?value="daily" selected/);
+  run(`applyPollingState({version:'1',cache_stats:{},cve_database:{running:true,phase:'downloading',downloaded:1048576,download_total:2097152}})`);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /Downloaded 1\.0 \/ 2\.0 MiB · 50%/);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /max="2097152" value="1048576"/);
+  assert.equal(run(`$('#main').innerHTML === formHTML`), true);
+  assert.equal(run(`$('#settings-form').draft`), 'unsaved token');
+  run(`updateCVEDatabaseStatus({phase:'cleaning',running:true});`);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /Cleaning previous CVE catalogue/);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /<progress class="database-update-progress"  aria-label=/);
   run(`updateCVEDatabaseStatus({phase:'failed',error:'<private>',running:false});`);
   assert.match(run(`$('#cve-database-status').innerHTML`), /&lt;private&gt;/);
+  assert.doesNotMatch(run(`$('#cve-database-status').innerHTML`), /<progress/);
   assert.equal(run(`$('[data-action="update-cve-database"]').disabled`), false);
   run(`lang='ja';`);
   assert.match(run('cveDatabaseSettingsHTML()'), /ローカル CVE データベース/);
+});
+
+test('OSV Configuration selection and progress polling preserve drafts and localize ecosystem data', () => {
+  const run = app();
+  run(`
+    state = {version:'1',projects:[],settings:{language:'en',sources:{},scanners:{},osv_update_schedule:'daily',osv_ecosystems:['Go']},token_status:{},osv_ecosystem_options:['Go','PyPI','<unsafe>'],osv_suggested_ecosystems:['PyPI']};
+    location.hash = '#settings';
+    renderSettings();
+    const originalHTML = $('#main').innerHTML;
+    $('#settings-form').draft = 'unsaved secret';
+    applyPollingState({version:'1',cache_stats:{},osv_database:{running:true,phase:'importing',feed:'Go',feeds_done:0,feeds_total:2,resumable:true,imported:256,import_total:600,ecosystems:[{ecosystem:'Go',phase:'importing',records:0},{ecosystem:'PyPI',phase:'queued'}]}});
+  `);
+  assert.equal(run(`$('#main').innerHTML === originalHTML`), true);
+  assert.equal(run(`$('#settings-form').draft`), 'unsaved secret');
+  assert.match(run('originalHTML'), /data-osv-ecosystem value="Go" checked/);
+  assert.match(run('originalHTML'), /&lt;unsafe&gt;/);
+  assert.doesNotMatch(run('originalHTML'), /<unsafe>/);
+  assert.match(run(`$('#osv-database-status').innerHTML`), /Records imported: 256 \/ 600/);
+  assert.match(run(`$('#osv-database-status').innerHTML`), /max="600" value="256"/);
+  assert.match(run(`$('#osv-database-status').innerHTML`), /0 of 2 ecosystems complete/);
+  assert.equal(run(`$('[data-action="update-osv-database"]').disabled`), true);
+  assert.equal(run(`$('[data-action="stop-osv-database"]').hidden`), false);
+  run(`applyPollingState({version:'1',cache_stats:{},osv_database:{running:true,phase:'downloading',feed:'PyPI',downloaded:1048576,download_total:2097152}})`);
+  assert.match(run(`$('#osv-database-status').innerHTML`), /Downloaded 1\.0 \/ 2\.0 MiB · 50%/);
+  assert.match(run(`$('#osv-database-status').innerHTML`), /Current ecosystem: PyPI/);
+  run(`lang = 'ja'`);
+  assert.match(run('osvDatabaseSettingsHTML()'), /ローカルOSVデータベース/);
+});
+
+test('OSV queue cards use only their ecosystem progress and refresh without page rendering', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    workflow.status='queued';
+    workflow.database_waits=[{source:'osv:Go',status:'updating'}];
+    state={projects:[{...project,runs:[workflow]}],settings:{language:'en'}};
+    const panel={dataset:{syncProjectId:'p',syncRun:'run-1'},querySelector:()=>null,innerHTML:''};
+    document.querySelectorAll=()=>[panel];
+    render=()=>{throw new Error('unexpected page render');};
+    applyPollingState({osv_database:{running:true,phase:'downloading',feed:'PyPI',downloaded:100,download_total:200,ecosystems:[{ecosystem:'Go',phase:'complete',running:false,initialized:true},{ecosystem:'PyPI',phase:'downloading',running:true}]}});
+  `);
+  assert.match(run('panel.innerHTML'), /Local OSV database · Go/);
+  assert.match(run('panel.innerHTML'), /OSV update complete/);
+  assert.doesNotMatch(run('panel.innerHTML'), /50%|Current ecosystem: PyPI/);
+});
+
+test('OSV actions require saved selections and rebuilding confirmation', async () => {
+  const run = app();
+  run(`
+    state={version:'1',projects:[],settings:{osv_ecosystems:['Go']}};
+    const inputs=[{value:'Go',checked:true},{value:'PyPI',checked:false}];
+    document.querySelectorAll=selector=>selector.includes('[data-osv-ecosystem]')?inputs.filter(input=>!selector.includes(':checked')||input.checked):[];
+    var calls=[],notice,allow=false;
+    toast=text=>notice=text;
+    confirmAction=async()=>allow;
+    invoke=async(...args)=>{calls.push(args);return {version:'1',cache_stats:{},osv_database:{running:false,phase:'complete'}};};
+    var action={dataset:{action:'rebuild-osv-database'},closest:selector=>selector==='[data-action]'?action:null};
+  `);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('calls.length'), 0);
+  run('allow=true');
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('calls[0][0]'), 'RebuildOSVDatabase');
+  run(`action.dataset.action='update-osv-database'; inputs[1].checked=true; calls=[];`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('calls.length'), 0);
+  assert.match(run('notice'), /Save configuration/);
+  run(`inputs[1].checked=false;`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('calls[0][0]'), 'UpdateOSVDatabase');
+  run(`action.dataset.action='stop-osv-database'; calls=[];`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('calls[0][0]'), 'StopOSVDatabaseUpdate');
 });
 
 test('CVE database actions call the native bridge and rebuilding requires confirmation', async () => {
@@ -1657,6 +1792,59 @@ test('component Critical counts isolate project and asset IDs from duplicate nam
   assert.match(run(`document.querySelector('#project-tab-content').innerHTML`),/class="stack-critical-count"><span>Critical<\/span><span class="pill critical">1<\/span>/);
 });
 
+test('changed components show Sync needed and warn about retained project totals until reassessment', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const project = state.projects[0];
+    project.assets[0].needs_assessment = true;
+    project.assets[0].version = '2.0.0';
+    project.findings.push({id:'CVE-previous',asset_id:project.assets[0].id,version:'1.0.0',severity:'CRITICAL'});
+    project.assessed_revision = 0;
+    projectTab = 'techStack';
+    renderProject('p');
+  `);
+  assert.match(run(`$('#main').innerHTML`), /Saved findings and project totals may refer to previous versions/);
+  assert.match(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), />Sync needed<\/span>/);
+  assert.doesNotMatch(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), /class="pill critical">1/);
+  assert.match(run(`projectListSummary(state.projects[0], '2 components')`), /Severity counts need refresh/);
+  assert.match(run(`projectStatus(state.projects[0])`), /Inventory changed · resync needed/);
+
+  run(`lang = 'ja'`);
+  assert.match(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), /要同期/);
+  run(`state.projects[0].assets[0].needs_assessment = false`);
+  assert.doesNotMatch(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), /要同期/);
+});
+
+test('saving a version change prompts reassessment without starting a sync', async () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const submit = {disabled:false}, formError = {};
+    const form = {
+      dataset:{projectId:'p',revision:'1'}, isConnected:true,
+      querySelector:selector => ({'button[type="submit"]':submit, '[data-project-error]':formError})[selector],
+    };
+    const requests = [], messages = [];
+    projectFormValues = () => ({assets:[{id:'a',version:'2.0.0'}]});
+    invoke = async (...args) => {
+      requests.push(args);
+      return {id:'p',assets:[{id:'a',version:'2.0.0',needs_assessment:true}]};
+    };
+    refresh = async () => {};
+    toast = message => messages.push(message);
+    location.hash = '#project/p/edit';
+  `);
+  await run('saveProject({preventDefault(){},target:form})');
+  assert.equal(run('requests.length'), 1);
+  assert.equal(run('requests[0][0]'), 'UpdateProject');
+  assert.equal(run('requests[0][2].revision'), 1);
+  assert.match(run('messages[0]'), /Sync the changed tech stack to refresh severity counts/);
+  assert.equal(run('location.hash'), 'project/p');
+  assert.equal(run('projectTab'), 'techStack');
+  assert.equal(run('submit.disabled'), false);
+});
+
 test('component Critical counts handle missing findings, Japanese labels, and refreshed assessments',()=>{
   const run=app();inventory(run);
   run(`projectTab='techStack';delete state.projects[0].findings;renderProject('p')`);
@@ -1710,6 +1898,175 @@ test('component severity controls localize, escape identifiers, and disable whil
   assert.match(html,/data-asset-id="&quot;&lt;asset&gt;"/);
   assert.match(html,/<select[^>]+ disabled>/);assert.match(html,/<button[^>]+ disabled>/);
   assert.doesNotMatch(html,/<asset>/);
+});
+
+test('queued workflows name required databases and expose recovery only after an update fails', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    workflow.status = 'queued';
+    workflow.paused_at = workflow.started_at;
+    workflow.database_waits = [{source:'nvd',status:'updating'},{source:'cve',status:'complete'}];
+    project.syncing = true;
+    project.runs = [workflow];
+  `);
+
+  let html = run('workflowBody(project, workflow)');
+  assert.match(html, /will start automatically when the required updates finish/);
+  assert.match(html, /NVD database and CPE dictionary/);
+  assert.match(html, /CVE database/);
+  assert.match(html, /data-control="cancel-queued"/);
+  assert.doesNotMatch(html, /data-control="pause"|data-control="resume"|data-control="retry-databases"/);
+  assert.equal(run('workflowElapsed(workflow)'), '0m 0s');
+  assert.match(run('projectStatus(project)'), />Queued<\/span>/);
+  assert.equal(run('canDismissWorkflow(workflow)'), false);
+
+  run(`
+    workflow.status = 'waiting_databases';
+    workflow.database_waits[0] = {source:'nvd',status:'failed',detail:'HTTP 403 <script>alert(1)</script>'};
+  `);
+  html = run('workflowBody(project, workflow)');
+  assert.match(html, /Retry database updates/);
+  assert.match(html, /data-control="use-available"/);
+  assert.match(html, /HTTP 403 &lt;script&gt;/);
+  assert.doesNotMatch(html, /<script>/);
+  run(`lang = 'ja'`);
+  html = run('workflowBody(project, workflow)');
+  assert.match(html, /NVDデータベースとCPE辞書/);
+  assert.match(html, /待機中の同期をキャンセル/);
+});
+
+test('queued workflows show separate live download and committed import progress', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    workflow.status = 'queued';
+    workflow.database_waits = [{source:'nvd',status:'updating'},{source:'cve',status:'updating'}];
+    state = {
+      projects:[{...project,runs:[workflow]}],
+      nvd_database:{running:true,phase:'downloading',feed:'2026',resumable:true,feeds_done:3,feeds_total:26,downloaded:1048576,download_total:4194304},
+      cve_database:{running:true,phase:'importing',imported:256,import_total:1000},
+    };
+  `);
+
+  let html = run('workflowBody(project, workflow)');
+  assert.match(html, /Downloaded 1\.0 \/ 4\.0 MiB · 25%/);
+  assert.match(html, /max="4194304" value="1048576"/);
+  assert.match(html, /Current feed: NVD 2026/);
+  assert.match(html, /3 of 26 feeds complete/);
+  assert.match(html, /Archive entries processed: 256 \/ 1,000/);
+  assert.match(html, /max="1000" value="256"/);
+  assert.doesNotMatch(html, /workflow-stepper/);
+
+  run(`state.nvd_database = {running:true,phase:'importing',feed:'dictionary',resumable:true,feeds_done:25,feeds_total:26,imported:4096,import_total:1879483}`);
+  html = run('workflowBody(project, workflow)');
+  assert.match(html, /Current feed: CPE dictionary/);
+  assert.match(html, /Records imported: 4,096 \/ 1,879,483/);
+  assert.match(html, /max="1879483" value="4096"/);
+
+  run(`lang='ja'`);
+  html = run('workflowBody(project, workflow)');
+  assert.match(html, /現在のフィード: CPE辞書/);
+  assert.match(html, /インポート済みレコード: 4,096 \/ 1,879,483/);
+});
+
+test('queued database progress handles unknown totals, verification, completion, and unsafe details', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`state={nvd_database:{running:true,phase:'verifying',downloaded:500,download_total:500}}`);
+
+  let html = run(`databaseWaitProgress({source:'nvd',status:'updating'})`);
+  assert.match(html, /Verifying NVD feed checksum/);
+  assert.match(html, /<progress class="database-update-progress"  aria-label=/);
+  assert.doesNotMatch(html, /100%|value="500"/);
+
+  run(`state.nvd_database={running:true,phase:'importing',imported:256,import_total:0}`);
+  html = run(`databaseWaitProgress({source:'nvd',status:'updating'})`);
+  assert.match(html, /Records imported: 256/);
+  assert.doesNotMatch(html, /max="0"|value="256"|NaN/);
+
+  run(`state.nvd_database={running:false,phase:'complete'}`);
+  html = run(`databaseWaitProgress({source:'nvd',status:'updating'})`);
+  assert.match(html, /NVD update complete/);
+  assert.doesNotMatch(html, /<progress/);
+
+  run(`state.nvd_database={running:true,phase:'downloading',feed:'<script>bad()</script>',downloaded:NaN,download_total:-1}`);
+  html = run(`databaseWaitProgress({source:'nvd',status:'updating'})`);
+  assert.match(html, /Downloaded 0\.0 MiB/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.doesNotMatch(html, /<script>|NaN|value="-/);
+});
+
+test('database-only polling refreshes queued panels without rendering the page or replacing the request', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    workflow.status='queued';
+    workflow.database_waits=[{source:'nvd',status:'updating'},{source:'cve',status:'updating'}];
+    state={settings:{language:'en'},projects:[{...project,runs:[workflow]}]};
+    expandedRuns.add(workflow.id);
+    filter.search='keep my filter';
+    const originalRuns=state.projects[0].runs;
+    const panel={dataset:{syncProjectId:'p',syncRun:'run-1'},innerHTML:'',querySelector:()=>null};
+    document.querySelectorAll=()=>[panel];
+    render=()=>{throw new Error('database progress rebuilt the page');};
+    applyPollingState({nvd_database:{running:true,phase:'downloading',downloaded:1048576,download_total:2097152},cve_database:{running:true,phase:'importing',imported:256,import_total:512}});
+  `);
+  assert.match(run('panel.innerHTML'), /Downloaded 1\.0 \/ 2\.0 MiB · 50%/);
+  assert.match(run('panel.innerHTML'), /Archive entries processed: 256 \/ 512/);
+  assert.equal(run('state.projects[0].runs === originalRuns'), true);
+  assert.equal(run('filter.search'), 'keep my filter');
+  assert.match(run('panel.innerHTML'), /Show less/);
+
+  run(`applyPollingState({nvd_database:{running:true,phase:'importing',feed:'dictionary',imported:4096,import_total:8192},cve_database:{running:true,phase:'cleaning'}})`);
+  assert.match(run('panel.innerHTML'), /Records imported: 4,096 \/ 8,192/);
+  assert.match(run('panel.innerHTML'), /Cleaning previous CVE catalogue/);
+});
+
+test('queued workflow actions target the exact run and cache-only fallback requires confirmation', async () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    var calls = [], notices = [];
+    invoke = async (...args) => calls.push(args);
+    refresh = async () => {};
+    toast = text => notices.push(text);
+    confirmAction = () => false;
+  `);
+
+  assert.equal(await run(`controlWorkflow('p','queued-id','use-available')`), false);
+  assert.equal(run('calls.length'), 0);
+  await run(`controlWorkflow('p','queued-id','retry-databases')`);
+  await run(`controlWorkflow('p','queued-id','cancel-queued')`);
+  run(`confirmAction = () => true`);
+  await run(`controlWorkflow('p','queued-id','use-available')`);
+
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls)')), [
+    ['ControlRun','p','queued-id','retry-databases'],
+    ['ControlRun','p','queued-id','cancel-queued'],
+    ['ControlRun','p','queued-id','use-available'],
+  ]);
+  assert.match(run('notices[1]'), /Database updates continue independently/);
+});
+
+test('queued sync requests keep their selected scope and show a queued notification', async () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    state = {projects:[project],settings:{language:'en'}};
+    project.runs = [{id:'queued',status:'queued'}];
+    var calls = [], notice;
+    invoke = async (...args) => calls.push(args);
+    refresh = async () => {};
+    toast = text => notice = text;
+  `);
+
+  await run(`syncProject(project.id, 'component', 'refresh', 'CRITICAL')`);
+  assert.match(run('notice'), /sync queued/);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls[0][2])')), {asset_id:'component', mode:'refresh', severity:'CRITICAL'});
+
+  run(`workflow.status = 'interrupted'; workflow.logs = [{event:'queue_interrupted'}]`);
+  assert.equal(run('interruptionMessage(workflow)'), 'Application closed before queued sync started');
 });
 
 test('workflow controls offer Pause and Stop while running and Resume while paused or pausing',()=>{

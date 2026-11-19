@@ -44,6 +44,8 @@ The project's **Sync by tech stack** selector defaults to **Everything**. Choose
 
 A component sync queries the enabled vulnerability databases for that component and updates only its findings. Other components and repository-scanner findings are preserved. If the component assessment fails or is incomplete, its previous findings are also retained. Activity records the selected component and the number of findings in that assessment.
 
+Changing a component's name, version, category, OSV ecosystem, or exact CPE and saving the project marks that component for reassessment. New components also need their first assessment. The Tech stack card shows **Sync needed** in place of its previous Critical count. A project warning and saved confirmation explain that retained findings and project totals can refer to previous versions. Previous results and run history remain available. Run an **All severities** sync for the changed component or the full project to refresh its counts. Failed, interrupted, stopped, and severity-filtered runs leave the warning in place. If an exact CPE was registered, update its version too before syncing.
+
 Repository scanners run with **Everything**, **Sync all projects**, scheduled assessments, and the project's **Scan code** button. Component-only syncs leave the full-project last-complete timestamp, assessed inventory revision, and next scheduled assessment unchanged. Scheduled assessments continue to cover everything.
 
 ### Sync by severity
@@ -70,6 +72,14 @@ Both views render up to **100 findings per page**. Filtering and severity orderi
 
 While a sync runs, a compact workflow panel shows the current database/component, elapsed time, and finished-step count. **Show more** expands a vertical stepper and timestamped workflow logs; **Show less** collapses it. Full-project and component-only syncs show only the work included in that run. “Sync all projects” shows a panel for each running project.
 
+If a required local NVD/CPE or CVE database update is already running, **Sync now**, component syncs, **Sync all projects**, and scheduled assessments enter a **Queued** workflow. The panel lists the required databases and their update status. The assessment starts once, automatically, after those updates finish successfully, keeping its selected tech stack, severity, and sync mode. Waiting time is excluded from elapsed active time and the assessment timeout. Queued projects remain locked against overlapping syncs and inventory edits. Updates for disabled sources or custom endpoints do not delay an assessment, and standalone code scans do not wait for vulnerability catalogue downloads.
+
+The queued workflow shows live progress for each required database even while **Show more** is collapsed. Downloads show MiB and a percentage when their size is known. NVD/CPE updates also identify the current feed and completed feed count. Import bars compare committed progress with the source total when available. NVD/CPE counts are records, while CVE counts are ZIP archive entries processed, including any non-record members. Verification, cleanup, and imports with unknown totals use indeterminate bars. Progress comes from the existing status polls without persisting every byte change or rebuilding the page.
+
+The **Configuration** page uses the same live download, import, and NVD/CPE feed progress bars in its local database sections. Updates refresh those status areas while preserving unsaved configuration fields.
+
+**Cancel queued sync** keeps previous findings and leaves database updates running. If a required update fails or is stopped, the workflow shows the affected database and any available error details. Choose **Retry database updates**, **Use available data**, or **Cancel queued sync**. Using available data requires confirmation and explicitly switches that request to a cache-only assessment. It sends no vulnerability API requests and skips code scanners, so missing or stale data can produce an incomplete assessment. Queue controls address the exact run to prevent stale controls from affecting an assessment that has already started. Closing Vulman marks an unstarted queued assessment interrupted. Its request is not automatically replayed after restart, while database downloads retain their own resume checkpoints.
+
 Use **Pause** to wait at the next checkpoint between database requests (including paginated requests), CVE records, scanner commands, or final saving. A request or scanner already in progress is allowed to finish; **Pausing** changes to **Paused** when the checkpoint is reached. **Resume** continues the same run with the same scope and in-memory progress. Paused time is excluded from elapsed active time and the 20-minute assessment budget. Paused projects stay locked against overlapping syncs and inventory edits. Pause does not survive an application restart: an unfinished run is recovered as interrupted.
 
 Use **Stop** to cancel the current run, including a paused run. After confirmation, active database requests and scanner process trees are cancelled and the workflow finishes as **Stopped**. Unsaved assessment results are discarded; previously saved findings and full-project freshness stay unchanged. Complete responses already added to the shared cache remain reusable. Stop applies to this run only; future scheduled assessments remain enabled, and you can start a new manual sync after stopping finishes. Controls address an exact run, so an outdated page cannot stop a newer assessment. Each project's workflow can be controlled separately, including runs started by **Sync all projects** or the scheduler.
@@ -86,11 +96,11 @@ The interface polls every two seconds while visible. A version check skips decod
 
 | Source | Default | Behavior |
 | --- | --- | --- |
-| NIST NVD | Enabled | Queries the CVE API 2.0 using exact CPE + `isVulnerable`, or name search when no CPE is supplied. Handles pagination and CVSS severity. |
+| NIST NVD | Enabled | Uses the optional indexed local catalogue for CPE and name matching. API 2.0 handles initialization fallback, custom endpoints, forced refreshes, and uncertain applicability. Includes CVSS severity. |
 | CVE Program | Enabled | Retrieves original CVE JSON records for CVE IDs discovered by NVD or OSV, adding CNA titles and CNA/ADP references. |
-| OSV.dev | Disabled | Queries exact ecosystem/package/version tuples, follows pagination, skips withdrawn advisories, and collects package-specific fix boundaries. |
+| OSV.dev | Disabled | Uses the selected local ecosystem catalogues when available. Explicit versions and supported semantic-version ranges match locally. Unsupported ranges, missing catalogues, force refresh, and custom endpoints use the existing endpoint-specific cache/API path. |
 
-NVD and OSV discover matching advisories, and CVE enriches their records. At least NVD or OSV must remain enabled. NVD and OSV are queried on demand. The default CVE endpoint also supports a shared local catalogue built from official bulk downloads. Source endpoints are configurable HTTPS URLs.
+NVD and OSV discover matching advisories, and CVE enriches their records. At least NVD or OSV must remain enabled. The default NVD and CVE endpoints support shared local catalogues built from official bulk downloads. OSV and custom endpoints use on-demand queries and the shared query cache. Source endpoints are configurable HTTPS URLs.
 
 **Match types matter:**
 
@@ -152,6 +162,44 @@ bbolt's synchronized transactions stay enabled. Imports commit at most 256 recor
 Readers use short transactions and B+tree lookups. Maintained counters make status polling independent of catalogue size. Cleanup uses cursors in bounded transactions, and obsolete baseline pages become reusable after activation. **Rebuild catalogue** starts a new full import after confirmation and keeps the current catalogue available until replacement succeeds. bbolt can retain freed pages, so rebuilding can reuse disk space without shrinking the physical file.
 
 Configuration shows the catalogue path, record count, size, release timestamp, last update check, download/import progress, and errors. The catalogue has no independent encryption key. Include `vulman-cve.db` with `vulman.db` and `vulman.key` to back up the downloaded data while Vulman is stopped. You can rebuild the catalogue from the public source if it is omitted from a backup.
+
+### Local NVD database and CPE dictionary
+
+In **Configuration → Local NVD database and CPE dictionary**, select **Update NVD database** for the initial import. Vulman downloads the official NVD JSON 2.0 yearly feeds and complete CPE dictionary into `vulman-nvd.db`, using the existing `vulman.key` for AES-GCM encryption. Record payloads and import metadata are encrypted, and index terms are hashed. The initial download, expanded source data, database, and indexes require additional disk space. The full dictionary ZIP contains multiple JSON chunks, all of which are imported.
+
+Choose **Manual only**, **Every two hours**, or **Daily** updates. **Daily** is the default. The first import starts explicitly. After initialization, automatic updates run while Vulman is open, with overdue updates and interrupted imports checked on restart. Update and Stop controls operate independently of project assessments. Rebuild requires confirmation and preserves the currently published catalogue until the replacement is complete.
+
+The updater checks official `.meta` files before downloading. Successful checks skip unchanged feeds. Normal updates apply the **Modified** vulnerability feed and download a replacement dictionary only when its metadata changes. The Modified feed covers eight days, so an NVD catalogue or interrupted import more than seven days behind starts a full baseline import to avoid a coverage gap. [NVD feed documentation](https://nvd.nist.gov/vuln/data-feeds)
+
+Compressed sizes, uncompressed sizes, and SHA-256 hashes are checked before import. For CPE ZIP files, verification covers the concatenated uncompressed JSON members in archive order. JSON record counts are validated against the envelope and dictionary totals. Archive paths are never extracted. Downloads and decoding are bounded. Import transactions hold at most 256 NVD records or 4,096 CPE entries, with an additional approximately 4 MiB source-payload cap. The CPE dictionary uses a direct name index to keep lookups fast and reduce database overhead.
+
+Each transaction saves records, their search-index changes, counters, and the resume offset together. bbolt's synchronized commits remain enabled. Full NVD baselines and dictionary replacements are staged in inactive buckets and activated through one atomic metadata transaction after all feeds complete. Incremental NVD changes become visible per committed batch, with freshness advancing after the complete update. Readers use inverted indexes, cursors, and short transactions, and status polling reads maintained counters.
+
+After interruption, Update resumes the saved feed and record position. Verified complete downloads can be reused. A partial download restarts. Because NVD feed URLs are mutable, a changed checksum restarts the affected feed and removes its incomplete staged data and indexes. Completed years are retained while the Modified feed can cover intervening changes. Cancellation takes effect between transactions. Closing Vulman joins the updater before closing its database. Forceful process termination leaves committed checkpoints for recovery on the next launch.
+
+Local assessments search an indexed product/CPE identity or component-name terms. Name-only findings remain **Needs review**. The dictionary identifies deprecated CPE names. Exact CPE matching supports escaped fields, wildcard criteria, and numeric dotted version ranges. Conditional or negated applicability, deprecated identities, and unsupported version schemes require NVD API validation during normal sync. Cache-only mode returns candidate findings with an explicit incomplete-assessment warning when validation is needed. Deployment conditions still require review. Force refresh and custom NVD endpoints use the existing paced API path.
+
+An overdue local catalogue supplies labeled stale results and leaves the assessment incomplete while database updates catch up. The vulnerability feed uses the chosen interval with two hours of publication allowance. CPE dictionary freshness is checked separately against its daily feed cadence. Configuration displays advisory and CPE counts, disk usage, source timestamps, feed progress, errors, and the database path. Include `vulman-nvd.db` in a stopped-app backup to retain the downloaded catalogue. It can also be rebuilt from public data.
+
+### Local OSV database
+
+Enable **OSV.dev** in Configuration, select the ecosystems under **Local OSV database**, and save configuration. **Use project ecosystems** suggests selections from registered components. Select **Update OSV database** to start the first download. New ecosystems require an explicit update. Supported ecosystem options are bundled, and registered ecosystem variants such as `Debian:12` use the parent `Debian` download. OSV remains disabled as a discovery source by default.
+
+Vulman stores the selected catalogues in `vulman-osv.db`, encrypted with the existing `vulman.key`. Advisory payloads, import metadata, and pending changes use AES-GCM encryption. Package-index terms are hashed. Ecosystem names and advisory identifiers are structural keys for public vulnerability data. No project source code is stored in this catalogue. Counts describe stored ecosystem records, so an advisory exported to multiple ecosystems can appear more than once in the storage count. Assessment findings still merge aliases and preserve source provenance.
+
+The first update downloads each ecosystem's official `all.zip`, publishes the validated baseline, then applies a fresh `modified_id.csv` snapshot to catch up. Subsequent updates download the bounded change index and fetch only relevant changed records. The index uses a 48-hour overlap with the previous successful check, retains the newest timestamp for duplicate IDs, and does not rely on timestamp ordering for completeness. Record fetches are serial with a 50 ms pause between records and bounded retries for rate limits and transient service errors. [OSV export documentation](https://google.github.io/osv.dev/data/)
+
+Downloads are pinned to the Cloud Storage object generation and checked against its size and CRC32C checksum. ZIP members are read directly, with CRC verification and expansion/record-size limits. Archive paths are never extracted. A partial download restarts; verified complete downloads and committed import offsets can be reused. If an old object generation is no longer available, the next retry starts a replacement baseline. An interrupted import older than 48 hours also restarts with a fresh baseline.
+
+bbolt's synchronized commits remain enabled. Full baselines import into inactive generations in transactions of at most 256 records or approximately 4 MiB of source payload. Records, package indexes, maintained counters, and checkpoints commit together. A baseline becomes active only after its complete import validates. A crash leaves committed work available for resumption and discards an unfinished transaction. Incremental record replacement, stale-index removal, pending-task deletion, and cursor advancement are also atomic. The successful incremental-check timestamp advances only after all pending records succeed. A newly published baseline retains its archive timestamp until catch-up succeeds.
+
+When a baseline is at least one week old, the next update performs a full reconciliation. Received withdrawn advisories stop matching immediately. Records removed from an export or moved out of an ecosystem are fully reconciled by the next baseline replacement; the modification index is not treated as an append-only deletion log. **Rebuild catalogue** forces replacement of the selected ecosystems. Deselected ecosystems remain stored for local queries but stop receiving automatic updates.
+
+Choose **Manual only**, **Hourly**, or **Daily** updates, with **Daily** as the default. Automatic updates and overdue work run while Vulman is open. **Stop** cancels the updater, and **Update OSV database** resumes pending work. Closing Vulman joins the updater before closing its database. Configuration displays per-ecosystem status, counts, freshness, the database path, and download/import progress. Queued project syncs wait only for their required ecosystems, including when syncing one selected component. Progress polling does not repeatedly write the workspace or replace unsaved Configuration fields.
+
+Local matching uses exact affected-version lists and `SEMVER` ranges, including prereleases, exclusive fixed/limit boundaries, and inclusive last-affected versions. Semantic ordering uses Go's maintained `golang.org/x/mod/semver` package. PyPI names normalize separator spelling and case, with ecosystem-appropriate name handling for supported lookups. Other `ECOSYSTEM` range rules and Git commit graphs require OSV API validation when an explicit version does not establish a match. Cache-only mode reports uncertain matches as incomplete, with no vulnerability API calls. An overdue catalogue also produces a freshness warning. External code scanners continue using their own databases and services.
+
+Include `vulman-osv.db` with `vulman.db` and `vulman.key` in a stopped-app backup to retain the downloaded data. The catalogue can also be rebuilt from public exports. Temporary downloads contain public advisory data and are removed after successful import. bbolt reuses freed pages, so rebuilding does not necessarily shrink the physical file.
 
 ## Scheduling
 
@@ -229,7 +277,9 @@ The embedded OSS database is [bbolt](https://github.com/etcd-io/bbolt), linked i
 
 - `vulman.db`: projects, inventory, findings, assessment history, configuration, encrypted credentials.
 - `vulman-cve.db`: shared encrypted CVE catalogue, on-demand records, and resumable import metadata.
-- `vulman.key`: the encryption key. **Back up both files together while Vulman is stopped.** Losing the key makes the database unreadable.
+- `vulman-nvd.db`: encrypted NVD advisories, CPE dictionary, search indexes, and resumable import metadata.
+- `vulman-osv.db`: encrypted ecosystem-scoped OSV advisories, package indexes, pending changes, and resumable import metadata.
+- `vulman.key`: the encryption key. **Back up the workspace database and key together while Vulman is stopped.** Losing the key makes the database unreadable.
 
 **Configuration** displays the active data directory and the absolute paths to both files beneath the local-storage note.
 
@@ -307,6 +357,7 @@ cmd/vulman/           Wails launcher, workspace operations, native bridge, embed
 internal/model/      inventory, findings, validation, defaults
 internal/store/      encrypted embedded bbolt storage
 internal/cvedb/      encrypted CVE catalogue and resumable official release imports
+internal/nvddb/      encrypted NVD/CPE catalogue, indexes, matching, and resumable imports
 internal/sources/    NVD, CVE, OSV HTTP clients and normalization
 internal/engine/     asynchronous assessments and persisted scheduling
 internal/scanner/    fixed scanner commands and report adapters

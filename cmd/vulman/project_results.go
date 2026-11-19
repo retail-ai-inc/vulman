@@ -9,6 +9,21 @@ import (
 	"vulman/internal/scanner"
 )
 
+func markChangedComponents(previous model.Project, next *model.Project) {
+	for i := range next.Assets {
+		asset := &next.Assets[i]
+		asset.NeedsAssessment = true
+		for _, old := range previous.Assets {
+			if old.ID != asset.ID {
+				continue
+			}
+
+			asset.NeedsAssessment = old.NeedsAssessment || old.Kind != asset.Kind || old.Name != asset.Name || old.Version != asset.Version || old.Ecosystem != asset.Ecosystem || old.CPE != asset.CPE
+			break
+		}
+	}
+}
+
 func removeProjectResults(project *model.Project, next model.Project) {
 	removedAssets := make(map[string]bool)
 	for _, asset := range project.Assets {
