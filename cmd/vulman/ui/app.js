@@ -137,9 +137,11 @@ function workflowLogs(run, steps) {
       const key = entry.findings === 1 ? 'scannerFindingReported' : 'scannerFindingsReported';
       parts.push(t(key).replace('{count}', entry.findings.toLocaleString(formatLocale())));
     }
-    const error = ['failed', 'interrupted', 'scanner_failed', 'scanner_interrupted', 'scanner_target_failed'].includes(event);
+    const cleanup = event === 'scanner_cleanup_completed' || event === 'scanner_cleanup_failed';
+    const error = ['failed', 'interrupted', 'scanner_failed', 'scanner_interrupted', 'scanner_target_failed', 'scanner_cleanup_failed'].includes(event);
     const time = entry.at ? `<time>${esc(new Date(entry.at).toLocaleTimeString(formatLocale(),{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}))}</time>` : '<time>—</time>';
-    return `<li class="${error ? 'workflow-log-error' : ''}">${time}<span>${esc(parts.filter(Boolean).join(' · '))}</span></li>`;
+    const text = esc(parts.filter(Boolean).join(' · '));
+    return `<li class="${error ? 'workflow-log-error' : ''}">${time}<span>${cleanup ? `<strong>${text}</strong>` : text}</span></li>`;
   }).join('');
 }
 function workflowElapsed(run){const end=validDate(run.finished_at)?new Date(run.finished_at).getTime():validDate(run.paused_at)?new Date(run.paused_at).getTime():Date.now();const seconds=Math.max(0,Math.floor((end-new Date(run.started_at).getTime())/1000-(run.paused_seconds||0))||0);return Math.floor(seconds/60)+'m '+seconds%60+'s';}
@@ -196,11 +198,15 @@ function codeScanSeverityBreakdown(project, run) {
     }
   }
   if (!counts) return `<p class="workflow-severity">${esc(t('severityBreakdownUnavailable'))}</p>`;
+  return `<div class="workflow-severity"><span>${esc(t(heading))}</span>${severityCountList(counts)}</div>`;
+}
+
+function severityCountList(counts) {
   const items = findingSeverities.map(severity => {
     const key = severityKey(severity);
     return `<li class="pill ${key}">${esc(t(key))} <strong>${formatResultNumber(counts[severity] ?? 0)}</strong></li>`;
   }).join('');
-  return `<div class="workflow-severity"><span>${esc(t(heading))}</span><ul class="workflow-severity-counts">${items}</ul></div>`;
+  return `<ul class="severity-counts">${items}</ul>`;
 }
 
 function workflowBody(project,run,dismissible=false){
@@ -212,7 +218,7 @@ function workflowBody(project,run,dismissible=false){
   const codeScan = run.mode === 'code';
   const scope = codeScan ? syncSeverityLabel(run.severity) : `${run.asset_name || t('syncEverything')} · ${syncSeverityLabel(run.severity)} · ${t('mode_' + (run.mode || 'auto'))}`;
   const progress=t('stepsFinished').replace('{done}',done).replace('{total}',steps.length);
-  return `<div class="workflow-heading"><div><h3>${t(codeScan ? 'codeScanWorkflow' : 'workflow')} · ${esc(project.name)}</h3><p>${esc(scope)} · ${t('elapsed')} ${workflowElapsed(run)}</p>${validDate(run.data_checked_at)?`<p title="${t('sourceDataHint')}">${t('sourceDataChecked')}: ${fmtDate(run.data_checked_at)}</p>`:''}</div><div class="workflow-actions">${pill(t(run.status),run.status)}${workflowControls(project,run)}<button type="button" class="button secondary small" data-toggle-workflow="${esc(run.id)}" aria-expanded="${expanded}" aria-controls="${esc(detailsID)}">${t(expanded?'showLess':'showMore')}</button>${dismissible&&canDismissWorkflow(run)?`<button type="button" class="icon-button workflow-close" data-dismiss-workflow="${esc(run.id)}" data-project-id="${esc(project.id)}" aria-label="${t('closeWorkflow')}" title="${t('closeWorkflow')}">×</button>`:''}</div></div><div class="workflow-progress"><progress max="${Math.max(1,steps.length)}" value="${done}" aria-label="${esc(progress)}"></progress><span>${esc(progress)}</span></div><div class="workflow-current" role="status">${summary?esc(summary):current?`${esc(stepLabel(current))}<span>${esc(stepProgress(current)||t('phase_queued'))}</span>`:esc(t(run.status==='running'?'finishing':run.status))}</div>${codeScanSeverityBreakdown(project, run)}<div class="workflow-details" id="${esc(detailsID)}" ${expanded?'':'hidden'}>${expanded?`<ol class="workflow-stepper">${steps.map(step=>`<li class="workflow-step ${esc(step.status)}"><span class="workflow-step-marker" aria-hidden="true">${{complete:'✓',running:'↻',failed:'!',interrupted:'!',stopped:'■',skipped:'–',pending:'·'}[step.status]||'·'}</span><div><strong>${esc(stepLabel(step))}</strong><p>${esc(stepProgress(step))}</p></div>${pill(t(step.status),step.status)}</li>`).join('')}</ol><div class="workflow-log-heading"><h3>${t('workflowLogs')}</h3><small>${t('workflowLogsHint')}</small></div><ol class="workflow-logs">${workflowLogs(run, steps)}</ol>`:''}</div>`;
+  return `<div class="workflow-heading"><div><h3>${t(codeScan ? 'codeScanWorkflow' : 'workflow')} · ${esc(project.name)}</h3><p>${esc(scope)} · ${t('elapsed')} ${workflowElapsed(run)}</p>${validDate(run.data_checked_at)?`<p title="${t('sourceDataHint')}">${t('sourceDataChecked')}: ${fmtDate(run.data_checked_at)}</p>`:''}</div><div class="workflow-actions">${pill(t(run.status),run.status)}${workflowControls(project,run)}<button type="button" class="button secondary small" data-toggle-workflow="${esc(run.id)}" aria-expanded="${expanded}" aria-controls="${esc(detailsID)}">${t(expanded?'showLess':'showMore')}</button>${dismissible&&canDismissWorkflow(run)?`<button type="button" class="icon-button workflow-close" data-dismiss-workflow="${esc(run.id)}" data-project-id="${esc(project.id)}" aria-label="${t('closeWorkflow')}" title="${t('closeWorkflow')}">×</button>`:''}</div></div><div class="workflow-progress"><progress max="${Math.max(1,steps.length)}" value="${done}" aria-label="${esc(progress)}"></progress><span>${esc(progress)}</span></div><div class="workflow-current" role="status">${summary?esc(summary):current?`${esc(stepLabel(current))}<span>${esc(stepProgress(current)||t('phase_queued'))}</span>`:esc(t(run.status==='running'?'finishing':run.status))}</div>${codeScanSeverityBreakdown(project, run)}<div class="workflow-details" id="${esc(detailsID)}" ${expanded?'':'hidden'}>${expanded?`<ol class="workflow-stepper">${steps.map(step=>`<li class="workflow-step ${esc(step.status)}"><span class="workflow-step-marker" aria-hidden="true">${{complete:'✓',running:'↻',failed:'!',interrupted:'!',stopped:'■',skipped:'–',pending:'·'}[step.status]||'·'}</span><div><strong>${esc(stepLabel(step))}</strong><p>${esc(stepProgress(step))}</p></div>${pill(t(step.status),step.status)}</li>`).join('')}</ol><div class="workflow-log-heading"><h3>${t('workflowLogs')}</h3><small>${t('workflowLogsHint')}</small></div><ol class="workflow-logs" tabindex="0" aria-label="${esc(t('workflowLogs'))}">${workflowLogs(run, steps)}</ol>`:''}</div>`;
 }
 function workflowRun(project,run,dismissible=false){if(dismissible&&canDismissWorkflow(run)&&dismissedRuns.has(run.id))return '';return run?.steps?.length?`<section class="sync-workflow ${esc(run.status)}" data-sync-project-id="${esc(project.id)}" data-sync-run="${esc(run.id)}" data-sync-scope="${run.asset_id || run.severity || run.mode === 'code' ? 'scoped' : 'full'}" data-workflow-dismissible="${dismissible}">${workflowBody(project,run,dismissible)}</section>`:'';}
 function mountActiveSyncs(){if(['project','settings','activity'].includes(route()[0]))return;const html=state.projects.filter(p=>p.syncing).map(p=>workflowRun(p,p.runs?.[0])).join('');$('.page-heading')?.insertAdjacentHTML('afterend','<div id="active-syncs">'+html+'</div>');}
@@ -229,7 +235,17 @@ function updateSyncPanels(runID){
     }
     // Replacing paused or finished panels during polling restarts their animations.
     if (runID || (run.status !== 'paused' && !canDismissWorkflow(run))) {
+      const logs = $('.workflow-logs', el);
+      const scrollTop = logs?.scrollTop;
+      const focused = logs && document.activeElement === logs;
       el.innerHTML = workflowBody(project, run, dismissible);
+      if (logs) {
+        const updated = $('.workflow-logs', el);
+        if (updated) {
+          updated.scrollTop = scrollTop;
+          if (focused) updated.focus({preventScroll:true});
+        }
+      }
     }
   }
 }
@@ -278,17 +294,15 @@ function severityOptions(selected=''){return `<option value="">${t('anySeverity'
 function syncAllControls(primary=false){return `<div class="sync-all-controls"><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-all-severity" data-sync-all-severity aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}">${severityOptions(syncAllSeverity)}</select></label>${button('syncAll','sync-all',primary,'refresh')}</div>`;}
 function syncControls(p){const selected=p.assets.some(a=>a.id===syncSelection[p.id])?syncSelection[p.id]:'';return `<div class="sync-controls"><label class="sync-scope"><span>${t('syncScope')}</span><select id="sync-asset" data-sync-project="${p.id}" aria-label="${t('syncScope')}" ${p.syncing?'disabled':''}><option value="">${t('syncEverything')}</option>${p.assets.map(a=>`<option value="${esc(a.id)}" ${selected===a.id?'selected':''}>${esc(t(a.kind)+' · '+a.name+' '+a.version)}</option>`).join('')}</select></label><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-severity" data-sync-severity-project="${p.id}" aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}" ${p.syncing?'disabled':''}>${severityOptions(syncSeveritySelection[p.id]||'')}</select></label><label class="sync-scope sync-mode"><span>${t('syncMode')}</span><select id="sync-mode" data-sync-mode-project="${p.id}" aria-label="${t('syncMode')}" ${p.syncing?'disabled':''}>${['auto','local','refresh'].map(mode=>`<option value="${mode}" ${(syncModeSelection[p.id]||'auto')===mode?'selected':''}>${t('mode_'+mode)}</option>`).join('')}</select></label><button class="button primary" data-action="sync" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('refresh')}${t(p.syncing&&p.runs?.[0]?.mode!=='code'?'syncing':'sync')}</button></div>`;}
 
-function projectList(projects = state.projects, detailed = false) {
+function projectList(projects = state.projects, showEdit = false) {
   if (!projects.length) return empty('noProjects','noProjectsSub','projects',button('firstProject','new-project',true,'plus')+`<button class="sample-button" data-action="sample">${t('sample')}</button>`);
   return projects.map(project => {
     const id = esc(project.id);
     const components = `${formatResultNumber(project.assets?.length ?? 0)} ${t('components')}`;
     const description = esc(project.description);
-    const details = detailed
-      ? projectListSummary(project, components) + (description ? `<p>${description}</p>` : '')
-      : `<p>${components}${description ? ' · ' + description : ''}</p>`;
+    const details = projectListSummary(project, components) + (description ? `<p>${description}</p>` : '');
     const card = `<a class="project-card" href="#project/${id}"><div class="project-avatar">${esc(project.name.slice(0, 2).toUpperCase())}</div><div class="project-info"><strong>${esc(project.name)}</strong>${details}</div><div class="project-card-stats">${projectStatus(project)}</div><span class="chevron">›</span></a>`;
-    if (!detailed) return card;
+    if (!showEdit) return card;
     return `<div class="project-list-row">${card}<button type="button" class="button secondary small project-list-edit" data-action="edit-project" data-id="${id}" aria-label="${esc(t('editProject') + ' · ' + project.name)}" ${project.syncing ? 'disabled' : ''}>${t('editProject')}</button></div>`;
   }).join('');
 }
@@ -329,13 +343,52 @@ function renderOverview(){
   }
   $('#main').innerHTML=heading(t('securityOverview'),t('overviewSub'),(state.projects.length?syncAllControls(false):'')+button('addProject','new-project',true,'plus'),'VULNERABILITY MANAGEMENT')+`<div class="metrics">${[['totalFindings',total,'allSeverities','vulnerabilities',''],['critical',counts.CRITICAL||0,'criticalNote','vulnerabilities','critical-text'],['high',counts.HIGH||0,'highNote','activity','high-text'],['projectCount',state.projects.length,'components','projects','']].map(([key,value,note,ico,cls])=>`<div class="metric"><div class="metric-top"><span>${t(key)}</span>${icon(ico)}</div><div class="metric-value ${cls}">${value}</div><div class="metric-note ${cls}">${cls?'<span class="dot"></span>':''}${key==='projectCount'?assets+' ':''}${t(note)}</div></div>`).join('')}</div><div class="dashboard-grid"><div><div class="panel"><div class="panel-head"><div><h2>${t('yourProjects')}</h2><p>${t('projectPanelSub')}</p></div><a class="text-link" href="#projects">${t('viewAll')} ↗</a></div>${projectList(state.projects.slice(0,5))}<div class="panel-bottom">${icon('check')}${t('localInventory')}</div></div><div class="section-caption"><h2>${t('recentActivity')}</h2><a class="text-link" href="#activity">${t('viewAll')} ↗</a></div><div class="panel">${activityList(allRuns().slice(0,3),true)}</div></div><aside class="dashboard-aside">${sourcesPanel()}${total?breakdown(counts):`<div class="insight">${icon('leaf')}<div class="eyebrow">${t('schedule').toUpperCase()}</div><h3>${t('quietTitle')}</h3><p>${t('quietText')}</p></div>`}</aside></div>`;}
 function stackKey(projectID,assetID){return JSON.stringify([projectID,assetID]);}
-function techStackOptions(projectID){
-  const scope=projectID||filter.project;
-  return state.projects.filter(p=>!scope||p.id===scope).flatMap(p=>{
-    const entries=new Map();
-    for(const a of p.assets||[])entries.set(a.id,{key:stackKey(p.id,a.id),label:t(a.kind)+' · '+a.name+' '+a.version});
-    for(const f of p.findings||[])if(!entries.has(f.asset_id))entries.set(f.asset_id,{key:stackKey(p.id,f.asset_id),label:t(f.match==='scanner'?'scanner':'previousInventory')+' · '+f.component+' '+findingVersionLabel(f)});
-    return [...entries.values()].map(option=>({...option,label:(projectID?'':p.name+' · ')+option.label}));
+function scanLocationKey(projectID, target) {
+  return JSON.stringify([projectID, 'scanner', target]);
+}
+function scanLocations(project) {
+  const repositories = state.scan_repositories?.[project.id] || [];
+  const labelCounts = new Map();
+  for (const {label} of repositories) labelCounts.set(label, (labelCounts.get(label) || 0) + 1);
+  const labelIndex = new Map();
+  const locations = repositories.map(repository => {
+    let label = repository.label;
+    const uniqueLabel = labelCounts.get(label) === 1;
+    if (!uniqueLabel) {
+      const index = (labelIndex.get(label) || 0) + 1;
+      labelIndex.set(label, index);
+      label += ` (${formatResultNumber(index)})`;
+    }
+    return {key:scanLocationKey(project.id, repository.key), target:repository.key, label, legacyLabel:uniqueLabel ? repository.label : ''};
+  });
+  if (project.local_path) locations.push({key:scanLocationKey(project.id, 'local'), target:'local', label:t('scanTarget_local')});
+  return locations;
+}
+function findingMatchesScanLocation(finding, location) {
+  if (finding.match !== 'scanner') return false;
+  const assetID = finding.asset_id || '';
+  if (location.target === 'local') return finding.scan_target === 'local' || assetID.startsWith('code:local:');
+  const recordedTarget = assetID.match(/^code:(remote:[0-9a-f]{64}):/)?.[1];
+  if (recordedTarget) return recordedTarget === location.target;
+  return Boolean(location.legacyLabel && finding.scan_repository === location.legacyLabel);
+}
+function techStackOptions(projectID) {
+  const scope = projectID || filter.project;
+  return state.projects.filter(project => !scope || project.id === scope).flatMap(project => {
+    const entries = new Map();
+    for (const asset of project.assets || []) {
+      entries.set(asset.id, {key:stackKey(project.id, asset.id), label:t(asset.kind) + ' · ' + asset.name + ' ' + asset.version});
+    }
+    for (const finding of project.findings || []) {
+      if (finding.match === 'scanner' || entries.has(finding.asset_id)) continue;
+      entries.set(finding.asset_id, {
+        key:stackKey(project.id, finding.asset_id),
+        label:t('previousInventory') + ' · ' + finding.component + ' ' + findingVersionLabel(finding),
+      });
+    }
+    const scanners = scanLocations(project).map(({key, label}) => ({key, label:t('scanner') + ' · ' + label}));
+    const prefix = projectID ? '' : project.name + ' · ';
+    return [...entries.values(), ...scanners].map(({key, label}) => ({key, label:prefix + label}));
   });
 }
 function techStackFilterOptions(projectID){
@@ -371,18 +424,30 @@ function findingPagination(pages) {
 }
 function findingsTable(projectID) {
   const search = filter.search.toLowerCase();
+  const [stackProject, stackAsset, scanTarget] = filter.stack ? JSON.parse(filter.stack) : [];
   const items = [];
   let total = 0;
+  let scanSeverityCounts;
   for (const project of state.projects) {
     if (projectID && projectID !== project.id) continue;
     const findings = project.findings || [];
     total += findings.length;
     if (!projectID && filter.project && filter.project !== project.id) continue;
+    if (stackProject && stackProject !== project.id) continue;
+    const location = scanTarget && scanLocations(project).find(candidate => candidate.target === scanTarget);
+    if (scanTarget && !location) continue;
+    if (location) scanSeverityCounts = {};
     for (const finding of findings) {
-      if ((filter.severity && filter.severity !== finding.severity) ||
-          (filter.stack && filter.stack !== stackKey(project.id, finding.asset_id)) ||
-          (filter.match && filter.match !== finding.match) ||
+      if (location ? !findingMatchesScanLocation(finding, location) :
+          stackProject && (finding.match === 'scanner' || finding.asset_id !== stackAsset)) continue;
+      if ((filter.match && filter.match !== finding.match) ||
           (search && ![finding.id, finding.title, finding.component].join(' ').toLowerCase().includes(search))) continue;
+      let severity = finding.severity;
+      if (location) {
+        if (!findingSeverities.includes(severity)) severity = 'UNKNOWN';
+        scanSeverityCounts[severity] = (scanSeverityCounts[severity] || 0) + 1;
+      }
+      if (filter.severity && filter.severity !== severity) continue;
       items.push({finding, project});
     }
   }
@@ -391,7 +456,9 @@ function findingsTable(projectID) {
   findingsPage = Math.max(1, Math.min(findingsPage, pages));
   const start = (findingsPage - 1) * findingsPerPage;
   const filtered = filter.search || filter.severity || filter.stack || filter.match || (!projectID && filter.project);
-  const toolbar = `<div class="findings-toolbar">${resultsSummary(items.length, total, start, filtered)}${findingPagination(pages)}</div>`;
+  const severitySummary = scanSeverityCounts
+    ? `<div class="scan-location-severity"><span>${t('severityBreakdown')}</span>${severityCountList(scanSeverityCounts)}</div>` : '';
+  const toolbar = `<div class="findings-toolbar">${resultsSummary(items.length, total, start, filtered)}${findingPagination(pages)}</div>` + severitySummary;
   if (!items.length) {
     return toolbar + (filtered ? empty('noMatchingFindings','noMatchingFindingsSub','vulnerabilities') : empty('noFindings','noFindingsSub','vulnerabilities'));
   }
