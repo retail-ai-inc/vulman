@@ -57,18 +57,22 @@ func New(s *store.Store) (*Engine, error) {
 				}
 			}
 		}
+
 		return nil
 	})
+
 	if err != nil {
 		cancel()
 		return nil, err
 	}
+
 	e.wg.Add(1)
 	go e.loop()
 	return e, nil
 }
 
 func (e *Engine) Close() { e.mu.Lock(); e.closed = true; e.cancel(); e.mu.Unlock(); e.wg.Wait() }
+
 func (e *Engine) loop() {
 	defer e.wg.Done()
 	ticker := time.NewTicker(15 * time.Second)
@@ -118,17 +122,21 @@ func (e *Engine) StartFiltered(id, trigger, assetID, mode, severity string) erro
 	if severity == "ALL" {
 		severity = ""
 	}
+
 	switch severity {
 	case "", "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN":
 	default:
 		return ErrInvalidSeverity
 	}
+
 	if mode == "" {
 		mode = "auto"
 	}
+
 	if mode != "auto" && mode != "local" && mode != "refresh" {
 		return ErrInvalidMode
 	}
+
 	return e.startRun(id, trigger, assetID, mode, severity)
 }
 
@@ -142,18 +150,22 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 	if e.closed {
 		return fmt.Errorf("application is stopping")
 	}
+
 	var snapshot model.Project
 	var settings model.Settings
 	runID := model.NewID()
+
 	err := e.Store.Update(func(st *model.State) error {
 		for i := range st.Projects {
 			p := &st.Projects[i]
 			if p.ID != id {
 				continue
 			}
+
 			if p.Syncing {
 				return fmt.Errorf("project is already syncing")
 			}
+
 			settings = st.Settings
 			if mode == codeScanMode {
 				if !p.ScanCode || (p.LocalPath == "" && len(p.Repositories()) == 0) {
@@ -164,6 +176,7 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 				}
 				settings.Sources = nil
 			}
+
 			assetName := ""
 			if assetID != "" {
 				for _, a := range p.Assets {
@@ -176,6 +189,7 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 					return ErrAssetNotFound
 				}
 			}
+
 			p.Syncing = true
 			now := time.Now()
 			run := model.Run{ID: runID, StartedAt: now, Status: "running", Trigger: trigger, AssetID: assetID, AssetName: assetName, Mode: mode, Severity: severity, Warnings: []string{}, Steps: planSteps(*p, settings, assetID)}
@@ -184,17 +198,22 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 			if len(p.Runs) > 30 {
 				p.Runs = p.Runs[:30]
 			}
+
 			if d := model.Interval(p.Schedule); d > 0 && assetID == "" && mode != "local" && mode != codeScanMode && severity == "" {
 				p.NextRun = now.Add(d)
 			}
+
 			snapshot = *p
 			return nil
 		}
+
 		return fmt.Errorf("project not found")
 	})
+
 	if err != nil {
 		return err
 	}
+
 	e.wg.Add(1)
 	control := workflow.New(e.ctx, 20*time.Minute, func() { e.acknowledgePause(id, runID) })
 	e.active[id] = activeRun{id: runID, control: control}
@@ -203,6 +222,7 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 		defer control.Close()
 		e.assess(snapshot, settings, runID, assetID, mode, severity, control)
 	}()
+
 	return nil
 }
 
@@ -222,31 +242,38 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 			tracker.progress(stepID, p)
 		}
 	}
+
 	if len(p.Assets) == 0 && !p.ScanCode {
 		warnings = append(warnings, "No components registered. Add inventory before assessing this project.")
 	}
+
 	for _, a := range p.Assets {
 		if ctx.Err() != nil {
 			break
 		}
+
 		if assetID != "" && a.ID != assetID {
 			continue
 		}
+
 		if s.Sources["nvd"] {
 			if workflow.Wait(ctx) != nil {
 				break
 			}
+
 			stepID := "nvd:" + a.ID
 			tracker.start(stepID)
 			items, err := e.Sources.NVD(ctx, a, s, report(stepID))
 			tracker.finish(stepID, severityCount(items, severity), err)
 			all = append(all, items...)
+
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("NVD · %s: %v", a.Name, err))
 			} else {
 				successes++
 			}
 		}
+
 		if s.Sources["osv"] && ctx.Err() == nil {
 			if workflow.Wait(ctx) != nil {
 				break
@@ -256,6 +283,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 			items, err := e.Sources.OSV(ctx, a, s, report(stepID))
 			tracker.finish(stepID, severityCount(items, severity), err)
 			all = append(all, items...)
+
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("OSV · %s: %v", a.Name, err))
 			} else {
@@ -263,11 +291,13 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 			}
 		}
 	}
+
 	all = sources.Merge(all)
 	all = severityCandidates(all, p.Findings, assetID, severity)
 	if s.Sources["cve"] && ctx.Err() == nil {
 		_ = workflow.Wait(ctx)
 	}
+
 	if s.Sources["cve"] && ctx.Err() == nil {
 		tracker.start("cve")
 		ids := map[string]bool{}
@@ -276,6 +306,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 				ids[f.ID] = true
 			}
 		}
+
 		processed := 0
 		failed := 0
 		type record struct {
@@ -283,15 +314,18 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 			refs  []string
 			err   error
 		}
+
 		cache := map[string]record{}
 		for i := range all {
 			if workflow.Wait(ctx) != nil {
 				break
 			}
+
 			f := &all[i]
 			if !strings.HasPrefix(f.ID, "CVE-") {
 				continue
 			}
+
 			r, ok := cache[f.ID]
 			if !ok {
 				tracker.progress("cve", model.SyncProgress{Phase: "records", Item: f.ID, Processed: processed, Total: len(ids)})
@@ -300,6 +334,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 				processed++
 				tracker.progress("cve", model.SyncProgress{Phase: "records", Item: f.ID, Processed: processed, Total: len(ids)})
 			}
+
 			if r.err != nil {
 				if !ok {
 					failed++
@@ -308,22 +343,27 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 				}
 				continue
 			}
+
 			f.Sources = sources.Unique(f.Sources, "CVE")
 			f.References = sources.Unique(f.References, r.refs...)
 			if r.title != "" {
 				f.Title = r.title
 			}
 		}
+
 		tracker.progress("cve", model.SyncProgress{Phase: "page", Processed: processed, Total: len(ids), Found: processed - failed})
 		var cveErr error
 		if failed > 0 {
 			cveErr = fmt.Errorf("%d CVE records could not be retrieved", failed)
 		}
+
 		if ctx.Err() != nil {
 			cveErr = ctx.Err()
 		}
+
 		tracker.finish("cve", processed-failed, cveErr)
 	}
+
 	scannerSkipReason := ""
 	switch {
 	case assetID != "":
@@ -336,7 +376,9 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 	case workflow.Wait(ctx) != nil:
 		scannerSkipReason = "scanner_skipped_ended"
 	}
+
 	tracker.scannerSetup(p, scanner.EnabledTools(s.Scanners), scannerSkipReason)
+
 	if scannerSkipReason == "" {
 		tracker.start("scanner")
 		scannersCompleted := 0
@@ -347,17 +389,21 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 			tracker.scannerEvent(event)
 		})
 		var scanErr error
+
 		if len(warns) > 0 {
 			scanErr = fmt.Errorf("%s", strings.Join(warns, "; "))
 		}
+
 		if ctx.Err() != nil {
 			scanErr = ctx.Err()
 		}
+
 		tracker.finish("scanner", severityCount(items, severity), scanErr)
 		all = append(all, items...)
 		warnings = append(warnings, warns...)
 		successes += scannersCompleted
 	}
+
 	// Fence controls against the final commit: a stop accepted before this lock
 	// must discard unsaved results; a completed commit cannot be stopped later.
 	for {
@@ -366,13 +412,16 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 		if !workflow.Paused(ctx) || ctx.Err() != nil {
 			break
 		}
+
 		e.mu.Unlock()
 	}
+
 	defer e.mu.Unlock()
 	defer delete(e.active, p.ID)
 	status := "complete"
 	previous := p.Findings
 	var inventoryFindings []model.Finding
+
 	if mode == codeScanMode {
 		previous = nil
 		for _, finding := range p.Findings {
@@ -383,6 +432,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 			}
 		}
 	}
+
 	all = severityCandidates(sources.Merge(all), previous, assetID, severity)
 	if len(warnings) > 0 {
 		status = "partial"
@@ -391,21 +441,25 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 		}
 		all = appendPrior(all, previous, assetID, severity)
 	}
+
 	if ctx.Err() != nil {
 		warnings = append(warnings, "Assessment timed out or application stopped.")
 		status = "interrupted"
 		all = appendPrior(all, previous, assetID, severity)
 	}
+
 	all = sources.Merge(all)
 	runCount := severityCount(all, severity)
 	var runSeverityCounts map[string]int
 	if mode == codeScanMode && status == "complete" {
 		runSeverityCounts = findingSeverityCounts(all)
 	}
+
 	all = retainOutsideScope(all, previous, assetID, severity)
 	if len(inventoryFindings) > 0 {
 		all = sources.Merge(append(all, inventoryFindings...))
 	}
+
 	if control.Stopped() {
 		status = "stopped"
 		all = p.Findings
@@ -413,6 +467,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 		runSeverityCounts = nil
 		warnings = []string{"Assessment stopped by user. Unsaved assessment results were discarded; previous findings were kept."}
 	}
+
 	fullAssessmentComplete := status == "complete" && assetID == "" && severity == "" && mode != codeScanMode
 	tracker.start("save")
 	err := e.Store.Update(func(st *model.State) error {
@@ -421,12 +476,14 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 			if current.ID != p.ID {
 				continue
 			}
+
 			current.Syncing = false
 			current.Findings = all
 			if fullAssessmentComplete {
 				current.LastSync = time.Now()
 				current.AssessedRevision = p.Revision
 			}
+
 			for j := range current.Runs {
 				r := &current.Runs[j]
 				if r.ID == runID {
@@ -439,12 +496,15 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 					if fullAssessmentComplete {
 						current.DataCheckedAt = r.DataCheckedAt
 					}
+
 					if status == "interrupted" {
 						interruptSteps(r)
 					}
+
 					if status == "stopped" {
 						stopSteps(r)
 					}
+
 					for k := range r.Steps {
 						step := &r.Steps[k]
 						if step.ID == "save" {
@@ -454,14 +514,18 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 							step.Progress.Found = runCount
 						}
 					}
+
 					addLog(r, "save", "completed", "")
 					addLog(r, "", "run_finished", status)
 				}
 			}
+
 			return nil
 		}
+
 		return nil
 	})
+
 	if err != nil {
 		log.Printf("Could not persist assessment for project %s: %v", p.ID, err)
 	}

@@ -36,6 +36,7 @@ func run() (err error) {
 	if err != nil {
 		return err
 	}
+
 	defaultDir := filepath.Join(config, "Vulman")
 	dir := flag.String("data-dir", defaultDir, "desktop data directory (overrides Configuration)")
 	sample := flag.Bool("sample", false, "add a sample project if the database is empty")
@@ -48,35 +49,43 @@ func run() (err error) {
 	if err := os.Unsetenv("FRONTEND_DEVSERVER_URL"); err != nil {
 		return err
 	}
+
 	assets, err := assetHandler()
 	if err != nil {
 		return err
 	}
+
 	var explicitDirectory bool
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "data-dir" {
 			explicitDirectory = true
 		}
 	})
+
 	var db *store.Store
 	var warning string
+
 	if explicitDirectory {
 		db, err = store.Open(*dir)
 	} else {
 		db, warning, err = openSavedWorkspace(defaultDir)
 	}
+
 	if err != nil {
 		return err
 	}
+
 	desktop := &Desktop{store: db, defaultDirectory: defaultDir, storageWarning: warning}
 	// Some desktop platforms terminate inside the native event loop.
 	closeStore := sync.OnceValue(desktop.close)
 	defer func() {
 		err = errors.Join(err, closeStore())
 	}()
+
 	if err := scanner.CleanScanScratch(filepath.Dir(db.Paths().Database)); err != nil {
 		log.Printf("Cleaning temporary code scans: %v", err)
 	}
+
 	if *sample {
 		if err := addSample(db); err != nil {
 			return err
@@ -103,6 +112,7 @@ func run() (err error) {
 			}
 		},
 	})
+
 	desktop.openBrowser = app.Browser.OpenURL
 	app.RegisterService(application.NewService(desktop))
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
@@ -110,6 +120,7 @@ func run() (err error) {
 		Width: 1350, Height: 900, MinWidth: 720, MinHeight: 520,
 		DefaultContextMenuDisabled: true,
 	})
+
 	if runtime.GOOS == "darwin" {
 		// The macOS Edit menu handles Cmd+A before the WebView sees a key event.
 		menu := application.DefaultApplicationMenu()
@@ -120,16 +131,19 @@ func run() (err error) {
 			app.Menu.Set(menu)
 		}
 	}
+
 	desktop.chooseDirectory = func(title, directory string) (string, error) {
 		return app.Dialog.OpenFile().AttachToWindow(window).SetTitle(title).
 			SetDirectory(directory).CanChooseDirectories(true).CanChooseFiles(false).
 			PromptForSingleSelection()
 	}
+
 	select {
 	case <-termination:
 		return nil
 	default:
 	}
+
 	appStopped := make(chan struct{})
 	defer close(appStopped)
 	go func() {
@@ -141,5 +155,6 @@ func run() (err error) {
 		case <-appStopped:
 		}
 	}()
+
 	return app.Run()
 }
