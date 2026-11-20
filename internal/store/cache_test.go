@@ -3,13 +3,16 @@ package store
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+	berrors "go.etcd.io/bbolt/errors"
 
 	"vulman/internal/model"
 )
@@ -18,6 +21,117 @@ func closeTestStore(t *testing.T, s *Store) {
 	t.Helper()
 	if err := s.Close(); err != nil {
 		t.Errorf("close test store: %v", err)
+	}
+}
+
+func TestClearAPIResponseCachePreservesWorkspaceLimitsAndStatistics(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if s != nil {
+			closeTestStore(t, s)
+		}
+	}()
+
+	if err := s.Update(func(st *model.State) error {
+		st.Settings.CacheMaxEntries = 2
+		st.Settings.CacheMaxMiB = 16
+		st.Settings.Tokens["github"] = "fixture"
+		st.Projects = []model.Project{{
+			ID: "project", Name: "Keep project", Schedule: "daily", Revision: 2,
+			Assets:   []model.Asset{{ID: "asset", Name: "demo", Version: "1.0"}},
+			Findings: []model.Finding{{ID: "CVE-2026-1234", Severity: "CRITICAL"}},
+			Runs:     []model.Run{{ID: "history", Status: "complete", Count: 1}},
+		}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, key := range []string{"evicted", "nvd-response", "cve-response"} {
+		if err := s.CachePut(key, CachedResponse{Data: json.RawMessage(`[]`), CheckedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.RecordCacheUse(true)
+	s.RecordCacheUse(false)
+	before, err := s.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statsBefore, err := s.CacheStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for range 2 {
+		if err := s.ClearAPIResponseCache(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, key := range []string{"nvd-response", "cve-response"} {
+		if _, found, err := s.CacheGet(key); err != nil || found {
+			t.Fatalf("response survived cache clear: %s, %v", key, err)
+		}
+	}
+	stats, err := s.CacheStats()
+	if err != nil || stats.Entries != 0 || stats.Bytes != 0 || stats.Hits != statsBefore.Hits || stats.Misses != statsBefore.Misses || stats.Evictions != statsBefore.Evictions || stats.MaxEntries != statsBefore.MaxEntries || stats.MaxBytes != statsBefore.MaxBytes {
+		t.Fatalf("clear changed limits or cumulative statistics: %+v, %v", stats, err)
+	}
+	after, err := s.Read()
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("cache clear changed workspace data or configuration", err)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statsAfterRestart, err := s.CacheStats()
+	if err != nil || statsAfterRestart != stats {
+		t.Fatalf("cache clear did not survive restart: %+v, %v", statsAfterRestart, err)
+	}
+	if err := s.CachePut("new-response", CachedResponse{Data: json.RawMessage(`[]`), CheckedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := s.CacheGet("new-response"); err != nil || !found {
+		t.Fatal("the cleared cache cannot store new responses", err)
+	}
+}
+
+func TestClearAPIResponseCacheRollsBackIfAnIndexCannotBeReplaced(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, s)
+	if err := s.CachePut("keep", CachedResponse{Data: json.RawMessage(`[]`), CheckedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte("cache-v1")).DeleteBucket([]byte("order"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.CacheStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClearAPIResponseCache(); !errors.Is(err, berrors.ErrBucketNotFound) {
+		t.Fatalf("expected a failed transaction, got %v", err)
+	}
+	if _, found, err := s.CacheGet("keep"); err != nil || !found {
+		t.Fatal("a failed clear discarded a response", err)
+	}
+	after, err := s.CacheStats()
+	if err != nil || after != before {
+		t.Fatalf("a failed clear changed cache metadata: %+v, %v", after, err)
 	}
 }
 

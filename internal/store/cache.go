@@ -287,6 +287,44 @@ func (s *Store) CacheDelete(key string) error {
 		return saveUsage(meta, u)
 	})
 }
+
+// ClearAPIResponseCache removes response payloads and their indexes in one
+// commit. Workspace state and catalogue files are never opened or modified.
+// Limits and cumulative statistics survive; new API responses may refill it.
+func (s *Store) ClearAPIResponseCache() error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		root := tx.Bucket([]byte("cache-v1"))
+		meta := root.Bucket([]byte("meta"))
+		retained := make(map[string]uint64)
+		for _, key := range []string{"_limit_entries", "_limit_bytes", "_evictions"} {
+			retained[key] = readUint(meta.Get([]byte(key)))
+		}
+
+		for _, name := range []string{"entries", "order", "meta"} {
+			if err := root.DeleteBucket([]byte(name)); err != nil {
+				return err
+			}
+
+			if _, err := root.CreateBucket([]byte(name)); err != nil {
+				return err
+			}
+		}
+
+		meta = root.Bucket([]byte("meta"))
+		for key, value := range retained {
+			if err := meta.Put([]byte(key), uintBytes(value)); err != nil {
+				return err
+			}
+		}
+
+		if err := saveUsage(meta, cacheUsage{}); err != nil {
+			return err
+		}
+
+		return s.persistCacheCounters(meta)
+	})
+}
+
 func (s *Store) CacheStats() (CacheStats, error) {
 	var stats CacheStats
 	err := s.db.View(func(tx *bolt.Tx) error {

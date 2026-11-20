@@ -394,6 +394,24 @@ func (d *Desktop) CheckScanner(ctx context.Context, name string) (_ scanner.Chec
 	return scanner.Check(ctx, name)
 }
 
+func (d *Desktop) ClearAPIResponseCache() (_ store.CacheStats, resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed || d.store == nil {
+		return store.CacheStats{}, apperror.New("application_is_stopping", "application is stopping")
+	}
+
+	if err := d.store.ClearAPIResponseCache(); err != nil {
+		return store.CacheStats{}, apperror.Newf("api_cache_clear_failed", "Could not clear the API response cache: %w", err)
+	}
+
+	return d.store.CacheStats()
+}
+
 func (d *Desktop) UpdateCVEDatabase() (resultErr error) {
 	defer func() {
 		resultErr = apperror.Expose(resultErr)

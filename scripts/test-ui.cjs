@@ -1160,7 +1160,7 @@ test('Configuration shows runtime database and key paths beneath the storage not
 test('sync modes are explicit and keep the selected mode after redraw',async()=>{
   const run=app();run(`var p={id:'p',assets:[]};syncModeSelection.p='local'`);
   const html=run('syncControls(p)');
-  assert.match(html,/value="local" selected>Reassess from cache/);
+  assert.match(html,/value="local" selected>Reassess from local data/);
   assert.match(html,/Force refresh/);
   run(`var calls=[];invoke=async(_method,_id,body)=>calls.push(body);refresh=async()=>{};toast=()=>{}`);
   await run(`syncProject('p','','local')`);await run(`syncProject('p','a','refresh')`);
@@ -1173,14 +1173,33 @@ test('cache settings expose configurable freshness and runtime cache usage',()=>
   assert.match(html,/name="cache_hours"[^>]*value="12"/);
   assert.match(html,/Cached queries and records: <strong>5/);
   assert.match(html,/1.00 MiB/);
-  run(`lang='ja'`);assert.match(run('cacheSettingsHTML()'),/共有ローカルキャッシュ/);
+  run(`lang='ja'`);assert.match(run('cacheSettingsHTML()'),/APIレスポンスキャッシュ/);
+});
+
+test('Advanced settings contains the cache controls and opens to reveal invalid input', () => {
+  const run = app();
+  run(`state={settings:{language:'en',sources:{},scanners:{},cache_hours:12},token_status:{}};renderSettings()`);
+  const html = run(`$('#main').innerHTML`);
+  const advanced = html.match(/<details class="settings-section advanced-settings"[^>]*>[\s\S]*?<\/details>/)?.[0];
+  assert.ok(advanced);
+  assert.doesNotMatch(advanced, /<details[^>]*\bopen\b/);
+  assert.match(advanced, /<summary>Advanced settings<\/summary>/);
+  assert.match(advanced, /<h3>API response cache<\/h3>/);
+  for (const name of ['cache_hours','cache_max_entries','cache_max_mib']) {
+    assert.match(advanced, new RegExp('name="' + name + '"'));
+    assert.doesNotMatch(html.replace(advanced, ''), new RegExp('name="' + name + '"'));
+  }
+  run(`const section = {open:false}; $('#settings-form').listeners.invalid({target:{closest:() => section}})`);
+  assert.equal(run('section.open'), true);
+  run(`lang='ja'`);
+  assert.match(run('advancedSettingsHTML()'), /詳細設定.*APIレスポンスキャッシュ/s);
 });
 
 test('workflow distinguishes assessment time from cached source freshness',()=>{
   const run=app();workflowFixture(run);
   run(`workflow.mode='local';workflow.data_checked_at='2026-01-01T01:00:00Z';workflow.steps[0].progress={phase:'stale_cache',cache_status:'stale',checked_at:workflow.data_checked_at}`);
   const html=run('workflowBody(project,workflow)');
-  assert.match(html,/Reassess from cache/);
+  assert.match(html,/Reassess from local data/);
   assert.match(html,/Source data checked/);
   assert.match(html,/freshness could not be verified/);
   assert.match(html,/Stale cached data/);
@@ -2202,7 +2221,7 @@ test('saved workflow warnings and scanner logs change language without changing 
       logs:[{step_id:'scanner',event:'scanner_failed',tool:'trivy',message:{code:'scanner_exit',params:{arg0:'2'}},detail:'old English error'}],
     };
   `);
-  assert.match(run(`workflowLogs(savedRun, [])`), /exit 2; no clean scan was recorded/);
+  assert.match(run(`workflowLogs(savedRun, [])`), /[Ee]xit 2; no clean scan was recorded/);
   run(`lang='ja'`);
   assert.match(run(`workflowLogs(savedRun, [])`), /Trivy.*終了コード2/);
   assert.doesNotMatch(run(`workflowLogs(savedRun, [])`), /old English error|exit 2/);
@@ -2221,4 +2240,76 @@ test('database failures, queued errors, and scanner status details use structure
     assert.doesNotMatch(run(`${render}(failure)`), /English failure/);
   }
   assert.match(run(`scannerResultHTML('trivy',{status:'failed',platform:'darwin',detail:'English failure',message:{code:'permission_denied'}})`), /権限がありません/);
+});
+
+test('clearing API responses requires confirmation and refreshes metrics without saving drafts', async () => {
+  const run = app();
+  run(`
+    state={settings:{cache_hours:12},data_directory:'/workspace',version:'0:1',cache_stats:{entries:4,bytes:1024,hits:3}};
+    const clearButton={disabled:false};
+    const calls=[],prompts=[],notices=[];
+    let allow=false;
+    confirmAction=async message=>{prompts.push(message);return allow;};
+    invoke=async method=>{calls.push(method);return {entries:0,bytes:0,hits:3,misses:1,evictions:2};};
+    toast=message=>notices.push(message);
+    refresh=()=>{throw new Error('Must preserve unsaved form fields');};
+    $('#advanced-settings').open=true;
+    $('#settings-form input[name="cache_hours"]').value='24';
+  `);
+  assert.match(run('cacheSettingsHTML()'), /type="button"[^>]*data-action="clear-api-response-cache"[^>]*>Clear API response cache/);
+  assert.equal(await run('clearAPIResponseCache(clearButton)'), false);
+  assert.equal(run('calls.length'), 0);
+  assert.equal(run('state.cache_stats.entries'), 4);
+  assert.equal(run('clearButton.disabled'), false);
+  assert.match(run('prompts[0]'), /projects, findings, credentials, activity history/);
+  assert.match(run('prompts[0]'), /CVE, NVD\/CPE, and OSV databases will be kept/);
+
+  run('allow=true');
+  const clearing=run('clearAPIResponseCache(clearButton)');
+  assert.equal(run('clearButton.disabled'), true);
+  assert.equal(await run('clearAPIResponseCache(clearButton)'), false);
+  assert.equal(await clearing, true);
+  assert.equal(run('JSON.stringify(calls)'), '["ClearAPIResponseCache"]');
+  assert.equal(run('state.cache_stats.entries'), 0);
+  assert.equal(run('state.cache_stats.hits'), 3);
+  assert.match(run(`$('#cache-usage').innerHTML`), /<strong>0<\/strong>/);
+  assert.equal(run(`$('#settings-form input[name="cache_hours"]').value`), '24');
+  assert.equal(run('state.settings.cache_hours'), 12);
+  assert.equal(run(`$('#advanced-settings').open`), true);
+  assert.equal(run('notices[0]'), 'API response cache cleared.');
+  assert.equal(run('clearButton.disabled'), false);
+});
+
+test('cache clear errors use localized notifications and retain existing metrics', async () => {
+  const run=app();
+  run(`
+    lang='ja';state={settings:{},cache_stats:{entries:7}};
+    const clearButton={dataset:{action:'clear-api-response-cache'},disabled:false,closest:selector=>selector==='[data-action]'?clearButton:null};
+    const notices=[];
+    confirmAction=async()=>true;
+    invoke=async()=>{throw {cause:{code:'api_cache_clear_failed'}};};
+    toast=(message,error)=>notices.push([message,error]);
+  `);
+  await run('document.listeners.click({target:clearButton})');
+  assert.equal(run('state.cache_stats.entries'),7);
+  assert.equal(run('clearButton.disabled'),false);
+  assert.equal(run('notices[0][0]'),'APIレスポンスキャッシュを消去できませんでした。');
+  assert.equal(run('notices[0][1]'),true);
+});
+
+test('a finished cache clear cannot overwrite metrics from another workspace', async () => {
+  const run=app();
+  run(`
+    state={settings:{},data_directory:'/first',version:'0:1',cache_stats:{entries:3}};
+    const clearButton={disabled:false};let notices=0;
+    confirmAction=async()=>true;
+    toast=()=>notices++;
+    invoke=async()=>{
+      state={...state,data_directory:'/second',version:'1:1',cache_stats:{entries:8}};
+      return {entries:0,bytes:0};
+    };
+  `);
+  assert.equal(await run('clearAPIResponseCache(clearButton)'),true);
+  assert.equal(run('state.cache_stats.entries'),8);
+  assert.equal(run('notices'),0);
 });

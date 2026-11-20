@@ -35,6 +35,12 @@
 .scan-location-severity { padding: 12px 18px; color: var(--muted); font-size: 10px; }
 
 .settings-section > .storage-note{color:var(--red);font-weight:700}
+.advanced-settings > summary { cursor: pointer; color: var(--ink); font-size: 14px; font-weight: 600; }
+.advanced-settings > summary::marker { color: var(--green); }
+.advanced-settings > summary:focus-visible { outline: 2px solid var(--green); outline-offset: 5px; border-radius: 3px; }
+.advanced-settings-content { padding-top: 22px; }
+.api-cache-settings > p { font-size: 11px; color: var(--muted); line-height: 1.8; margin-bottom: 18px; }
+.api-cache-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0 12px; }
 .storage-paths{margin:0;display:grid;gap:16px}.storage-paths dt{font-size:11px;font-weight:500;color:#708368;margin-bottom:7px}.storage-paths dd{margin:0;padding:10px 12px;border:1px solid #dfe6d7;border-radius:6px;background:#f6f9f0}.storage-paths code{font-size:11px;line-height:1.8;overflow-wrap:anywhere;user-select:all}
 
 .sync-controls{flex-wrap:wrap}.sync-mode select{width:185px}.cache-stats{display:flex;flex-direction:column;justify-content:center;gap:9px;color:var(--muted);font-size:11px}.cache-stats strong{color:var(--ink);font-weight:500}
