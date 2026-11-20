@@ -3,12 +3,12 @@ package scanner
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
 	"os"
 	"os/exec"
 	"slices"
 	"strings"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 )
 
@@ -31,7 +31,7 @@ func newScannerCommand(ctx context.Context, name string) (*exec.Cmd, error) {
 	case "snyk":
 		return exec.CommandContext(ctx, "snyk", "test", "--json"), nil
 	default:
-		return nil, fmt.Errorf("unsupported scanner %q", name)
+		return nil, apperror.Newf("scanner_unsupported", "unsupported scanner %q", name)
 	}
 }
 

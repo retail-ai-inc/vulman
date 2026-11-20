@@ -2,12 +2,13 @@ package engine
 
 import (
 	"errors"
-	"fmt"
 	"log"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/osvdb"
 	"vulman/internal/workflow"
@@ -21,6 +22,7 @@ type queuedSync struct {
 func (e *Engine) databaseStatus(source string) (model.DatabaseWait, error) {
 	var running, initialized bool
 	var phase, detail string
+	var message *apperror.Message
 
 	switch source {
 	case "nvd":
@@ -30,6 +32,7 @@ func (e *Engine) databaseStatus(source string) (model.DatabaseWait, error) {
 		}
 
 		running, initialized, phase, detail = stats.Running, stats.Initialized, stats.Phase, stats.Error
+		message = stats.ErrorMessage
 	case "cve":
 		stats, err := e.CVE.Stats()
 		if err != nil {
@@ -37,10 +40,11 @@ func (e *Engine) databaseStatus(source string) (model.DatabaseWait, error) {
 		}
 
 		running, initialized, phase, detail = stats.Running, stats.Initialized, stats.Phase, stats.Error
+		message = stats.ErrorMessage
 	default:
 		ecosystem, ok := strings.CutPrefix(source, "osv:")
 		if !ok {
-			return model.DatabaseWait{}, errors.New("unknown database dependency")
+			return model.DatabaseWait{}, apperror.New("unknown_database_dependency", "unknown database dependency")
 		}
 
 		stats, err := e.OSV.Stats()
@@ -51,6 +55,7 @@ func (e *Engine) databaseStatus(source string) (model.DatabaseWait, error) {
 		for _, item := range stats.Ecosystems {
 			if item.Ecosystem == ecosystem {
 				running, initialized, phase, detail = item.Running, item.Initialized, item.Phase, item.Error
+				message = item.ErrorMessage
 			}
 		}
 	}
@@ -64,7 +69,7 @@ func (e *Engine) databaseStatus(source string) (model.DatabaseWait, error) {
 		status = "interrupted"
 	}
 
-	return model.DatabaseWait{Source: source, Status: status, Detail: detail}, nil
+	return model.DatabaseWait{Source: source, Status: status, Detail: detail, Message: message}, nil
 }
 
 // Only updates already running for the selected assessment's sources delay it.
@@ -91,7 +96,7 @@ func (e *Engine) databaseDependenciesForAsset(p model.Project, s model.Settings,
 
 		status, err := e.databaseStatus(source)
 		if err != nil {
-			return nil, fmt.Errorf("could not read %s update status: %w", source, err)
+			return nil, apperror.Newf("read_update_status", "could not read %s update status: %w", source, err)
 		}
 
 		if status.Status == "updating" {
@@ -133,7 +138,8 @@ func (e *Engine) currentDatabaseWaits(q *queuedSync) ([]model.DatabaseWait, bool
 	for _, previous := range q.waits {
 		status, err := e.databaseStatus(previous.Source)
 		if err != nil {
-			status = model.DatabaseWait{Source: previous.Source, Status: "failed", Detail: err.Error()}
+			message := apperror.Public(err)
+			status = model.DatabaseWait{Source: previous.Source, Status: "failed", Detail: message.English(), Message: message}
 		}
 
 		if status.Status != "complete" {
@@ -164,7 +170,7 @@ func (e *Engine) awaitDatabases(projectID, runID string, q *queuedSync, control 
 			mode, ready = "local", true
 		}
 
-		if ready || !slices.Equal(waits, q.waits) {
+		if ready || !reflect.DeepEqual(waits, q.waits) {
 			err := e.persistQueueState(projectID, runID, waits, ready, blocked, mode, q.useAvailable)
 			if err != nil {
 				log.Printf("Could not update queued sync for project %s: %v", projectID, err)
@@ -303,12 +309,12 @@ func (e *Engine) controlQueued(projectID string, a activeRun, action string) err
 				source = "osv"
 				endpoint, defaultEndpoint = st.Settings.OSVURL, model.DefaultOSVURL
 				if !slices.Contains(OSVEcosystems(st), strings.TrimPrefix(wait.Source, "osv:")) {
-					return errors.New("select the required OSV ecosystem in Configuration before retrying, or use available data")
+					return apperror.New("queue_osv_selection_required", "select the required OSV ecosystem in Configuration before retrying, or use available data")
 				}
 			}
 
 			if !st.Settings.Sources[source] || strings.TrimRight(endpoint, "/") != defaultEndpoint {
-				return fmt.Errorf("enable the default %s source in Configuration before retrying, or use available data", wait.Source)
+				return apperror.Newf("enable_default_source", "enable the default %s source in Configuration before retrying, or use available data", wait.Source)
 			}
 		}
 
@@ -337,12 +343,12 @@ func (e *Engine) controlQueued(projectID string, a activeRun, action string) err
 			}
 
 			if err != nil {
-				failures = append(failures, fmt.Errorf("%s: %w", wait.Source, err))
+				failures = append(failures, apperror.Newf("context", "%s: %w", wait.Source, err))
 			}
 		}
 
 		return errors.Join(failures...)
 	default:
-		return fmt.Errorf("queued syncs can only be cancelled, retried, or started with available data for project %s", projectID)
+		return apperror.Newf("queued_actions", "queued syncs can only be cancelled, retried, or started with available data for project %s", projectID)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/scanner"
 	"vulman/internal/store"
@@ -202,7 +203,7 @@ func (t *runTracker) progress(id string, p model.SyncProgress) {
 					addLog(r, id, "cache_summary", p.CacheStatus)
 				}
 			case "retry", "shared", "cache_error":
-				addLog(r, id, p.Phase, p.Item)
+				addLog(r, id, p.Phase, p.Item).Message = p.Message
 			case "cached", "refreshed", "shared_result", "stale_cache":
 				addLog(r, id, p.Phase, p.CheckedAt.Format(time.RFC3339))
 			}
@@ -244,10 +245,12 @@ func (t *runTracker) scannerEvent(event scanner.ScanEvent) {
 			if detail != "" {
 				detail += " · "
 			}
-			detail += event.Err.Error()
+			detail += apperror.Public(event.Err).English()
 		}
 
 		entry := addLog(r, "scanner", event.Phase, detail)
+		entry.Message = apperror.Public(event.Err)
+		entry.Tool = event.Tool
 		entry.ScanTarget = event.Target
 		entry.ScanRepository = event.Repository
 
@@ -274,8 +277,11 @@ func (t *runTracker) scannerEvent(event scanner.ScanEvent) {
 	})
 }
 
-func (t *runTracker) event(id, event, detail string) {
-	t.update(func(r *model.Run) { addLog(r, id, event, detail) })
+func (t *runTracker) errorEvent(id, event string, err error) {
+	t.update(func(r *model.Run) {
+		message := apperror.Public(err)
+		addLog(r, id, event, message.English()).Message = message
+	})
 }
 
 func (t *runTracker) finish(id string, found int, err error) {
@@ -298,7 +304,8 @@ func (t *runTracker) finish(id string, found int, err error) {
 					step.Status = "interrupted"
 					event = "interrupted"
 				}
-				addLog(r, id, event, err.Error())
+				message := apperror.Public(err)
+				addLog(r, id, event, message.English()).Message = message
 			} else {
 				step.Status = "complete"
 				addLog(r, id, "completed", step.Component)

@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"vulman/internal/apperror"
 )
 
 const downloadFile = ".vulman-nvd-download"
@@ -25,6 +27,10 @@ const maxCompressedSize int64 = 2 << 30
 type statusError int
 
 func (e statusError) Error() string { return fmt.Sprintf("NVD download returned HTTP %d", e) }
+
+func (e statusError) PublicMessage() apperror.Message {
+	return apperror.Newf("nvd_download_http", "NVD download returned HTTP %d", int(e)).PublicMessage()
+}
 
 func parseMeta(data []byte, f Feed) (Feed, error) {
 	values := map[string]string{}
@@ -40,17 +46,17 @@ func parseMeta(data []byte, f Feed) (Feed, error) {
 	}
 	at, err := time.Parse(time.RFC3339Nano, values["lastModifiedDate"])
 	if err != nil {
-		return Feed{}, errors.New("invalid NVD feed timestamp")
+		return Feed{}, apperror.New("invalid_nvd_feed_timestamp", "invalid NVD feed timestamp")
 	}
 	f.At = at.UTC()
 	f.SHA = strings.ToLower(values["sha256"])
 	hash, err := hex.DecodeString(f.SHA)
 	if err != nil || len(hash) != sha256.Size {
-		return Feed{}, errors.New("invalid NVD feed SHA-256")
+		return Feed{}, apperror.New("invalid_nvd_feed_sha_256", "invalid NVD feed SHA-256")
 	}
 	f.Size, err = strconv.ParseInt(values["size"], 10, 64)
 	if err != nil || f.Size <= 0 || f.Size > maxFeedSize {
-		return Feed{}, errors.New("invalid NVD feed size")
+		return Feed{}, apperror.New("invalid_nvd_feed_size", "invalid NVD feed size")
 	}
 	key := "gzSize"
 	if f.Kind == "cpe" {
@@ -58,7 +64,7 @@ func parseMeta(data []byte, f Feed) (Feed, error) {
 	}
 	f.Compressed, err = strconv.ParseInt(values[key], 10, 64)
 	if err != nil || f.Compressed <= 0 || f.Compressed > maxCompressedSize {
-		return Feed{}, errors.New("invalid compressed NVD feed size")
+		return Feed{}, apperror.New("invalid_compressed_nvd_feed_size", "invalid compressed NVD feed size")
 	}
 	return f, nil
 }
@@ -83,7 +89,7 @@ func (u *Updater) get(ctx context.Context, endpoint string, consume func(*http.R
 		if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds > 0 {
 			if seconds > 30 {
 				_ = resp.Body.Close()
-				return errors.New("NVD feed service is cooling down; retry later")
+				return apperror.New("nvd_feed_service_is_cooling_down_retry_later", "NVD feed service is cooling down; retry later")
 			}
 			delay = time.Duration(seconds) * time.Second
 		} else if at, err := http.ParseTime(resp.Header.Get("Retry-After")); err == nil && time.Until(at) > delay {
@@ -104,7 +110,7 @@ func (u *Updater) get(ctx context.Context, endpoint string, consume func(*http.R
 		case <-timer.C:
 		}
 	}
-	return errors.New("NVD download failed")
+	return apperror.New("nvd_download_failed", "NVD download failed")
 }
 
 func (u *Updater) metadata(ctx context.Context, f Feed) (Feed, error) {
@@ -115,7 +121,7 @@ func (u *Updater) metadata(ctx context.Context, f Feed) (Feed, error) {
 			return err
 		}
 		if len(data) > 64<<10 {
-			return errors.New("NVD metadata exceeds size limit")
+			return apperror.New("nvd_metadata_exceeds_size_limit", "NVD metadata exceeds size limit")
 		}
 		result, err = parseMeta(data, f)
 		return err
@@ -173,7 +179,7 @@ func (u *Updater) streams(ctx context.Context, f Feed, visit func(io.Reader) err
 			continue
 		}
 		if member.UncompressedSize64 > uint64(maxFeedSize)-total {
-			return errors.New("expanded CPE dictionary exceeds size limit")
+			return apperror.New("expanded_cpe_dictionary_exceeds_size_limit", "expanded CPE dictionary exceeds size limit")
 		}
 		total += member.UncompressedSize64
 		reader, err := member.Open()
@@ -187,7 +193,7 @@ func (u *Updater) streams(ctx context.Context, f Feed, visit func(io.Reader) err
 		count++
 	}
 	if count == 0 {
-		return errors.New("CPE dictionary has no JSON chunks")
+		return apperror.New("cpe_dictionary_has_no_json_chunks", "CPE dictionary has no JSON chunks")
 	}
 	return nil
 }
@@ -198,7 +204,7 @@ func (u *Updater) verify(ctx context.Context, f Feed) error {
 		return err
 	}
 	if info.Size() != f.Compressed {
-		return errors.New("NVD compressed download size mismatch")
+		return apperror.New("nvd_compressed_download_size_mismatch", "NVD compressed download size mismatch")
 	}
 	hash := sha256.New()
 	var size int64
@@ -206,7 +212,7 @@ func (u *Updater) verify(ctx context.Context, f Feed) error {
 		n, err := io.Copy(hash, io.LimitReader(reader, maxFeedSize-size+1))
 		size += n
 		if size > maxFeedSize {
-			return errors.New("NVD uncompressed feed exceeds size limit")
+			return apperror.New("nvd_uncompressed_feed_exceeds_size_limit", "NVD uncompressed feed exceeds size limit")
 		}
 		return err
 	})
@@ -214,7 +220,7 @@ func (u *Updater) verify(ctx context.Context, f Feed) error {
 		return err
 	}
 	if size != f.Size || hex.EncodeToString(hash.Sum(nil)) != f.SHA {
-		return errors.New("NVD uncompressed size or SHA-256 verification failed; retry after the feed and metadata agree")
+		return apperror.New("nvd_feed_integrity_failed", "NVD uncompressed size or SHA-256 verification failed; retry after the feed and metadata agree")
 	}
 	return nil
 }
@@ -236,7 +242,7 @@ func (u *Updater) download(ctx context.Context, f Feed) error {
 		reader := &contextReader{ctx: ctx, reader: resp.Body, report: func(n int64) { u.progress("downloading", n, f.Compressed) }}
 		n, err := io.Copy(file, io.LimitReader(reader, f.Compressed+1))
 		if err == nil && n != f.Compressed {
-			err = errors.New("NVD download is incomplete")
+			err = apperror.New("nvd_download_is_incomplete", "NVD download is incomplete")
 		}
 		if err == nil {
 			err = file.Sync()
@@ -259,7 +265,7 @@ type budgetReader struct {
 func (r *budgetReader) Read(p []byte) (int, error) {
 	left := r.ceiling - r.read
 	if left <= 0 {
-		return 0, errors.New("NVD JSON value exceeds size limit")
+		return 0, apperror.New("nvd_json_value_exceeds_size_limit", "NVD JSON value exceeds size limit")
 	}
 	if int64(len(p)) > left {
 		p = p[:left]
@@ -279,7 +285,7 @@ func readArray(reader io.Reader, key string, info *arrayInfo, visit func(json.Ra
 	dec := json.NewDecoder(limited)
 	first, err := dec.Token()
 	if err != nil || first != json.Delim('{') {
-		return errors.New("invalid NVD JSON envelope")
+		return apperror.New("invalid_nvd_json_envelope", "invalid NVD JSON envelope")
 	}
 	found := false
 	for dec.More() {
@@ -291,12 +297,12 @@ func readArray(reader io.Reader, key string, info *arrayInfo, visit func(json.Ra
 		switch token {
 		case key:
 			if found {
-				return errors.New("duplicate NVD record array")
+				return apperror.New("duplicate_nvd_record_array", "duplicate NVD record array")
 			}
 			found = true
 			start, err := dec.Token()
 			if err != nil || start != json.Delim('[') {
-				return errors.New("invalid NVD record array")
+				return apperror.New("invalid_nvd_record_array", "invalid NVD record array")
 			}
 			for dec.More() {
 				limited.ceiling = dec.InputOffset() + (8 << 20)
@@ -305,7 +311,7 @@ func readArray(reader io.Reader, key string, info *arrayInfo, visit func(json.Ra
 					return err
 				}
 				if len(raw) > 8<<20 {
-					return errors.New("NVD record exceeds size limit")
+					return apperror.New("nvd_record_exceeds_size_limit", "NVD record exceeds size limit")
 				}
 				info.Count++
 				if err := visit(raw); err != nil {
@@ -318,7 +324,7 @@ func readArray(reader io.Reader, key string, info *arrayInfo, visit func(json.Ra
 		case "totalResults", "resultsPerPage":
 			var count int
 			if err := dec.Decode(&count); err != nil || count < 0 {
-				return errors.New("invalid NVD feed record count")
+				return apperror.New("invalid_nvd_feed_record_count", "invalid NVD feed record count")
 			}
 			if token == "totalResults" {
 				info.Total = &count
@@ -336,14 +342,14 @@ func readArray(reader io.Reader, key string, info *arrayInfo, visit func(json.Ra
 		return err
 	}
 	if !found {
-		return errors.New("NVD feed is missing its record array")
+		return apperror.New("nvd_feed_is_missing_its_record_array", "NVD feed is missing its record array")
 	}
 	if info.Total == nil || info.Expected == nil || info.Count != *info.Expected {
-		return errors.New("NVD feed record count does not match its envelope")
+		return apperror.New("nvd_feed_record_count_does_not_match_its_envelope", "NVD feed record count does not match its envelope")
 	}
 	var trailing json.RawMessage
 	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return errors.New("NVD feed has trailing or malformed JSON")
+		return apperror.New("nvd_feed_has_trailing_or_malformed_json", "NVD feed has trailing or malformed JSON")
 	}
 	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/cvedb"
 	"vulman/internal/model"
 	"vulman/internal/nvddb"
@@ -114,12 +115,12 @@ func (c *Client) fetchNVD(ctx context.Context, a model.Asset, s model.Settings, 
 			return out, err
 		}
 		if data.TotalResults == nil || *data.TotalResults < 0 {
-			return out, fmt.Errorf("NVD returned an invalid result envelope")
+			return out, apperror.New("nvd_returned_an_invalid_result_envelope", "NVD returned an invalid result envelope")
 		}
 		for _, item := range data.Vulnerabilities {
 			v := item.CVE
 			if v.ID == "" {
-				return out, fmt.Errorf("NVD returned an advisory without an identifier")
+				return out, apperror.New("nvd_returned_an_advisory_without_an_identifier", "NVD returned an advisory without an identifier")
 			}
 			if strings.EqualFold(v.VulnStatus, "Rejected") {
 				continue
@@ -133,10 +134,10 @@ func (c *Client) fetchNVD(ctx context.Context, a model.Asset, s model.Settings, 
 			return out, nil
 		}
 		if len(data.Vulnerabilities) == 0 {
-			return out, fmt.Errorf("NVD pagination stopped before all results were returned")
+			return out, apperror.New("nvd_pagination_stopped_before_all_results_were_returned", "NVD pagination stopped before all results were returned")
 		}
 	}
-	return out, fmt.Errorf("NVD result limit reached; narrow the query using an exact CPE")
+	return out, apperror.New("nvd_result_limit_reached_narrow_the_query_using_an_exact_cpe", "NVD result limit reached; narrow the query using an exact CPE")
 }
 
 func nvdFinding(v nvdRecord, a model.Asset, match string) model.Finding {
@@ -199,7 +200,7 @@ func (c *Client) fetchCVE(ctx context.Context, id string, s model.Settings) (str
 		return "", nil, ErrRejected
 	}
 	if data.CVEMetadata.State != "PUBLISHED" {
-		return "", nil, fmt.Errorf("CVE returned an invalid record")
+		return "", nil, apperror.New("cve_returned_an_invalid_record", "CVE returned an invalid record")
 	}
 	refs := []string{}
 	for _, container := range append([]cveContainer{data.Containers.CNA}, data.Containers.ADP...) {
@@ -215,7 +216,7 @@ type osvRecord = osvdb.Record
 func (c *Client) fetchOSV(ctx context.Context, a model.Asset, s model.Settings, reports ...func(model.SyncProgress)) ([]model.Finding, error) {
 	out := []model.Finding{}
 	if a.Ecosystem == "" {
-		return out, fmt.Errorf("OSV skipped: ecosystem is required")
+		return out, apperror.New("osv_skipped_ecosystem_is_required", "OSV skipped: ecosystem is required")
 	}
 	token := ""
 	seen := map[string]bool{}
@@ -231,11 +232,11 @@ func (c *Client) fetchOSV(ctx context.Context, a model.Asset, s model.Settings, 
 			return out, err
 		}
 		if data.Error != nil {
-			return out, fmt.Errorf("OSV returned an error response")
+			return out, apperror.New("osv_returned_an_error_response", "OSV returned an error response")
 		}
 		for _, v := range data.Vulns {
 			if v.ID == "" {
-				return out, fmt.Errorf("OSV returned an advisory without an identifier")
+				return out, apperror.New("osv_returned_an_advisory_without_an_identifier", "OSV returned an advisory without an identifier")
 			}
 			if v.Withdrawn != "" {
 				continue
@@ -248,12 +249,12 @@ func (c *Client) fetchOSV(ctx context.Context, a model.Asset, s model.Settings, 
 			return out, nil
 		}
 		if seen[data.Next] {
-			return out, fmt.Errorf("OSV repeated a pagination token")
+			return out, apperror.New("osv_repeated_a_pagination_token", "OSV repeated a pagination token")
 		}
 		seen[data.Next] = true
 		token = data.Next
 	}
-	return out, fmt.Errorf("OSV pagination limit reached")
+	return out, apperror.New("osv_pagination_limit_reached", "OSV pagination limit reached")
 }
 
 func osvFinding(v osvRecord, a model.Asset) model.Finding {
@@ -353,4 +354,10 @@ func Merge(all []model.Finding) []model.Finding {
 		return out[i].ID < out[j].ID
 	})
 	return out
+}
+
+// notifyIssue carries a public message through progress snapshots and run logs.
+func notifyIssue(reports []func(model.SyncProgress), err error) {
+	message := apperror.Public(err)
+	notify(reports, model.SyncProgress{Phase: "cache_error", Item: message.English(), Message: message})
 }

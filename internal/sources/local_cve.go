@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/url"
 	"strings"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/cvedb"
 	"vulman/internal/model"
 	"vulman/internal/store"
@@ -25,7 +25,7 @@ func (c *Client) localCVE(ctx context.Context, id string, s model.Settings, repo
 	}
 	r, found, err := c.LocalCVE.Lookup(id)
 	if err != nil {
-		notify(reports, model.SyncProgress{Phase: "cache_error", Item: "Could not read the local CVE catalogue"})
+		notifyIssue(reports, apperror.New("cve_local_read", "Could not read the local CVE catalogue"))
 	}
 	interval := model.Interval(s.CVEUpdateSchedule)
 	if s.CVEUpdateSchedule == "" || interval == 0 {
@@ -42,7 +42,7 @@ func (c *Client) localCVE(ctx context.Context, id string, s model.Settings, repo
 		var stale error
 		if !fresh {
 			status, phase = "stale", "stale_cache"
-			stale = errors.New("local CVE data is stale; update the CVE database")
+			stale = apperror.New("local_cve_data_is_stale_update_the_cve_database", "local CVE data is stale; update the CVE database")
 		}
 		notify(reports, model.SyncProgress{Phase: phase, CacheStatus: status, CheckedAt: r.CheckedAt})
 		if r.State == "REJECTED" {
@@ -58,11 +58,11 @@ func (c *Client) localCVE(ctx context.Context, id string, s model.Settings, repo
 		}
 		full, err := cvedb.Parse(data)
 		if err != nil || full.ID != id {
-			return nil, false, fmt.Errorf("CVE returned an invalid record for %s", id)
+			return nil, false, apperror.Newf("cve_invalid_record_id", "CVE returned an invalid record for %s", id)
 		}
 		full.CheckedAt = time.Now().UTC()
 		if err := c.LocalCVE.Put(full); err != nil {
-			notify(reports, model.SyncProgress{Phase: "cache_error", Item: "Could not save the local CVE record"})
+			notifyIssue(reports, apperror.New("cve_local_save", "Could not save the local CVE record"))
 		}
 		if full.State == "REJECTED" {
 			return nil, false, ErrRejected

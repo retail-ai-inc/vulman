@@ -8,7 +8,6 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -18,47 +17,53 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+
+	"vulman/internal/apperror"
 )
 
 type EcosystemStats struct {
-	Ecosystem   string    `json:"ecosystem"`
-	Records     uint64    `json:"records"`
-	Initialized bool      `json:"initialized"`
-	CheckedAt   time.Time `json:"checked_at"`
-	SourceAt    time.Time `json:"source_at"`
-	Running     bool      `json:"running"`
-	Phase       string    `json:"phase"`
-	Error       string    `json:"error,omitempty"`
+	Ecosystem    string            `json:"ecosystem"`
+	Records      uint64            `json:"records"`
+	Initialized  bool              `json:"initialized"`
+	CheckedAt    time.Time         `json:"checked_at"`
+	SourceAt     time.Time         `json:"source_at"`
+	Running      bool              `json:"running"`
+	Phase        string            `json:"phase"`
+	ErrorMessage *apperror.Message `json:"error_message,omitempty"`
+	Error        string            `json:"error,omitempty"`
 }
 
 type Stats struct {
-	Path          string           `json:"path"`
-	Bytes         int64            `json:"bytes"`
-	Records       uint64           `json:"records"`
-	Initialized   bool             `json:"initialized"`
-	Resumable     bool             `json:"resumable"`
-	Running       bool             `json:"running"`
-	Phase         string           `json:"phase"`
-	Error         string           `json:"error,omitempty"`
-	Feed          string           `json:"feed,omitempty"`
-	FeedsDone     int              `json:"feeds_done"`
-	FeedsTotal    int              `json:"feeds_total"`
-	Imported      int              `json:"imported"`
-	ImportTotal   int              `json:"import_total"`
-	Downloaded    int64            `json:"downloaded"`
-	DownloadTotal int64            `json:"download_total"`
-	Ecosystems    []EcosystemStats `json:"ecosystems"`
+	Path          string            `json:"path"`
+	Bytes         int64             `json:"bytes"`
+	Records       uint64            `json:"records"`
+	Initialized   bool              `json:"initialized"`
+	Resumable     bool              `json:"resumable"`
+	Running       bool              `json:"running"`
+	Phase         string            `json:"phase"`
+	ErrorMessage  *apperror.Message `json:"error_message,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	Feed          string            `json:"feed,omitempty"`
+	FeedsDone     int               `json:"feeds_done"`
+	FeedsTotal    int               `json:"feeds_total"`
+	Imported      int               `json:"imported"`
+	ImportTotal   int               `json:"import_total"`
+	Downloaded    int64             `json:"downloaded"`
+	DownloadTotal int64             `json:"download_total"`
+	Ecosystems    []EcosystemStats  `json:"ecosystems"`
 }
 
 type Updater struct {
-	store             *Store
-	HTTP              *http.Client
-	baseURL           string
-	mu                sync.Mutex
-	cancel            context.CancelFunc
-	wg                sync.WaitGroup
-	closed            bool
-	stage, lastError  string
+	store            *Store
+	HTTP             *http.Client
+	baseURL          string
+	mu               sync.Mutex
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	closed           bool
+	stage, lastError string
+	lastFailure      error
+
 	downloaded, total int64
 	importTotal       int
 	wanted            []string
@@ -67,7 +72,7 @@ type Updater struct {
 func NewUpdater(s *Store) *Updater {
 	return &Updater{store: s, baseURL: "https://storage.googleapis.com/osv-vulnerabilities", HTTP: &http.Client{Timeout: 20 * time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 || req.URL.Scheme != "https" || req.URL.Host != "storage.googleapis.com" || req.URL.User != nil || !strings.HasPrefix(req.URL.Path, "/osv-vulnerabilities/") {
-			return errors.New("unexpected OSV download redirect")
+			return apperror.New("unexpected_osv_download_redirect", "unexpected OSV download redirect")
 		}
 
 		return nil
@@ -76,7 +81,7 @@ func NewUpdater(s *Store) *Updater {
 
 func NormalizeEcosystems(values []string) ([]string, error) {
 	if len(values) > 64 {
-		return nil, errors.New("select at most 64 OSV ecosystems")
+		return nil, apperror.New("select_at_most_64_osv_ecosystems", "select at most 64 OSV ecosystems")
 	}
 
 	var result []string
@@ -103,7 +108,7 @@ func (u *Updater) phase(phase string, downloaded, total int64, importedTotal int
 
 func (u *Updater) Stats() (Stats, error) {
 	u.mu.Lock()
-	stats := Stats{Path: u.store.db.Path(), Running: u.cancel != nil, Phase: u.stage, Error: u.lastError, Downloaded: u.downloaded, DownloadTotal: u.total, ImportTotal: u.importTotal, Ecosystems: []EcosystemStats{}}
+	stats := Stats{ErrorMessage: apperror.Public(u.lastFailure), Path: u.store.db.Path(), Running: u.cancel != nil, Phase: u.stage, Error: u.lastError, Downloaded: u.downloaded, DownloadTotal: u.total, ImportTotal: u.importTotal, Ecosystems: []EcosystemStats{}}
 	wanted := slices.Clone(u.wanted)
 	u.mu.Unlock()
 	u.store.mu.RLock()
@@ -156,6 +161,7 @@ func (u *Updater) Stats() (Stats, error) {
 				entry.Running, entry.Phase = stats.Running, "queued"
 				if index == m.Next || !stats.Running {
 					entry.Phase, entry.Error = stats.Phase, stats.Error
+					entry.ErrorMessage = stats.ErrorMessage
 				}
 			}
 
@@ -187,17 +193,18 @@ func (u *Updater) Rebuild(ctx context.Context, ecosystems []string) error {
 func (u *Updater) start(parent context.Context, ecosystems []string, rebuild bool) error {
 	selected, err := NormalizeEcosystems(ecosystems)
 	if err != nil || len(selected) == 0 {
-		return errors.New("select at least one valid OSV ecosystem in Configuration")
+		return apperror.New("select_at_least_one_valid_osv_ecosystem_in_configuration", "select at least one valid OSV ecosystem in Configuration")
 	}
 
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.closed || u.cancel != nil {
-		return errors.New("OSV update is already running or the application is closing")
+		return apperror.New("osv_update_is_already_running_or_the_application_is_closing", "OSV update is already running or the application is closing")
 	}
 
 	ctx, cancel := context.WithCancel(parent)
 	u.cancel, u.stage, u.lastError = cancel, "checking", ""
+	u.lastFailure = nil
 	u.downloaded, u.total, u.importTotal = 0, 0, 0
 	u.wanted = slices.Clone(selected)
 	u.wg.Add(1)
@@ -211,7 +218,8 @@ func (u *Updater) start(parent context.Context, ecosystems []string, rebuild boo
 		if errors.Is(err, context.Canceled) {
 			u.stage = "interrupted"
 		} else if err != nil {
-			u.stage, u.lastError = "failed", err.Error()
+			u.stage, u.lastError = "failed", apperror.Public(err).English()
+			u.lastFailure = err
 		}
 	}()
 
@@ -263,7 +271,7 @@ func (u *Updater) sync(ctx context.Context, selected []string, rebuild bool) err
 
 		ecosystem := m.Plan[m.Next]
 		if err := u.syncEcosystem(ctx, ecosystem); err != nil {
-			return fmt.Errorf("OSV %s: %w", ecosystem, err)
+			return apperror.Newf("osv_ecosystem_error", "OSV %s: %w", ecosystem, err)
 		}
 	}
 }
@@ -395,7 +403,7 @@ func (u *Updater) importZIP(ctx context.Context) error {
 	files := make([]*zip.File, 0, len(z.File))
 	for _, member := range z.File {
 		if member.UncompressedSize64 > uint64(16<<30)-size {
-			return errors.New("expanded OSV archive exceeds size limit")
+			return apperror.New("expanded_osv_archive_exceeds_size_limit", "expanded OSV archive exceeds size limit")
 		}
 
 		size += member.UncompressedSize64
@@ -405,7 +413,7 @@ func (u *Updater) importZIP(ctx context.Context) error {
 	}
 
 	if len(files) == 0 || j.Offset > len(files) {
-		return errors.New("empty OSV archive or invalid saved checkpoint")
+		return apperror.New("empty_osv_archive_or_invalid_saved_checkpoint", "empty OSV archive or invalid saved checkpoint")
 	}
 
 	if err := u.store.update(func(_ *bolt.Tx, m *metadata) error { m.Job.Total = len(files); return nil }); err != nil {
@@ -422,7 +430,7 @@ func (u *Updater) importZIP(ctx context.Context) error {
 
 		member := files[index]
 		if member.UncompressedSize64 > uint64(maxRecordSize) {
-			return errors.New("OSV archive record exceeds size limit")
+			return apperror.New("osv_archive_record_exceeds_size_limit", "OSV archive record exceeds size limit")
 		}
 
 		reader, err := member.Open()
@@ -436,7 +444,7 @@ func (u *Updater) importZIP(ctx context.Context) error {
 		}
 
 		if int64(len(data)) > maxRecordSize {
-			return errors.New("OSV record exceeds size limit")
+			return apperror.New("osv_record_exceeds_size_limit", "OSV record exceeds size limit")
 		}
 
 		batch, batchBytes = append(batch, data), batchBytes+len(data)
@@ -527,7 +535,7 @@ func (u *Updater) planChanges(ctx context.Context) error {
 
 		at, err := time.Parse(time.RFC3339Nano, fields[0])
 		if err != nil || !recordID.MatchString(fields[1]) {
-			return errors.New("malformed OSV modification index")
+			return apperror.New("malformed_osv_modification_index", "malformed OSV modification index")
 		}
 
 		if !at.Before(cutoff) {
@@ -564,7 +572,7 @@ func (u *Updater) applyChanges(ctx context.Context) error {
 			var err error
 			raw, err = io.ReadAll(io.LimitReader(resp.Body, maxRecordSize+1))
 			if err != nil || int64(len(raw)) > maxRecordSize {
-				return errors.New("OSV record download failed or exceeds its size limit")
+				return apperror.New("osv_record_download_failed_or_exceeds_its_size_limit", "OSV record download failed or exceeds its size limit")
 			}
 
 			expected, err := checksum(resp.Header)
@@ -581,7 +589,7 @@ func (u *Updater) applyChanges(ctx context.Context) error {
 
 		var record Record
 		if err := json.Unmarshal(raw, &record); err != nil || record.ID != pending.ID || record.Modified.Before(pending.At) {
-			return errors.New("OSV exported record does not yet agree with its change index; retry later")
+			return apperror.New("osv_index_out_of_date", "OSV exported record does not yet agree with its change index; retry later")
 		}
 
 		u.phase("importing", 0, 0, j.PendingTotal)

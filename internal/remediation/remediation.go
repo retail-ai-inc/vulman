@@ -10,14 +10,16 @@ import (
 	"strings"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 )
 
 type Advice struct {
-	Provider   string   `json:"provider"`
-	Text       string   `json:"text"`
-	References []string `json:"references"`
-	Warning    string   `json:"warning,omitempty"`
+	WarningMessage *apperror.Message `json:"warning_message,omitempty"`
+	Provider       string            `json:"provider"`
+	Text           string            `json:"text"`
+	References     []string          `json:"references"`
+	Warning        string            `json:"warning,omitempty"`
 }
 
 func Public(f model.Finding, lang string) Advice {
@@ -59,7 +61,8 @@ func Generate(ctx context.Context, f model.Finding, s model.Settings, provider s
 	}
 
 	if key == "" || modelName == "" {
-		base.Warning = "API key or model is missing; showing public advisory guidance."
+		base.WarningMessage = apperror.Public(apperror.New("advice_missing_credentials", "API key or model is missing; showing public advisory guidance."))
+		base.Warning = base.WarningMessage.English()
 		return base
 	}
 
@@ -79,7 +82,8 @@ func Generate(ctx context.Context, f model.Finding, s model.Settings, provider s
 
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(b))
 	if err != nil {
-		base.Warning = "AI request failed; showing public guidance."
+		base.WarningMessage = apperror.Public(apperror.New("advice_request_failed", "AI request failed; showing public guidance."))
+		base.Warning = base.WarningMessage.English()
 		return base
 	}
 
@@ -93,7 +97,8 @@ func Generate(ctx context.Context, f model.Finding, s model.Settings, provider s
 
 	resp, err := (&http.Client{Timeout: 90 * time.Second}).Do(req)
 	if err != nil {
-		base.Warning = "AI service unavailable; showing public guidance."
+		base.WarningMessage = apperror.Public(apperror.New("advice_unavailable", "AI service unavailable; showing public guidance."))
+		base.Warning = base.WarningMessage.English()
 		return base
 	}
 
@@ -101,7 +106,8 @@ func Generate(ctx context.Context, f model.Finding, s model.Settings, provider s
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
-		base.Warning = fmt.Sprintf("AI service returned HTTP %d; showing public guidance.", resp.StatusCode)
+		base.WarningMessage = apperror.Public(apperror.Newf("advice_http", "AI service returned HTTP %d; showing public guidance.", resp.StatusCode))
+		base.Warning = base.WarningMessage.English()
 		return base
 	}
 	var result struct {
@@ -109,7 +115,8 @@ func Generate(ctx context.Context, f model.Finding, s model.Settings, provider s
 		Content []struct{ Type, Text string }
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&result) != nil {
-		base.Warning = "Invalid AI response; showing public guidance."
+		base.WarningMessage = apperror.Public(apperror.New("advice_invalid_response", "Invalid AI response; showing public guidance."))
+		base.Warning = base.WarningMessage.English()
 		return base
 	}
 	parts := []string{}
@@ -126,7 +133,8 @@ func Generate(ctx context.Context, f model.Finding, s model.Settings, provider s
 		}
 	}
 	if len(parts) == 0 {
-		base.Warning = "AI returned no advice; showing public guidance."
+		base.WarningMessage = apperror.Public(apperror.New("advice_empty", "AI returned no advice; showing public guidance."))
+		base.Warning = base.WarningMessage.English()
 		return base
 	}
 	base.Provider = provider

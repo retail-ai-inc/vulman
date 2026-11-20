@@ -54,6 +54,33 @@ const findingSeverities = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
 let findingsPage = 1;
 let filter={search:'',severity:'',project:'',match:'',stack:''}, projectTab='vulnerabilities';
 const t = key => localizations[lang]?.messages[key] || localizations[defaultLanguage]?.messages[key] || key;
+// Messages are translated when rendered so stored workflow history follows the
+// selected language. Legacy string-only history remains readable.
+function messageText(message, depth = 0) {
+  if (typeof message === 'string') return message;
+  if (!message || depth > 12) return '';
+  if (Array.isArray(message)) return message.map(item => messageText(item, depth + 1)).filter(Boolean).join(' · ');
+  if (typeof message.code !== 'string') return '';
+  const key = 'error_' + message.code;
+  const template = message.code === 'multiple' ? '' :
+    localizations[lang]?.messages[key] || localizations[defaultLanguage]?.messages[key] || message.fallback || t('error_unexpected');
+  const text = template.replace(/\{([a-zA-Z0-9_]+)\}/g, (placeholder, key) =>
+    message.params && Object.hasOwn(message.params, key) ? String(message.params[key]) : placeholder);
+  const causes = Array.isArray(message.causes) ? message.causes.map(item => messageText(item, depth + 1)).filter(Boolean).join(' · ') : '';
+  return [text, causes].filter(Boolean).join(': ');
+}
+
+function formatError(error) {
+  return messageText(error?.cause) || messageText(error) || error?.message || t('error_unexpected');
+}
+
+function runWarnings(run) {
+  const warnings = run.warnings || [];
+  const messages = run.warning_messages || [];
+  return Array.from({length:Math.max(warnings.length, messages.length)}, (_, index) =>
+    messageText(messages[index]) || warnings[index] || '');
+}
+
 const supportedLanguage = code => Object.hasOwn(localizations, code) ? code : defaultLanguage;
 const formatLocale = () => localizations[lang]?.locale || lang;
 function languageOptions() {
@@ -122,7 +149,8 @@ function workflowLogs(run, steps) {
     const scanner = entry.step_id === 'scanner';
     const source = scanner ? t('codeScanners') : step && stepLabel(step);
     let event = entry.event;
-    let detail = event === 'run_finished' ? t(entry.detail) : entry.detail;
+    let detail = entry.message ? messageText(entry.message) : event === 'run_finished' ? t(entry.detail) : entry.detail;
+    if (event === 'cache_summary') detail = t('cache_' + entry.detail);
     if (event.startsWith('database_wait_')) detail = databaseLabel(detail);
     if (scanner && event === 'scanner_configured') {
       if (detail) detail = detail.split(',').map(name => scannerLabels[name] || name).join(', ');
@@ -131,6 +159,8 @@ function workflowLogs(run, steps) {
       event = 'scanner_skipped_cache';
     } else if (scanner && event === 'scanner_missing_token') {
       detail = '';
+    } else if (scanner && entry.message) {
+      detail = [scannerLabels[entry.tool] || entry.tool, detail].filter(Boolean).join(' · ');
     } else if (scanner && detail) {
       const [name, ...rest] = detail.split(' · ');
       detail = [scannerLabels[name] || name, ...rest].join(' · ');
@@ -160,7 +190,7 @@ function stepProgress(step) {
   if (running) parts.push(t('phase_' + (progress.phase || 'request')));
   if (progress.item && (!scanner || running || ['interrupted', 'stopped'].includes(step.status))) {
     if (scanner && progress.scan_target) parts.push(scanTargetLabel(progress.scan_target, progress.scan_repository));
-    parts.push(scanner ? scannerLabels[progress.item] || progress.item : progress.item);
+    parts.push(progress.message ? messageText(progress.message) : scanner ? scannerLabels[progress.item] || progress.item : progress.item);
   }
   if (progress.wait_seconds && running && progress.phase === 'waiting') parts.push(progress.wait_seconds + 's');
   if (progress.total > 0) parts.push(progress.processed + ' / ' + progress.total + ' ' + t('processed'));
@@ -252,7 +282,7 @@ function databaseWaitProgress(wait) {
   const title = databaseLabel(wait.source);
   const phaseKey = wait.source === 'nvd' ? 'nvdDBPhase_' : wait.source.startsWith('osv') ? 'osvDBPhase_' : 'cveDBPhase_';
   const label = phase ? t(phaseKey + phase) : t('databaseWait_' + wait.status);
-  const detail = phase ? stats.error : wait.detail;
+  const detail = phase ? messageText(stats.error_message || stats.error) : messageText(wait.message || wait.detail);
   const failed = phase ? ['failed', 'interrupted'].includes(phase) : ['failed', 'interrupted'].includes(wait.status);
 
   return `<li class="database-wait-card"><div class="database-wait-heading"><strong>${esc(title)}</strong>${pill(label, failed ? 'partial' : stats?.running ? 'running' : '')}</div>${databaseUpdateProgressHTML(wait.source, stats)}${detail ? `<p class="form-error">${esc(detail)}</p>` : ''}</li>`;
@@ -457,7 +487,7 @@ function breakdown(counts) {
 }
 function canDeleteActivity(run){return !!run&&['interrupted','partial','failed','stopped'].includes(run.status);}
 async function deleteActivity(projectID,runID){const p=state.projects.find(p=>p.id===projectID),run=p?.runs?.find(r=>r.id===runID);if(!canDeleteActivity(run))return false;if(!(await confirmAction(t('confirmDeleteActivity')+'\n\n'+p.name+' · '+fmtDate(run.started_at))))return false;await invoke('DeleteRun',projectID,runID);expandedRuns.delete(runID);dismissedRuns.delete(runID);await refresh();toast(t('activityDeleted'));return true;}
-function activityList(runs=allRuns(),compact=false){if(!runs.length)return empty('noActivity','noActivitySub','activity');return runs.map(r=>`<div class="activity-item"><span class="activity-symbol">${r.status==='complete'?'✓':r.status==='running'?'↻':['pausing','paused'].includes(r.status)?'Ⅱ':['stopping','stopped'].includes(r.status)?'■':'!'}</span><div class="activity-content"><strong><a href="#project/${r.project_id}">${esc(r.project_name)}</a> · ${t(r.mode==='code'?'codeScan':'assessment')}</strong><p>${t(r.trigger==='schedule'?'scheduled':'manual')} · ${r.mode==='code'?'':esc(r.asset_id?r.asset_name:t('syncEverything'))+' · '} ${syncSeverityLabel(r.severity)} · ${t(r.status)} · ${r.count} ${t('findings')}</p>${workflowRun({id:r.project_id,name:r.project_name},r)}${r.warnings?.length?`<details><summary>${t('warnings')} (${r.warnings.length})</summary><ul>${r.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></details>`:''}</div><div class="activity-actions"><span class="activity-time">${fmtDate(r.started_at)}</span>${canDeleteActivity(r)?`<button type="button" class="button danger small" data-action="delete-activity" data-id="${esc(r.project_id)}" data-run="${esc(r.id)}">${t('deleteActivity')}</button>`:''}</div></div>`).join('');}
+function activityList(runs=allRuns(),compact=false){if(!runs.length)return empty('noActivity','noActivitySub','activity');return runs.map(r=>`<div class="activity-item"><span class="activity-symbol">${r.status==='complete'?'✓':r.status==='running'?'↻':['pausing','paused'].includes(r.status)?'Ⅱ':['stopping','stopped'].includes(r.status)?'■':'!'}</span><div class="activity-content"><strong><a href="#project/${r.project_id}">${esc(r.project_name)}</a> · ${t(r.mode==='code'?'codeScan':'assessment')}</strong><p>${t(r.trigger==='schedule'?'scheduled':'manual')} · ${r.mode==='code'?'':esc(r.asset_id?r.asset_name:t('syncEverything'))+' · '} ${syncSeverityLabel(r.severity)} · ${t(r.status)} · ${r.count} ${t('findings')}</p>${workflowRun({id:r.project_id,name:r.project_name},r)}${r.warnings?.length?`<details><summary>${t('warnings')} (${r.warnings.length})</summary><ul>${runWarnings(r).map(w=>`<li>${esc(w)}</li>`).join('')}</ul></details>`:''}</div><div class="activity-actions"><span class="activity-time">${fmtDate(r.started_at)}</span>${canDeleteActivity(r)?`<button type="button" class="button danger small" data-action="delete-activity" data-id="${esc(r.project_id)}" data-run="${esc(r.id)}">${t('deleteActivity')}</button>`:''}</div></div>`).join('');}
 function renderOverview(){
   const counts = Object.create(null);
   let total = 0, assets = 0;
@@ -655,7 +685,7 @@ function cveDatabaseStatusHTML(stats = {}) {
   if (validDate(stats.checked_at)) details.push(`${t('cveDBLastCheck')} ${fmtDate(stats.checked_at)}`);
   if (phase !== 'importing' && stats.resumable && stats.imported) details.push(t('cveDBImported').replace('{count}', cacheNumber(stats.imported)));
 
-  return `<div class="cve-database-summary">${pill(t('cveDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${databaseUpdateProgressHTML('cve', stats)}${stats.error ? `<p class="form-error">${esc(stats.error)}</p>` : ''}</div>`;
+  return `<div class="cve-database-summary">${pill(t('cveDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${databaseUpdateProgressHTML('cve', stats)}${stats.error_message || stats.error ? `<p class="form-error">${esc(messageText(stats.error_message || stats.error))}</p>` : ''}</div>`;
 }
 function updateCVEDatabaseStatus(stats) {
   const status = $('#cve-database-status');
@@ -689,7 +719,7 @@ function nvdDatabaseStatusHTML(stats = {}) {
   if (validDate(stats.checked_at)) details.push(`${t('cveDBLastCheck')} ${fmtDate(stats.checked_at)}`);
   if (phase !== 'importing' && stats.imported) details.push(t('queueImportedRecords').replace('{done}', cacheNumber(stats.imported)));
 
-  return `<div class="cve-database-summary">${pill(t('nvdDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${databaseUpdateProgressHTML('nvd', stats)}${stats.error ? `<p class="form-error">${esc(stats.error)}</p>` : ''}</div>`;
+  return `<div class="cve-database-summary">${pill(t('nvdDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${databaseUpdateProgressHTML('nvd', stats)}${stats.error_message || stats.error ? `<p class="form-error">${esc(messageText(stats.error_message || stats.error))}</p>` : ''}</div>`;
 }
 function updateNVDDatabaseStatus(stats) {
   const status = $('#nvd-database-status');
@@ -722,7 +752,7 @@ function osvDatabaseStatusHTML(stats = {}) {
   const details = `${t('osvDBRecords')} ${cacheNumber(stats.records)} · ${t('cacheSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`;
   const ecosystems = (stats.ecosystems || []).map(item => `<li><strong>${esc(item.ecosystem)}</strong> · ${cacheNumber(item.records)} · ${esc(t('osvDBPhase_' + (item.phase || 'idle')))}${validDate(item.checked_at) ? ` · ${esc(t('sourceDataChecked'))} ${esc(fmtDate(item.checked_at))}` : ''}</li>`).join('');
 
-  return `<div class="cve-database-summary">${pill(t('osvDBPhase_' + phase), stats.running ? 'running' : ['failed','interrupted'].includes(phase) ? 'partial' : '')}<p>${esc(details)}</p>${databaseUpdateProgressHTML('osv', stats)}${ecosystems ? `<ul class="osv-ecosystem-status">${ecosystems}</ul>` : ''}${stats.error ? `<p class="form-error">${esc(stats.error)}</p>` : ''}</div>`;
+  return `<div class="cve-database-summary">${pill(t('osvDBPhase_' + phase), stats.running ? 'running' : ['failed','interrupted'].includes(phase) ? 'partial' : '')}<p>${esc(details)}</p>${databaseUpdateProgressHTML('osv', stats)}${ecosystems ? `<ul class="osv-ecosystem-status">${ecosystems}</ul>` : ''}${stats.error_message || stats.error ? `<p class="form-error">${esc(messageText(stats.error_message || stats.error))}</p>` : ''}</div>`;
 }
 
 function updateOSVDatabaseStatus(stats) {
@@ -802,7 +832,7 @@ async function changeDataDirectory(directory) {
     else render();
     toast(t(state.storage_warning || 'dataDirectoryChanged'), Boolean(state.storage_warning));
   } catch (err) {
-    status.textContent = err.message;
+    status.textContent = formatError(err);
   } finally {
     changingDataDirectory = false;
     for (const button of buttons) button.disabled = false;
@@ -886,7 +916,7 @@ function scannerResultHTML(name, result) {
     guidance = `<p>${t(hint)}</p>${command?`<code class="scanner-command">${esc(command)}</code>`:''}<p>${t(pathHint)}</p><a href="${url}" target="_blank" rel="noreferrer">${t('scannerInstallGuide')} ↗</a>`;
   }
   const statusKey = name === 'snyk' && status === 'ready' ? 'scannerSnykReady' : scannerStatusKeys[status] || 'scannerFailed';
-  return `<p class="scanner-status ${status === 'ready' ? 'ready' : 'warning'}">${t(statusKey)}</p>${result.path?`<code class="scanner-path">${esc(result.path)}</code>`:''}${result.detail?`<p>${esc(result.detail)}</p>`:''}${guidance}<button type="button" class="button secondary small scanner-recheck" data-action="check-scanner" data-scanner="${name}">${t('scannerCheckAgain')}</button>`;
+  return `<p class="scanner-status ${status === 'ready' ? 'ready' : 'warning'}">${t(statusKey)}</p>${result.path?`<code class="scanner-path">${esc(result.path)}</code>`:''}${result.message || result.detail?`<p>${esc(messageText(result.message || result.detail))}</p>`:''}${guidance}<button type="button" class="button secondary small scanner-recheck" data-action="check-scanner" data-scanner="${name}">${t('scannerCheckAgain')}</button>`;
 }
 async function checkScanner(input) {
   const name = input.dataset.scannerCheck;
@@ -1036,7 +1066,7 @@ function renderSettings(){const s=state.settings;clearing=new Set();$('#main').i
 function render(){if(pendingPageRender)return;renderNav();const [page,id,view]=route();if(location.hash===newProjectHash)renderProjectEditor();else if(page==='projects')$('#main').innerHTML=heading(t('projects'),t('projectsSub'),button('addProject','new-project',true,'plus'))+`<div class="panel"><div class="panel-head"><h2>${t('yourProjects')} <span class="muted">(${state.projects.length})</span></h2></div>${projectList(state.projects, true)}</div>`;else if(page==='vulnerabilities'){$('#main').innerHTML=heading(t('vulnerabilities'),t('vulnsSub'),state.projects.length?syncAllControls(true):'')+filtersHTML(true)+`<div class="panel" id="finding-results">${findingsTable()}</div>`;bindFilters();}else if(page==='activity')$('#main').innerHTML=heading(t('activity'),t('activitySub'))+`<div class="panel">${activityList()}</div>`;else if(page==='settings')renderSettings();else if(page==='project'){if(view==='edit')renderProjectEditor(id);else if(view==='delete')renderProjectDeletion(id);else renderProject(id);}else renderOverview();mountActiveSyncs();}
 function componentFields(a={},removable=true){const el=document.createElement('div');el.className='asset-field';el.dataset.id=a.id||'';el.innerHTML=`<div class="asset-top"><label><span>${t('category')}</span><select data-field="kind">${['language','database','container','docker','webserver','ai','library','other'].map(k=>`<option value="${k}" ${(a.kind||'library')===k?'selected':''}>${t(k)}</option>`).join('')}</select></label><label><span>${t('name')}</span><input data-field="name" value="${esc(a.name)}" required placeholder="org.apache.logging.log4j:log4j-core" maxlength="300"></label><label><span>${t('version')}</span><input data-field="version" value="${esc(a.version)}" required placeholder="2.14.1" maxlength="100"></label>${removable?`<button type="button" class="icon-button asset-remove" aria-label="${t('removeComponent')}">×</button>`:''}</div><div class="asset-bottom"><label><span>${t('ecosystem')}</span><select data-field="ecosystem"><option value="">—</option>${['Go','npm','PyPI','Maven','Packagist','crates.io','RubyGems','NuGet','Hex','Pub','Debian','Alpine','GIT'].map(e=>`<option ${a.ecosystem===e?'selected':''}>${e}</option>`).join('')}</select></label><label><span>${t('cpeLabel')}</span><input data-field="cpe" value="${esc(a.cpe)}" placeholder="cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"></label></div>`;return el;}
 function openComponent(id){const p=state.projects.find(p=>p.id===id);if(!p||p.syncing)return false;componentDraft={...p,assets:p.assets.map(a=>({...a}))};$('#component-form').reset();$('#component-error').textContent='';$('#component-project').textContent=t('componentProject').replace('{project}',p.name);const fields=$('#component-fields');fields.innerHTML='';const el=componentFields({},false);fields.append(el);localize($('#component-dialog'));$('#component-dialog').showModal();el.querySelector('[data-field="name"]').focus();return true;}
-async function saveComponent(e){e.preventDefault();if(!componentDraft)return;const submit=$('#save-component');submit.disabled=true;const p=componentDraft,asset={};$$('[data-field]',$('#component-fields')).forEach(input=>asset[input.dataset.field]=input.value.trim());const body={};for(const key of ['name','description','repository','repository_urls','local_path','schedule','scan_code','revision'])body[key]=p[key];body.assets=[...p.assets,asset];try{await invoke('UpdateProject',p.id,body);$('#component-dialog').close();componentDraft=null;await refresh(false);projectTab='techStack';render();toast(t('saved'));}catch(err){$('#component-error').textContent=err.message;}finally{submit.disabled=false;}}
+async function saveComponent(e){e.preventDefault();if(!componentDraft)return;const submit=$('#save-component');submit.disabled=true;const p=componentDraft,asset={};$$('[data-field]',$('#component-fields')).forEach(input=>asset[input.dataset.field]=input.value.trim());const body={};for(const key of ['name','description','repository','repository_urls','local_path','schedule','scan_code','revision'])body[key]=p[key];body.assets=[...p.assets,asset];try{await invoke('UpdateProject',p.id,body);$('#component-dialog').close();componentDraft=null;await refresh(false);projectTab='techStack';render();toast(t('saved'));}catch(err){$('#component-error').textContent=formatError(err);}finally{submit.disabled=false;}}
 const projectTextFields = ['name', 'description', 'local_path', 'schedule'];
 
 function repositoryField(url = '') {
@@ -1179,7 +1209,7 @@ async function deleteProject(event) {
   try {
     await invoke('DeleteProject', id, confirmation);
   } catch (err) {
-    error.textContent = err.message;
+    error.textContent = formatError(err);
     form.dataset.pending = 'false';
     input.disabled = cancel.disabled = false;
     updateProjectDeletionForm(form, state.projects.find(p => p.id === id) ?? project);
@@ -1233,7 +1263,7 @@ async function saveProject(e) {
     }
     toast(t(projectNeedsAssessment(project) ? 'projectSavedResyncNeeded' : 'saved'));
   } catch (err) {
-    error.textContent = err.message;
+    error.textContent = formatError(err);
   } finally {
     submit.disabled = false;
   }
@@ -1268,8 +1298,8 @@ async function saveSettings(e) {
     toast(t('saved'));
   } catch (err) {
     const error = $('#settings-error');
-    if (error) error.textContent = err.message;
-    else toast(err.message, true);
+    if (error) error.textContent = formatError(err);
+    else toast(formatError(err), true);
   } finally {
     submit.disabled = false;
   }
@@ -1304,7 +1334,7 @@ function showFinding(id,asset,project){
   if (!finding) return;
   const f = {...finding, project_id:p.id, project_name:p.name};
   currentFinding=f;$('#detail-body').innerHTML=`<div class="detail-tags">${pill(t(severityKey(f.severity)),severityKey(f.severity))}${pill(f.id)}${pill(t(f.match),f.match==='review'?'review':'')}${f.score?pill(t('score')+' '+f.score):''}</div><h2 class="detail-title">${esc(f.title||f.id)}</h2><p class="subtitle">${esc(f.component)} ${esc(findingVersionLabel(f))} · ${esc(f.project_name)} · ${esc(f.sources.join(' + '))}</p>${f.match==='review'?`<div class="notice">${t('reviewWarning')}</div>`:f.match==='cpe'?`<div class="notice info">${t('cpeWarning')}</div>`:''}<p class="detail-description">${esc(f.description)}</p><div class="detail-section"><h3>${t('remediation')}</h3><div id="advice-result"></div><div class="advice-actions"><select id="advice-provider" aria-label="${t('defaultProvider')}">${providerOptions(state.settings.ai_provider)}</select><button class="button primary small" data-action="advice">${t('getAdvice')}</button></div><p class="form-note">${t('aiDisclosure')}</p></div><div class="detail-section"><h3>${t('references')}</h3><ul class="reference-list">${f.references?.length?f.references.map(u=>safeURL(u)?`<li><a href="${safeURL(u)}" target="_blank" rel="noreferrer">${esc(u)} ↗</a></li>`:'').join(''):`<li class="muted">${t('noReferences')}</li>`}</ul></div>`;$('#detail-dialog').showModal();getAdvice('public');}
-async function getAdvice(provider){const f=currentFinding,container=$('#advice-result');container.innerHTML=`<div class="advice-box"><p>${t('generating')}</p></div>`;const btn=$('[data-action="advice"]');if(btn)btn.disabled=true;try{const a=await invoke('Advice',f.project_id,{finding_id:f.id,asset_id:f.asset_id,provider});if(currentFinding!==f)return;container.innerHTML=`<div class="advice-box"><h3>${t(a.provider)}</h3><p>${esc(a.text)}</p>${a.warning?`<p class="form-error">${esc(a.warning)}</p>`:''}${a.provider!=='public'?`<p class="form-note">${t('aiReview')}</p>`:''}</div>`;}catch(err){container.innerHTML=`<p class="form-error">${esc(err.message)}</p>`;}finally{if(btn)btn.disabled=false;}}
+async function getAdvice(provider){const f=currentFinding,container=$('#advice-result');container.innerHTML=`<div class="advice-box"><p>${t('generating')}</p></div>`;const btn=$('[data-action="advice"]');if(btn)btn.disabled=true;try{const a=await invoke('Advice',f.project_id,{finding_id:f.id,asset_id:f.asset_id,provider});if(currentFinding!==f)return;container.innerHTML=`<div class="advice-box"><h3>${t(a.provider)}</h3><p>${esc(a.text)}</p>${a.warning_message || a.warning?`<p class="form-error">${esc(messageText(a.warning_message || a.warning))}</p>`:''}${a.provider!=='public'?`<p class="form-note">${t('aiReview')}</p>`:''}</div>`;}catch(err){container.innerHTML=`<p class="form-error">${esc(formatError(err))}</p>`;}finally{if(btn)btn.disabled=false;}}
 document.addEventListener('click',async e=>{if(changingDataDirectory)return;const pageButton=e.target.closest('[data-finding-page]');if(pageButton){if(!pageButton.disabled)turnFindingPage(pageButton.dataset.findingPage);return;}const close=e.target.closest('.close-dialog');if(close){close.closest('dialog').close();return;}if(e.target.closest('.asset-remove')){e.target.closest('.asset-field').remove();return;}const clear=e.target.closest('[data-clear-token]');if(clear){clearCredential(clear);return;}const dismiss=e.target.closest('[data-dismiss-workflow]');if(dismiss){dismissWorkflow(dismiss.dataset.projectId,dismiss.dataset.dismissWorkflow);return;}const toggle=e.target.closest('[data-toggle-workflow]');if(toggle){toggleWorkflow(toggle.dataset.toggleWorkflow);return;}const tab=e.target.closest('[data-tab]');if(tab){if(projectTab!==tab.dataset.tab)expandedRuns.clear();projectTab=tab.dataset.tab;render();return;}const row=e.target.closest('[data-finding]');if(row){showFinding(row.dataset.finding,row.dataset.asset,row.dataset.project);return;}const target=e.target.closest('[data-action]');if(!target)return;try{switch(target.dataset.action){case'new-project':openNewProject();break;case'edit-project':location.hash='project/'+target.dataset.id+'/edit';break;case'cancel-project':cancelProject(target.closest('form'));break;case'add-project-asset':{const asset=componentFields();$('[data-project-assets]',target.closest('form')).append(asset);$('[data-field="name"]',asset).focus();break;}case'add-component':openComponent(target.dataset.id);break;case'scan-code':target.disabled=true;await scanProjectCode(target.dataset.id);break;case'sync':target.disabled=true;await syncProject(target.dataset.id,$('#sync-asset')?.value||'', $('#sync-mode')?.value||'auto',$('#sync-severity')?.value||'');break;case'sync-asset':target.disabled=true;await syncProject(target.dataset.id,target.dataset.asset,'auto',componentSyncSeveritySelection.get(stackKey(target.dataset.id,target.dataset.asset))||'');break;case'sync-all':{const severity=syncAllSeverity;target.disabled=true;for(const p of state.projects)if(!p.syncing)await invoke('Sync',p.id,severity?{severity}:{});await refresh();toast(t(state.projects.some(p=>p.runs?.[0]&&queuedWorkflow(p.runs[0]))?'syncRequestsSubmitted':'syncStarted'));break;}case'sample':target.disabled=true;await sample();break;case'delete-project':openProjectDeletion(target.dataset.id);break;
 case'cancel-project-deletion':location.hash='project/'+target.closest('form').dataset.projectId+'/edit';break;
 case'control-sync':target.disabled=true;try{await controlWorkflow(target.dataset.id,target.dataset.run,target.dataset.control);}finally{target.disabled=false;}break;case'delete-activity':target.disabled=true;try{await deleteActivity(target.dataset.id,target.dataset.run);}finally{target.disabled=false;}break;case'browse-data-directory':await browseFolder($('#data-directory'),'chooseDataDirectory',state.data_directory);break;case'add-repository': {
@@ -1371,7 +1401,7 @@ case'update-cve-database':case'stop-cve-database':case'rebuild-cve-database':{
   }finally{target.disabled=Boolean(state.cve_database?.running)&&action!=='stop-cve-database';}
   break;
 }
-case'browse-local-repository':await browseFolder(target.closest('form').elements.local_path,'chooseRepositoryFolder');break;case'use-data-directory':{const input=$('#data-directory');if(!input.value.trim()){input.focus();return;}await changeDataDirectory(input.value);break;}case'reset-data-directory':await changeDataDirectory('');break;case'check-scanner':{const input=$('[data-scanner-check="'+target.dataset.scanner+'"]');if(input)await checkScanner(input);break;}case'advice':await getAdvice($('#advice-provider').value);break;}}catch(err){toast(err.message,true);target.disabled=false;}});
+case'browse-local-repository':await browseFolder(target.closest('form').elements.local_path,'chooseRepositoryFolder');break;case'use-data-directory':{const input=$('#data-directory');if(!input.value.trim()){input.focus();return;}await changeDataDirectory(input.value);break;}case'reset-data-directory':await changeDataDirectory('');break;case'check-scanner':{const input=$('[data-scanner-check="'+target.dataset.scanner+'"]');if(input)await checkScanner(input);break;}case'advice':await getAdvice($('#advice-provider').value);break;}}catch(err){toast(formatError(err),true);target.disabled=false;}});
 document.addEventListener('change',e=>{if(e.target.matches('[data-scanner-check]'))checkScanner(e.target);if(e.target.matches('[data-sync-project]'))syncSelection[e.target.dataset.syncProject]=e.target.value;if(e.target.matches('[data-sync-mode-project]'))syncModeSelection[e.target.dataset.syncModeProject]=e.target.value;if(e.target.matches('[data-sync-severity-project]'))syncSeveritySelection[e.target.dataset.syncSeverityProject]=e.target.value;if(e.target.matches('[data-sync-all-severity]'))syncAllSeverity=e.target.value;if(e.target.matches('[data-sync-component-severity]'))componentSyncSeveritySelection.set(stackKey(e.target.dataset.projectId,e.target.dataset.assetId),e.target.value);});
 document.addEventListener('input', e => {
   const input = e.target;
@@ -1395,7 +1425,7 @@ window.addEventListener('vulman-select-all', () => {
   if (document.activeElement?.dispatchEvent(shortcut)) document.execCommand('selectAll');
 });
 $('#component-form').addEventListener('submit',saveComponent);$('#help-button').addEventListener('click',()=>$('#about-dialog').showModal());
-$('#language-select').addEventListener('change',async e=>{const select=e.target;if(!state||changingDataDirectory||select.value===lang)return;select.disabled=true;try{await invoke('SaveSettings',{...state.settings,language:select.value});await refresh();}catch(err){select.value=lang;toast(err.message,true);}finally{select.disabled=false;}});
+$('#language-select').addEventListener('change',async e=>{const select=e.target;if(!state||changingDataDirectory||select.value===lang)return;select.disabled=true;try{await invoke('SaveSettings',{...state.settings,language:select.value});await refresh();}catch(err){select.value=lang;toast(formatError(err),true);}finally{select.disabled=false;}});
 $('#confirm-action').addEventListener('click', () => $('#confirm-dialog').close('confirm'));
 const followExternalLink = async event => {
   if (event.type === 'auxclick' && event.button !== 1) return;
@@ -1405,7 +1435,7 @@ const followExternalLink = async event => {
   try {
     await invoke('OpenExternal', link.href);
   } catch (err) {
-    toast(err.message, true);
+    toast(formatError(err), true);
   }
 };
 document.addEventListener('click', followExternalLink, true);
@@ -1450,7 +1480,7 @@ function renderNavigation() {
 }
 function showPageError(err) {
   const title = Object.hasOwn(localizations, defaultLanguage) ? t('errorTitle') : 'Vulman';
-  $('#main').innerHTML = `<div class="error-page"><h1>${esc(title)}</h1><p>${esc(err.message)}</p></div>`;
+  $('#main').innerHTML = `<div class="error-page"><h1>${esc(title)}</h1><p>${esc(formatError(err))}</p></div>`;
 }
 
 history.scrollRestoration = 'manual';

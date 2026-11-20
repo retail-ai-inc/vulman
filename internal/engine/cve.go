@@ -1,10 +1,10 @@
 package engine
 
 import (
-	"errors"
 	"strings"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 )
 
@@ -20,14 +20,14 @@ func (e *Engine) updateCVE(rebuild bool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 	st, err := e.Store.Read()
 	if err != nil {
 		return err
 	}
 	if !st.Settings.Sources["cve"] || strings.TrimRight(st.Settings.CVEURL, "/") != model.DefaultCVEURL {
-		return errors.New("enable the default CVE Program endpoint to update the local catalogue")
+		return apperror.New("cve_default_endpoint_required", "enable the default CVE Program endpoint to update the local catalogue")
 	}
 	e.lastCVEAttempt = time.Now()
 	if rebuild {

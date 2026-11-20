@@ -2,12 +2,13 @@
 package osvdb
 
 import (
-	"errors"
 	"regexp"
 	"strings"
 	"time"
 
 	"golang.org/x/mod/semver"
+
+	"vulman/internal/apperror"
 )
 
 const Filename = "vulman-osv.db"
@@ -63,7 +64,7 @@ func supportedSchema(value string) bool {
 func Ecosystem(value string) (string, error) {
 	base, suffix, variant := strings.Cut(strings.TrimSpace(value), ":")
 	if !ecosystemName.MatchString(base) || strings.Contains(base, "..") || variant && (!ecosystemName.MatchString(suffix) || strings.Contains(suffix, "..")) {
-		return "", errors.New("invalid OSV ecosystem")
+		return "", apperror.New("invalid_osv_ecosystem", "invalid OSV ecosystem")
 	}
 
 	return base, nil

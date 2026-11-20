@@ -3,13 +3,13 @@ package model
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"time"
+
+	"vulman/internal/apperror"
 )
 
 type Asset struct {
@@ -41,45 +41,48 @@ type Finding struct {
 }
 
 type Run struct {
-	ID             string         `json:"id"`
-	StartedAt      time.Time      `json:"started_at"`
-	FinishedAt     time.Time      `json:"finished_at"`
-	Status         string         `json:"status"`
-	Trigger        string         `json:"trigger"`
-	AssetID        string         `json:"asset_id,omitempty"`
-	AssetName      string         `json:"asset_name,omitempty"`
-	Count          int            `json:"count"`
-	SeverityCounts map[string]int `json:"severity_counts,omitempty"`
-	Warnings       []string       `json:"warnings"`
-	Steps          []SyncStep     `json:"steps,omitempty"`
-	Logs           []SyncLog      `json:"logs,omitempty"`
-	Mode           string         `json:"mode,omitempty"`
-	Severity       string         `json:"severity,omitempty"`
-	ScanTargets    []string       `json:"scan_targets,omitempty"`
-	DataCheckedAt  time.Time      `json:"data_checked_at"`
-	PausedAt       time.Time      `json:"paused_at"`
-	PausedSeconds  float64        `json:"paused_seconds,omitempty"`
-	DatabaseWaits  []DatabaseWait `json:"database_waits,omitempty"`
+	ID              string             `json:"id"`
+	StartedAt       time.Time          `json:"started_at"`
+	FinishedAt      time.Time          `json:"finished_at"`
+	Status          string             `json:"status"`
+	Trigger         string             `json:"trigger"`
+	AssetID         string             `json:"asset_id,omitempty"`
+	AssetName       string             `json:"asset_name,omitempty"`
+	Count           int                `json:"count"`
+	SeverityCounts  map[string]int     `json:"severity_counts,omitempty"`
+	Warnings        []string           `json:"warnings"`
+	WarningMessages []apperror.Message `json:"warning_messages,omitempty"`
+	Steps           []SyncStep         `json:"steps,omitempty"`
+	Logs            []SyncLog          `json:"logs,omitempty"`
+	Mode            string             `json:"mode,omitempty"`
+	Severity        string             `json:"severity,omitempty"`
+	ScanTargets     []string           `json:"scan_targets,omitempty"`
+	DataCheckedAt   time.Time          `json:"data_checked_at"`
+	PausedAt        time.Time          `json:"paused_at"`
+	PausedSeconds   float64            `json:"paused_seconds,omitempty"`
+	DatabaseWaits   []DatabaseWait     `json:"database_waits,omitempty"`
 }
 
 type DatabaseWait struct {
-	Source string `json:"source"`
-	Status string `json:"status"`
-	Detail string `json:"detail,omitempty"`
+	Message *apperror.Message `json:"message,omitempty"`
+	Source  string            `json:"source"`
+	Status  string            `json:"status"`
+	Detail  string            `json:"detail,omitempty"`
 }
 
 // SyncProgress reports work performed, never an estimate of elapsed completion.
 type SyncProgress struct {
-	Phase          string    `json:"phase"`
-	Item           string    `json:"item,omitempty"`
-	ScanTarget     string    `json:"scan_target,omitempty"`
-	ScanRepository string    `json:"scan_repository,omitempty"`
-	Processed      int       `json:"processed"`
-	Total          int       `json:"total"`
-	Found          int       `json:"found"`
-	WaitSeconds    int       `json:"wait_seconds,omitempty"`
-	CacheStatus    string    `json:"cache_status,omitempty"`
-	CheckedAt      time.Time `json:"checked_at"`
+	Message        *apperror.Message `json:"message,omitempty"`
+	Phase          string            `json:"phase"`
+	Item           string            `json:"item,omitempty"`
+	ScanTarget     string            `json:"scan_target,omitempty"`
+	ScanRepository string            `json:"scan_repository,omitempty"`
+	Processed      int               `json:"processed"`
+	Total          int               `json:"total"`
+	Found          int               `json:"found"`
+	WaitSeconds    int               `json:"wait_seconds,omitempty"`
+	CacheStatus    string            `json:"cache_status,omitempty"`
+	CheckedAt      time.Time         `json:"checked_at"`
 }
 
 type SyncStep struct {
@@ -93,13 +96,15 @@ type SyncStep struct {
 }
 
 type SyncLog struct {
-	At             time.Time `json:"at"`
-	StepID         string    `json:"step_id,omitempty"`
-	Event          string    `json:"event"`
-	Detail         string    `json:"detail,omitempty"`
-	Findings       *int      `json:"findings,omitempty"`
-	ScanTarget     string    `json:"scan_target,omitempty"`
-	ScanRepository string    `json:"scan_repository,omitempty"`
+	Message        *apperror.Message `json:"message,omitempty"`
+	Tool           string            `json:"tool,omitempty"`
+	At             time.Time         `json:"at"`
+	StepID         string            `json:"step_id,omitempty"`
+	Event          string            `json:"event"`
+	Detail         string            `json:"detail,omitempty"`
+	Findings       *int              `json:"findings,omitempty"`
+	ScanTarget     string            `json:"scan_target,omitempty"`
+	ScanRepository string            `json:"scan_repository,omitempty"`
 }
 
 const MaxSyncLogs = 200
@@ -241,7 +246,7 @@ func Interval(s string) time.Duration {
 }
 
 var githubRepositoryPath = regexp.MustCompile(`^/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+/?$`)
-var errGitHubRepositoryURL = errors.New("Use an HTTPS GitHub repository URL such as https://github.com/owner/repository") // nolint: staticcheck
+var errGitHubRepositoryURL = apperror.New("repository_url_invalid", "Use an HTTPS GitHub repository URL such as https://github.com/owner/repository")
 
 func ValidateRepositoryURL(repository string) error {
 	_, err := GitHubCloneURL(repository)
@@ -289,15 +294,15 @@ func ValidateProject(p *Project) error {
 
 	p.Name = strings.TrimSpace(p.Name)
 	if p.Name == "" || len(p.Name) > 120 {
-		return fmt.Errorf("project name must contain 1–120 characters")
+		return apperror.New("project_name_invalid", "project name must contain 1–120 characters")
 	}
 
 	if len(p.Description) > 4000 || len(p.Assets) > 200 {
-		return fmt.Errorf("description or inventory is too large")
+		return apperror.New("project_inventory_too_large", "description or inventory is too large")
 	}
 
 	if p.Schedule != "off" && Interval(p.Schedule) == 0 {
-		return fmt.Errorf("invalid schedule")
+		return apperror.New("project_schedule_invalid", "invalid schedule")
 	}
 
 	var repositories []string
@@ -324,7 +329,7 @@ func ValidateProject(p *Project) error {
 	}
 
 	if p.ScanCode && len(repositories) == 0 && p.LocalPath == "" {
-		return fmt.Errorf("code scanning requires a repository or local folder")
+		return apperror.New("project_scanner_target_required", "code scanning requires a repository or local folder")
 	}
 
 	seen := map[string]bool{}
@@ -339,25 +344,25 @@ func ValidateProject(p *Project) error {
 		}
 
 		if seen[a.ID] {
-			return fmt.Errorf("duplicate component ID")
+			return apperror.New("component_id_duplicate", "duplicate component ID")
 		}
 
 		seen[a.ID] = true
 
 		if a.Name == "" || a.Version == "" || len(a.Name) > 300 || len(a.Version) > 100 {
-			return fmt.Errorf("each component needs a name and exact version")
+			return apperror.New("component_identity_required", "each component needs a name and exact version")
 		}
 
 		switch a.Kind {
 		case "language", "database", "container", "docker", "webserver", "ai", "library", "other":
 		default:
-			return fmt.Errorf("invalid component category")
+			return apperror.New("component_category_invalid", "invalid component category")
 		}
 
 		if a.CPE != "" {
 			parts := strings.Split(a.CPE, ":")
 			if len(parts) != 13 || parts[0] != "cpe" || parts[1] != "2.3" || parts[5] != a.Version {
-				return fmt.Errorf("CPE must have 13 fields and contain the component's exact version")
+				return apperror.New("cpe_version_invalid", "CPE must have 13 fields and contain the component's exact version")
 			}
 		}
 	}

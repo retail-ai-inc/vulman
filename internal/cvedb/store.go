@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +14,8 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+
+	"vulman/internal/apperror"
 )
 
 const batchSize = 256
@@ -45,21 +46,22 @@ type metadata struct {
 }
 
 type Stats struct {
-	Path          string    `json:"path"`
-	Records       uint64    `json:"records"`
-	OnDemand      uint64    `json:"on_demand"`
-	Bytes         int64     `json:"bytes"`
-	Initialized   bool      `json:"initialized"`
-	SourceAt      time.Time `json:"source_at"`
-	CheckedAt     time.Time `json:"checked_at"`
-	Resumable     bool      `json:"resumable"`
-	Imported      int       `json:"imported"`
-	ImportTotal   int       `json:"import_total"`
-	Running       bool      `json:"running"`
-	Phase         string    `json:"phase"`
-	Downloaded    int64     `json:"downloaded"`
-	DownloadTotal int64     `json:"download_total"`
-	Error         string    `json:"error,omitempty"`
+	Path          string            `json:"path"`
+	Records       uint64            `json:"records"`
+	OnDemand      uint64            `json:"on_demand"`
+	Bytes         int64             `json:"bytes"`
+	Initialized   bool              `json:"initialized"`
+	SourceAt      time.Time         `json:"source_at"`
+	CheckedAt     time.Time         `json:"checked_at"`
+	Resumable     bool              `json:"resumable"`
+	Imported      int               `json:"imported"`
+	ImportTotal   int               `json:"import_total"`
+	Running       bool              `json:"running"`
+	Phase         string            `json:"phase"`
+	Downloaded    int64             `json:"downloaded"`
+	DownloadTotal int64             `json:"download_total"`
+	ErrorMessage  *apperror.Message `json:"error_message,omitempty"`
+	Error         string            `json:"error,omitempty"`
 }
 
 type Store struct {
@@ -82,7 +84,7 @@ func Open(dir string, aead cipher.AEAD) (*Store, error) {
 		InitialMmapSize: 256 << 20,
 		OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {
 			if name != path {
-				return nil, errors.New("unexpected CVE database path")
+				return nil, apperror.New("unexpected_cve_database_path", "unexpected CVE database path")
 			}
 			return root.OpenFile(Filename, flags, mode)
 		},
@@ -106,7 +108,7 @@ func Open(dir string, aead cipher.AEAD) (*Store, error) {
 			return err
 		}
 		if s.meta.Active != "base-a" && s.meta.Active != "base-b" {
-			return errors.New("invalid CVE catalogue metadata")
+			return apperror.New("invalid_cve_catalogue_metadata", "invalid CVE catalogue metadata")
 		}
 		return nil
 	})
@@ -133,11 +135,11 @@ func (s *Store) encode(identity string, value any) ([]byte, error) {
 func (s *Store) decode(identity string, data []byte, value any) error {
 	n := s.aead.NonceSize()
 	if len(data) < n {
-		return errors.New("invalid encrypted CVE entry")
+		return apperror.New("invalid_encrypted_cve_entry", "invalid encrypted CVE entry")
 	}
 	plain, err := s.aead.Open(nil, data[:n], data[n:], []byte("vulman-cve-v1:"+identity))
 	if err != nil {
-		return fmt.Errorf("cannot decrypt CVE data: %w", err)
+		return apperror.Newf("decrypt_cve", "cannot decrypt CVE data: %w", err)
 	}
 	return json.Unmarshal(plain, value)
 }
@@ -218,7 +220,7 @@ func (s *Store) Lookup(id string) (Record, bool, error) {
 
 func (s *Store) Put(r Record) error {
 	if !validID.MatchString(r.ID) || (r.State != "PUBLISHED" && r.State != "REJECTED") {
-		return errors.New("invalid CVE record")
+		return apperror.New("invalid_cve_record", "invalid CVE record")
 	}
 	data, err := s.encode(r.ID, r)
 	if err != nil {
@@ -268,7 +270,7 @@ func (s *Store) begin(ctx context.Context, archive Archive) error {
 		return nil
 	}
 	if m.Pending != nil {
-		return errors.New("resume the pending CVE import first")
+		return apperror.New("resume_the_pending_cve_import_first", "resume the pending CVE import first")
 	}
 	bucket := m.Active
 	if archive.Base {
@@ -295,13 +297,13 @@ func (s *Store) commitBatch(ctx context.Context, records []Record, next int) err
 			return err
 		}
 		if m.Pending == nil || next < m.Pending.Next {
-			return errors.New("invalid CVE import checkpoint")
+			return apperror.New("invalid_cve_import_checkpoint", "invalid CVE import checkpoint")
 		}
 		bucket := tx.Bucket([]byte(m.Pending.Bucket))
 		for _, r := range records {
 			r.CheckedAt = m.Pending.Archive.At
 			if !validID.MatchString(r.ID) || (r.State != "PUBLISHED" && r.State != "REJECTED") {
-				return errors.New("invalid CVE record in import")
+				return apperror.New("invalid_cve_record_in_import", "invalid CVE record in import")
 			}
 			if old := bucket.Get([]byte(r.ID)); old != nil {
 				var previous Record
@@ -336,11 +338,11 @@ func (s *Store) finish(ctx context.Context) error {
 			return err
 		}
 		if m.Pending == nil {
-			return errors.New("no pending CVE import")
+			return apperror.New("no_pending_cve_import", "no pending CVE import")
 		}
 		if m.Pending.Archive.Base {
 			if tx.Bucket([]byte(m.Pending.Bucket)).Sequence() == 0 {
-				return errors.New("empty CVE baseline")
+				return apperror.New("empty_cve_baseline", "empty CVE baseline")
 			}
 			m.Active = m.Pending.Bucket
 			m.Initialized = true

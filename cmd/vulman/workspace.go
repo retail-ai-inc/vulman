@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -12,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/cvedb"
 	"vulman/internal/engine"
 	"vulman/internal/model"
@@ -58,12 +57,20 @@ type State struct {
 	StorageWarning       string                      `json:"storage_warning,omitempty"`
 }
 
-func (d *Desktop) State() (State, error) {
+func (d *Desktop) State() (_ State, resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	return d.StateSince("")
 }
 
 // StateSince returns cache metrics on every poll and sends workspace data only on a change.
-func (d *Desktop) StateSince(since string) (State, error) {
+func (d *Desktop) StateSince(since string) (_ State, resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -77,29 +84,29 @@ func (d *Desktop) StateSince(since string) (State, error) {
 
 	st, version, err := d.store.ReadSnapshot(since)
 	if err != nil {
-		return State{}, errors.New("could not read application data")
+		return State{}, apperror.New("could_not_read_application_data", "could not read application data")
 	}
 
 	cacheStats, err := d.store.CacheStats()
 	if err != nil {
-		return State{}, errors.New("could not read cache information")
+		return State{}, apperror.New("could_not_read_cache_information", "could not read cache information")
 	}
 
 	result := State{State: st, Version: prefix + version, CacheStats: cacheStats}
 	if d.engine != nil {
 		stats, err := d.engine.CVE.Stats()
 		if err != nil {
-			return State{}, errors.New("could not read the CVE database status")
+			return State{}, apperror.New("could_not_read_the_cve_database_status", "could not read the CVE database status")
 		}
 		result.CVEDatabase = &stats
 		nvdStats, err := d.engine.NVD.Stats()
 		if err != nil {
-			return State{}, errors.New("could not read the NVD database status")
+			return State{}, apperror.New("could_not_read_the_nvd_database_status", "could not read the NVD database status")
 		}
 		result.NVDDatabase = &nvdStats
 		osvStats, err := d.engine.OSV.Stats()
 		if err != nil {
-			return State{}, errors.New("could not read the OSV database status")
+			return State{}, apperror.New("could_not_read_the_osv_database_status", "could not read the OSV database status")
 		}
 
 		result.OSVDatabase = &osvStats
@@ -162,7 +169,11 @@ func (in ProjectInput) project() model.Project {
 	return model.Project{Name: in.Name, Description: in.Description, Repository: in.Repository, RepositoryURLs: in.RepositoryURLs, LocalPath: in.LocalPath, ScanCode: in.ScanCode, Assets: in.Assets, Schedule: in.Schedule}
 }
 
-func (d *Desktop) CreateProject(in ProjectInput) (model.Project, error) {
+func (d *Desktop) CreateProject(in ProjectInput) (_ model.Project, resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	p := in.project()
@@ -183,7 +194,7 @@ func (d *Desktop) CreateProject(in ProjectInput) (model.Project, error) {
 
 	err := d.store.Update(func(st *model.State) error {
 		if len(st.Projects) >= 500 {
-			return fmt.Errorf("project limit reached")
+			return apperror.New("project_limit_reached", "project limit reached")
 		}
 
 		st.Projects = append(st.Projects, p)
@@ -197,7 +208,11 @@ func (d *Desktop) CreateProject(in ProjectInput) (model.Project, error) {
 	return p, nil
 }
 
-func (d *Desktop) UpdateProject(id string, in ProjectInput) (model.Project, error) {
+func (d *Desktop) UpdateProject(id string, in ProjectInput) (_ model.Project, resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	p := in.project()
@@ -209,11 +224,11 @@ func (d *Desktop) UpdateProject(id string, in ProjectInput) (model.Project, erro
 			}
 
 			if old.Syncing {
-				return fmt.Errorf("wait for the active assessment before editing")
+				return apperror.New("wait_for_the_active_assessment_before_editing", "wait for the active assessment before editing")
 			}
 
 			if in.Revision != old.Revision {
-				return fmt.Errorf("project changed; reload before saving")
+				return apperror.New("project_changed_reload_before_saving", "project changed; reload before saving")
 			}
 
 			if (old.LocalPath != "" || len(old.Repositories()) > 0) && p.LocalPath == "" &&
@@ -249,7 +264,7 @@ func (d *Desktop) UpdateProject(id string, in ProjectInput) (model.Project, erro
 			return nil
 		}
 
-		return errors.New("project not found")
+		return apperror.New("project_not_found", "project not found")
 	})
 
 	if err != nil {
@@ -259,7 +274,11 @@ func (d *Desktop) UpdateProject(id string, in ProjectInput) (model.Project, erro
 	return p, nil
 }
 
-func (d *Desktop) DeleteProject(id, confirmation string) error {
+func (d *Desktop) DeleteProject(id, confirmation string) (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.store.Update(func(st *model.State) error {
@@ -269,22 +288,26 @@ func (d *Desktop) DeleteProject(id, confirmation string) error {
 			}
 
 			if confirmation == "" || confirmation != p.Name {
-				return errors.New("enter the exact project name to confirm deletion")
+				return apperror.New("enter_the_exact_project_name_to_confirm_deletion", "enter the exact project name to confirm deletion")
 			}
 
 			if p.Syncing {
-				return errors.New("wait for the active assessment before deleting")
+				return apperror.New("wait_for_the_active_assessment_before_deleting", "wait for the active assessment before deleting")
 			}
 
 			st.Projects = append(st.Projects[:i], st.Projects[i+1:]...)
 			return nil
 		}
 
-		return errors.New("project not found")
+		return apperror.New("project_not_found", "project not found")
 	})
 }
 
-func (d *Desktop) DeleteRun(id, runID string) error {
+func (d *Desktop) DeleteRun(id, runID string) (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	found := false
@@ -306,7 +329,7 @@ func (d *Desktop) DeleteRun(id, runID string) error {
 					p.Runs = append(p.Runs[:j], p.Runs[j+1:]...)
 					return nil
 				default:
-					return fmt.Errorf("only interrupted, partial, failed, or stopped activity can be deleted")
+					return apperror.New("activity_delete_status_invalid", "only interrupted, partial, failed, or stopped activity can be deleted")
 				}
 			}
 
@@ -321,7 +344,7 @@ func (d *Desktop) DeleteRun(id, runID string) error {
 	}
 
 	if !found {
-		return errors.New("activity not found")
+		return apperror.New("activity_not_found", "activity not found")
 	}
 
 	return nil
@@ -333,107 +356,159 @@ type SyncInput struct {
 	Severity string `json:"severity"`
 }
 
-func (d *Desktop) Sync(id string, in SyncInput) error {
+func (d *Desktop) Sync(id string, in SyncInput) (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.engine.StartFiltered(id, "manual", in.AssetID, in.Mode, in.Severity)
 }
 
-func (d *Desktop) ScanCode(id string) error {
+func (d *Desktop) ScanCode(id string) (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.engine.StartCodeScan(id)
 }
 
-func (d *Desktop) ControlRun(id, runID, action string) error {
+func (d *Desktop) ControlRun(id, runID, action string) (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.engine.Control(id, runID, action)
 }
 
-func (d *Desktop) CheckScanner(ctx context.Context, name string) (scanner.CheckResult, error) {
+func (d *Desktop) CheckScanner(ctx context.Context, name string) (_ scanner.CheckResult, resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	return scanner.Check(ctx, name)
 }
 
-func (d *Desktop) UpdateCVEDatabase() error {
+func (d *Desktop) UpdateCVEDatabase() (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed || d.engine == nil {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 	return d.engine.UpdateCVEDatabase()
 }
 
-func (d *Desktop) StopCVEDatabaseUpdate() error {
+func (d *Desktop) StopCVEDatabaseUpdate() (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed || d.engine == nil {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 	d.engine.CVE.Stop()
 	return nil
 }
 
-func (d *Desktop) RebuildCVEDatabase() error {
+func (d *Desktop) RebuildCVEDatabase() (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed || d.engine == nil {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 	return d.engine.RebuildCVEDatabase()
 }
 
-func (d *Desktop) UpdateNVDDatabase() error {
+func (d *Desktop) UpdateNVDDatabase() (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed || d.engine == nil {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 	return d.engine.UpdateNVDDatabase()
 }
-func (d *Desktop) RebuildNVDDatabase() error {
+func (d *Desktop) RebuildNVDDatabase() (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed || d.engine == nil {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 	return d.engine.RebuildNVDDatabase()
 }
-func (d *Desktop) StopNVDDatabaseUpdate() error {
+func (d *Desktop) StopNVDDatabaseUpdate() (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed || d.engine == nil {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 	d.engine.NVD.Stop()
 	return nil
 }
 
-func (d *Desktop) UpdateOSVDatabase() error {
+func (d *Desktop) UpdateOSVDatabase() (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed || d.engine == nil {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 
 	return d.engine.UpdateOSVDatabase()
 }
 
-func (d *Desktop) RebuildOSVDatabase() error {
+func (d *Desktop) RebuildOSVDatabase() (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed || d.engine == nil {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 
 	return d.engine.RebuildOSVDatabase()
 }
 
-func (d *Desktop) StopOSVDatabaseUpdate() error {
+func (d *Desktop) StopOSVDatabaseUpdate() (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed || d.engine == nil {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 
 	d.engine.OSV.Stop()
@@ -455,9 +530,13 @@ func validCredential(name string) bool {
 }
 
 // SavedCredentialPreview returns a partially masked key saved in this workspace.
-func (d *Desktop) SavedCredentialPreview(name string) (string, error) {
+func (d *Desktop) SavedCredentialPreview(name string) (_ string, resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	if !validCredential(name) {
-		return "", errors.New("unsupported token")
+		return "", apperror.New("unsupported_token", "unsupported token")
 	}
 
 	d.mu.RLock()
@@ -465,7 +544,7 @@ func (d *Desktop) SavedCredentialPreview(name string) (string, error) {
 
 	st, err := d.store.Read()
 	if err != nil {
-		return "", errors.New("could not read application data")
+		return "", apperror.New("could_not_read_application_data", "could not read application data")
 	}
 
 	const prefix, suffix = 10, 4
@@ -479,12 +558,16 @@ func (d *Desktop) SavedCredentialPreview(name string) (string, error) {
 	return string(saved[:prefix]) + middle + string(saved[len(saved)-suffix:]), nil
 }
 
-func (d *Desktop) SaveSettings(in SettingsInput) error {
+func (d *Desktop) SaveSettings(in SettingsInput) (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	cfg := in.Settings
 	if cfg.OSVUpdateSchedule != "" && cfg.OSVUpdateSchedule != "off" && cfg.OSVUpdateSchedule != "hourly" && cfg.OSVUpdateSchedule != "daily" {
-		return errors.New("OSV database schedule must be manual, hourly, or daily")
+		return apperror.New("osv_database_schedule_must_be_manual_hourly_or_daily", "OSV database schedule must be manual, hourly, or daily")
 	}
 
 	if cfg.OSVEcosystems != nil {
@@ -497,25 +580,25 @@ func (d *Desktop) SaveSettings(in SettingsInput) error {
 	}
 
 	if cfg.NVDUpdateSchedule != "" && cfg.NVDUpdateSchedule != "off" && cfg.NVDUpdateSchedule != "two_hourly" && cfg.NVDUpdateSchedule != "daily" {
-		return errors.New("NVD database schedule must be manual, every two hours, or daily")
+		return apperror.New("nvd_schedule_invalid", "NVD database schedule must be manual, every two hours, or daily")
 	}
 	if cfg.CVEUpdateSchedule != "" && cfg.CVEUpdateSchedule != "off" && cfg.CVEUpdateSchedule != "hourly" && cfg.CVEUpdateSchedule != "daily" {
-		return errors.New("CVE database schedule must be manual, hourly, or daily")
+		return apperror.New("cve_database_schedule_must_be_manual_hourly_or_daily", "CVE database schedule must be manual, hourly, or daily")
 	}
 	if cfg.CacheHours == 0 {
 		cfg.CacheHours = 6
 	}
 
 	if cfg.CacheHours < 1 || cfg.CacheHours > 168 {
-		return errors.New("cache freshness must be between 1 and 168 hours")
+		return apperror.New("cache_freshness_must_be_between_1_and_168_hours", "cache freshness must be between 1 and 168 hours")
 	}
 
 	if cfg.CacheMaxEntries != 0 && (cfg.CacheMaxEntries < model.MinCacheMaxEntries || cfg.CacheMaxEntries > model.MaxCacheMaxEntries) {
-		return errors.New("cache entry limit must be between 100 and 1000000")
+		return apperror.New("cache_entry_limit_must_be_between_100_and_1000000", "cache entry limit must be between 100 and 1000000")
 	}
 
 	if cfg.CacheMaxMiB != 0 && (cfg.CacheMaxMiB < model.MinCacheMaxMiB || cfg.CacheMaxMiB > model.MaxCacheMaxMiB) {
-		return errors.New("cache size limit must be between 16 and 4096 MiB")
+		return apperror.New("cache_size_limit_must_be_between_16_and_4096_mib", "cache size limit must be between 16 and 4096 MiB")
 	}
 
 	if cfg.Scanners == nil {
@@ -528,39 +611,39 @@ func (d *Desktop) SaveSettings(in SettingsInput) error {
 	}
 
 	if _, supported := localizations[cfg.Language]; !supported {
-		return errors.New("unsupported language")
+		return apperror.New("unsupported_language", "unsupported language")
 	}
 
 	if !cfg.Sources["nvd"] && !cfg.Sources["osv"] {
-		return errors.New("enable NVD or OSV for discovery; CVE enriches their records")
+		return apperror.New("enable_nvd_or_osv_for_discovery_cve_enriches_their_records", "enable NVD or OSV for discovery; CVE enriches their records")
 	}
 
 	for _, endpoint := range []string{cfg.NVDURL, cfg.CVEURL, cfg.OSVURL} {
 		u, err := url.Parse(endpoint)
 		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
-			return errors.New("source endpoints must be HTTPS URLs without credentials or fragments")
+			return apperror.New("source_endpoint_invalid", "source endpoints must be HTTPS URLs without credentials or fragments")
 		}
 	}
 
 	if cfg.AIProvider != "public" && cfg.AIProvider != "openai" && cfg.AIProvider != "claude" {
-		return errors.New("invalid AI provider")
+		return apperror.New("invalid_ai_provider", "invalid AI provider")
 	}
 
 	for name := range cfg.Scanners {
 		if !scanner.Supported(name) {
-			return errors.New("unsupported scanner")
+			return apperror.New("unsupported_scanner", "unsupported scanner")
 		}
 	}
 
 	for k := range cfg.Tokens {
 		if !validCredential(k) {
-			return errors.New("unsupported token")
+			return apperror.New("unsupported_token", "unsupported token")
 		}
 	}
 
 	for _, k := range in.ClearTokens {
 		if !validCredential(k) {
-			return errors.New("unsupported token")
+			return apperror.New("unsupported_token", "unsupported token")
 		}
 	}
 
@@ -617,7 +700,7 @@ func (d *Desktop) SaveSettings(in SettingsInput) error {
 	})
 
 	if err != nil {
-		return errors.New("could not save settings")
+		return apperror.New("could_not_save_settings", "could not save settings")
 	}
 	if d.engine != nil && (!cfg.Sources["cve"] || strings.TrimRight(cfg.CVEURL, "/") != model.DefaultCVEURL) {
 		d.engine.CVE.Stop()
@@ -649,16 +732,20 @@ type AdviceInput struct {
 	Provider  string `json:"provider"`
 }
 
-func (d *Desktop) Advice(ctx context.Context, id string, in AdviceInput) (remediation.Advice, error) {
+func (d *Desktop) Advice(ctx context.Context, id string, in AdviceInput) (_ remediation.Advice, resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.RLock()
 	st, err := d.store.Read()
 	d.mu.RUnlock()
 	if err != nil {
-		return remediation.Advice{}, errors.New("could not read data")
+		return remediation.Advice{}, apperror.New("could_not_read_data", "could not read data")
 	}
 
 	if in.Provider != "public" && in.Provider != "openai" && in.Provider != "claude" {
-		return remediation.Advice{}, errors.New("invalid advice provider")
+		return remediation.Advice{}, apperror.New("invalid_advice_provider", "invalid advice provider")
 	}
 
 	for _, p := range st.Projects {
@@ -673,17 +760,25 @@ func (d *Desktop) Advice(ctx context.Context, id string, in AdviceInput) (remedi
 		}
 	}
 
-	return remediation.Advice{}, errors.New("finding not found")
+	return remediation.Advice{}, apperror.New("finding_not_found", "finding not found")
 }
 
-func (d *Desktop) ChooseFolder(title, directory string) (string, error) {
+func (d *Desktop) ChooseFolder(title, directory string) (_ string, resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	return d.chooseDirectory(title, directory)
 }
 
-func (d *Desktop) OpenExternal(raw string) error {
+func (d *Desktop) OpenExternal(raw string) (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil {
-		return errors.New("invalid external link")
+		return apperror.New("invalid_external_link", "invalid external link")
 	}
 
 	return d.openBrowser(u.String())

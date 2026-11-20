@@ -1,10 +1,10 @@
 package engine
 
 import (
-	"errors"
 	"strings"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 )
 
@@ -14,14 +14,14 @@ func (e *Engine) updateNVD(rebuild bool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 	st, err := e.Store.Read()
 	if err != nil {
 		return err
 	}
 	if !st.Settings.Sources["nvd"] || strings.TrimRight(st.Settings.NVDURL, "/") != model.DefaultNVDURL {
-		return errors.New("enable the default NVD endpoint to update the local catalogue")
+		return apperror.New("nvd_default_endpoint_required", "enable the default NVD endpoint to update the local catalogue")
 	}
 	e.lastNVDAttempt = time.Now()
 	if rebuild {

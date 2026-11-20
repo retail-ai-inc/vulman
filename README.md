@@ -90,7 +90,7 @@ To permanently remove an interrupted, partial, failed, or stopped entry, choose 
 
 Steps cover NVD/OSV queries per component, CVE record enrichment, optional code scanning, and saving results. NVD rate-limit waits and database pagination are visible. The progress bar counts finished steps; it is not an estimated percentage of time remaining. Failed/interrupted steps keep their status even after the bar reaches the end.
 
-The interface polls every two seconds while visible. A version check skips decoding and sending unchanged workspace data while continuing to update cache metrics. Progress-only updates preserve active filters and expanded panels. Completed workflows remain in the project's latest-run panel and in **Activity**. The most recent 200 log events per run are retained in the encrypted database. Interrupted workflows are recovered on restart. English and Japanese UI labels are available; upstream errors retain their original text.
+The interface polls every two seconds while visible. A version check skips decoding and sending unchanged workspace data while continuing to update cache metrics. Progress-only updates preserve active filters and expanded panels. Completed workflows remain in the project's latest-run panel and in **Activity**. The most recent 200 log events per run are retained in the encrypted database. Interrupted workflows are recovered on restart. English and Japanese UI labels and structured error messages are available. Older text-only history retains its original language.
 
 ## Sources and matching
 
@@ -324,6 +324,10 @@ Use `node --test scripts/test-ui.cjs` for the UI behavior tests. These tests nee
 Each language has a JSON file under `cmd/vulman/locales`. To add a language, copy `en.json` to a file named for its language tag, such as `pt-BR.json`. Set `name` to the label shown in the dropdown, then translate the values under `messages`. Keep message keys and placeholders such as `{count}` intact. The optional `locale` field controls number and date formatting. Remove it to use the filename’s language tag for formatting.
 
 Rebuild Vulman to bundle the file. Both language dropdowns pick it up automatically, and missing messages use the English version.
+
+Validation errors, error notifications, database update failures, scanner warnings, and new workflow history use structured error codes. Their translations are the `error_*` entries in the same separate English and Japanese JSON files. Messages are translated when displayed, so switching languages also translates newly recorded workflow warnings and logs. Existing history with text-only messages remains readable in its original language. Unknown codes fall back to English or a safe generic error.
+
+For Go code, use `apperror.New("project_not_found", "project not found")` for a fixed message, or `apperror.Newf("upstream_http", "upstream returned HTTP %d", status)` for parameters. Add the corresponding `error_project_not_found` or `error_upstream_http` entry to both locale files. Formatted values use `{arg0}`, `{arg1}`, and so on. Wrapped error arguments become structured causes and retain `errors.Is` / `errors.As` behavior. Translation tests check code coverage and parameter consistency. Internal causes and external command output are excluded from public error payloads; unrecognized system failures receive translated troubleshooting guidance.
 
 `make release` builds the desktop app and standalone scanner for Linux and Windows on amd64 and arm64. When run on a Mac, it also builds `dist/Vulman.app` and `dist/vulman-scan-macos`. Check the platform dependencies on the machine that will run the build.
 

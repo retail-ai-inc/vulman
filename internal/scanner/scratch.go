@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 )
 
@@ -43,7 +44,7 @@ func openScratchRoot(dataDir string, create bool) (*os.Root, error) {
 			return nil, err
 		}
 		if relative, err := filepath.Rel(dataDir, path); err == nil && filepath.IsLocal(relative) {
-			return nil, errors.New("the temporary scan directory must be outside the Vulman data directory")
+			return nil, apperror.New("scan_storage_location_invalid", "the temporary scan directory must be outside the Vulman data directory")
 		}
 	}
 	if create {
@@ -56,7 +57,7 @@ func openScratchRoot(dataDir string, create bool) (*os.Root, error) {
 		return nil, err
 	}
 	if !info.IsDir() || runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, errors.New("temporary scan storage must be a private directory")
+		return nil, apperror.New("temporary_scan_storage_must_be_a_private_directory", "temporary scan storage must be a private directory")
 	}
 	root, err := os.OpenRoot(path)
 	if err != nil {
@@ -64,7 +65,7 @@ func openScratchRoot(dataDir string, create bool) (*os.Root, error) {
 	}
 	opened, err := root.Stat(".")
 	if err == nil && !os.SameFile(info, opened) {
-		err = errors.New("temporary scan storage changed while opening it")
+		err = apperror.New("temporary_scan_storage_changed_while_opening_it", "temporary scan storage changed while opening it")
 	}
 	if err != nil {
 		return nil, errors.Join(err, root.Close())
@@ -88,7 +89,7 @@ func newScanScratch(root *os.Root) (*scanScratch, error) {
 	}
 	locked, err := tryScratchLock(lease)
 	if err == nil && !locked {
-		err = errors.New("temporary scan directory is already in use")
+		err = apperror.New("temporary_scan_directory_is_already_in_use", "temporary scan directory is already in use")
 	}
 	if err == nil {
 		err = root.Mkdir(name, 0o700)

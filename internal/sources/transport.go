@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/workflow"
 )
@@ -36,6 +37,10 @@ type providerGate struct {
 }
 
 type cooldownError struct{ delay time.Duration }
+
+func (e cooldownError) PublicMessage() apperror.Message {
+	return apperror.Newf("provider_cooldown", "upstream is cooling down; try again in %d seconds", ceilSeconds(e.delay)).PublicMessage()
+}
 
 func (e cooldownError) Error() string {
 	return fmt.Sprintf("upstream is cooling down; try again in %d seconds", ceilSeconds(e.delay))
@@ -271,7 +276,7 @@ func (c *Client) request(ctx context.Context, method, endpoint string, payload a
 			status = resp.StatusCode
 			retryHeader = resp.Header.Get("Retry-After")
 			if status != 200 {
-				return fmt.Errorf("upstream returned HTTP %d", status)
+				return apperror.Newf("upstream_http", "upstream returned HTTP %d", status)
 			}
 
 			data, e = io.ReadAll(io.LimitReader(resp.Body, 40<<20))
@@ -280,7 +285,7 @@ func (c *Client) request(ctx context.Context, method, endpoint string, payload a
 			}
 
 			if len(data) >= 40<<20 {
-				return fmt.Errorf("upstream response exceeds limit")
+				return apperror.New("upstream_response_exceeds_limit", "upstream response exceeds limit")
 			}
 			return nil
 		}()

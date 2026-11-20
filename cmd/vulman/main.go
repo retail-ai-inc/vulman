@@ -97,9 +97,10 @@ func run() (err error) {
 	}
 
 	app := application.New(application.Options{
-		Name:  "Vulman",
-		Mac:   application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true},
-		Linux: application.LinuxOptions{ApplicationID: "com.vulman.app"},
+		MarshalError: marshalDesktopError,
+		Name:         "Vulman",
+		Mac:          application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true},
+		Linux:        application.LinuxOptions{ApplicationID: "com.vulman.app"},
 		// Wails debug logs binding arguments, which can include API credentials.
 		LogLevel: slog.LevelInfo,
 		Assets: application.AssetOptions{

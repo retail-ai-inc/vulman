@@ -1,9 +1,10 @@
 package nvddb
 
 import (
-	"errors"
 	"regexp"
 	"strings"
+
+	"vulman/internal/apperror"
 )
 
 type certainty uint8
@@ -33,11 +34,11 @@ func parseCPE(name string) ([]string, error) {
 	}
 	parts = append(parts, part.String())
 	if escaped || len(parts) != 13 || parts[0] != "cpe" || parts[1] != "2.3" {
-		return nil, errors.New("invalid CPE 2.3 name")
+		return nil, apperror.New("invalid_cpe_2_3_name", "invalid CPE 2.3 name")
 	}
 	for _, field := range parts[2:] {
 		if field == "" {
-			return nil, errors.New("empty CPE field")
+			return nil, apperror.New("empty_cpe_field", "empty CPE field")
 		}
 	}
 	return parts[2:], nil

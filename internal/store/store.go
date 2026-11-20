@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 
 	bolt "go.etcd.io/bbolt"
@@ -36,7 +36,7 @@ const (
 	keySize      = 32
 )
 
-var ErrMissingWorkspaceFiles = errors.New("vulman.db and vulman.key must both exist and contain data")
+var ErrMissingWorkspaceFiles = apperror.New("vulman_db_and_vulman_key_must_both_exist_and_contain_data", "vulman.db and vulman.key must both exist and contain data")
 
 type Paths struct {
 	Database string `json:"database"`
@@ -91,7 +91,7 @@ func loadOrCreateKey(root *os.Root, create bool) ([]byte, error) {
 
 	// Count even a dangling database symlink as an existing database.
 	if _, err := root.Lstat(databaseFile); err == nil {
-		return nil, fmt.Errorf("database exists but encryption key is missing; restore vulman.key from backup")
+		return nil, apperror.New("workspace_key_missing", "database exists but encryption key is missing; restore vulman.key from backup")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
@@ -118,7 +118,7 @@ func openStore(root *os.Root, create bool) (_ *Store, err error) {
 		defer debug.SetPanicOnFault(previous)
 		defer func() {
 			if failure := recover(); failure != nil {
-				err = fmt.Errorf("invalid workspace database: %v", failure)
+				err = apperror.New("invalid_workspace_database", "invalid workspace database")
 				if db != nil {
 					err = errors.Join(err, db.Close())
 				} else if candidate != nil {
@@ -135,7 +135,7 @@ func openStore(root *os.Root, create bool) (_ *Store, err error) {
 				return nil, err
 			}
 			if !info.Mode().IsRegular() {
-				return nil, fmt.Errorf("%s must be a regular file", name)
+				return nil, apperror.Newf("regular_file_required", "%s must be a regular file", name)
 			}
 		}
 	}
@@ -144,7 +144,7 @@ func openStore(root *os.Root, create bool) (_ *Store, err error) {
 		return nil, err
 	}
 	if len(key) != keySize {
-		return nil, errors.New("invalid Vulman encryption key length")
+		return nil, apperror.New("invalid_vulman_encryption_key_length", "invalid Vulman encryption key length")
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -161,7 +161,7 @@ func openStore(root *os.Root, create bool) (_ *Store, err error) {
 		Timeout: time.Second,
 		OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {
 			if name != path {
-				return nil, fmt.Errorf("unexpected database path: %q", name)
+				return nil, apperror.New("unexpected_database_path", "unexpected database path")
 			}
 			if create {
 				return root.OpenFile(databaseFile, flags, mode)
@@ -198,7 +198,7 @@ func (s *Store) initialize(create bool) error {
 		if !create {
 			bucket := tx.Bucket([]byte("state"))
 			if bucket == nil || len(bucket.Get([]byte("v1"))) == 0 {
-				return errors.New("workspace has no encrypted Vulman state")
+				return apperror.New("workspace_has_no_encrypted_vulman_state", "workspace has no encrypted Vulman state")
 			}
 		}
 		if _, e := tx.CreateBucketIfNotExists([]byte("state")); e != nil {
@@ -249,12 +249,12 @@ func (s *Store) read(tx *bolt.Tx) (model.State, error) {
 
 	n := s.aead.NonceSize()
 	if len(data) < n {
-		return state, fmt.Errorf("invalid database state")
+		return state, apperror.New("invalid_database_state", "invalid database state")
 	}
 
 	plain, err := s.aead.Open(nil, data[:n], data[n:], []byte("vulman-state-v1"))
 	if err != nil {
-		return state, fmt.Errorf("cannot decrypt database: %w", err)
+		return state, apperror.Newf("decrypt_database", "cannot decrypt database: %w", err)
 	}
 
 	err = json.Unmarshal(plain, &state)

@@ -1,15 +1,14 @@
 package engine
 
 import (
-	"errors"
-	"fmt"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 )
 
-var ErrRunNotActive = errors.New("assessment is no longer active; reload its workflow")
-var ErrInvalidControl = errors.New("invalid workflow action")
+var ErrRunNotActive = apperror.New("assessment_is_no_longer_active_reload_its_workflow", "assessment is no longer active; reload its workflow")
+var ErrInvalidControl = apperror.New("invalid_workflow_action", "invalid workflow action")
 
 func activeStatus(status string) bool {
 	return status == "running" || status == "pausing" || status == "paused" || status == "stopping" || status == "queued" || status == "waiting_databases"
@@ -68,7 +67,7 @@ func (e *Engine) Control(projectID, runID, action string) error {
 				switch action {
 				case "pause":
 					if r.Status != "running" {
-						return fmt.Errorf("only a running workflow can be paused")
+						return apperror.New("only_a_running_workflow_can_be_paused", "only a running workflow can be paused")
 					}
 
 					r.Status = "pausing"
@@ -76,7 +75,7 @@ func (e *Engine) Control(projectID, runID, action string) error {
 					addLog(r, "", "pause_requested", "")
 				case "resume":
 					if r.Status != "paused" && r.Status != "pausing" {
-						return fmt.Errorf("only a paused workflow can be resumed")
+						return apperror.New("only_a_paused_workflow_can_be_resumed", "only a paused workflow can be resumed")
 					}
 
 					finishPause(r)

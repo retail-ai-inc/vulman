@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"vulman/internal/apperror"
 )
 
 const archiveFile = ".vulman-osv-download.zip"
@@ -26,6 +28,10 @@ const maxRecordSize int64 = 8 << 20
 var generationID = regexp.MustCompile(`^[0-9]{1,30}$`)
 
 type httpError int
+
+func (e httpError) PublicMessage() apperror.Message {
+	return apperror.Newf("osv_download_http", "OSV download returned HTTP %d", int(e)).PublicMessage()
+}
 
 func (e httpError) Error() string {
 	return fmt.Sprintf("OSV download returned HTTP %d", e)
@@ -43,7 +49,7 @@ func checksum(header http.Header) (string, error) {
 		}
 	}
 
-	return "", errors.New("OSV object has no valid CRC32C checksum")
+	return "", apperror.New("osv_object_has_no_valid_crc32c_checksum", "OSV object has no valid CRC32C checksum")
 }
 
 func (u *Updater) endpoint(name string) string {
@@ -96,7 +102,7 @@ func (u *Updater) request(ctx context.Context, method, endpoint string, consume 
 		}
 	}
 
-	return errors.New("OSV download failed")
+	return apperror.New("osv_download_failed", "OSV download failed")
 }
 
 func wait(ctx context.Context, delay time.Duration) error {
@@ -117,7 +123,7 @@ func (u *Updater) head(ctx context.Context, name string, limit int64) (blob, err
 		object.Size = resp.ContentLength
 		object.Generation = resp.Header.Get("X-Goog-Generation")
 		if object.Size <= 0 || object.Size > limit || !generationID.MatchString(object.Generation) {
-			return errors.New("invalid OSV object size or generation")
+			return apperror.New("invalid_osv_object_size_or_generation", "invalid OSV object size or generation")
 		}
 
 		var err error
@@ -163,7 +169,7 @@ func matchesChecksum(reader io.Reader, expected string) error {
 	var sum [4]byte
 	binary.BigEndian.PutUint32(sum[:], hash.Sum32())
 	if base64.StdEncoding.EncodeToString(sum[:]) != expected {
-		return errors.New("OSV CRC32C checksum mismatch")
+		return apperror.New("osv_crc32c_checksum_mismatch", "OSV CRC32C checksum mismatch")
 	}
 
 	return nil
@@ -195,7 +201,7 @@ func (u *Updater) download(ctx context.Context, object blob, filename string) er
 	endpoint := u.endpoint(object.Name) + "?generation=" + object.Generation
 	err := u.request(ctx, http.MethodGet, endpoint, func(resp *http.Response) error {
 		if resp.Header.Get("X-Goog-Generation") != object.Generation {
-			return errors.New("OSV object generation changed during download")
+			return apperror.New("osv_object_generation_changed_during_download", "OSV object generation changed during download")
 		}
 
 		f, err := u.store.root.OpenFile(filename, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
@@ -206,7 +212,7 @@ func (u *Updater) download(ctx context.Context, object blob, filename string) er
 		reader := &contextReader{ctx: ctx, reader: resp.Body, report: func(n int64) { u.phase("downloading", n, object.Size, 0) }}
 		n, err := io.Copy(f, io.LimitReader(reader, object.Size+1))
 		if err == nil && n != object.Size {
-			err = errors.New("OSV download is incomplete")
+			err = apperror.New("osv_download_is_incomplete", "OSV download is incomplete")
 		}
 
 		if err == nil {
@@ -225,7 +231,7 @@ func (u *Updater) download(ctx context.Context, object blob, filename string) er
 			return err
 		}
 
-		return errors.New("OSV download checksum verification failed")
+		return apperror.New("osv_download_checksum_verification_failed", "OSV download checksum verification failed")
 	}
 
 	return nil

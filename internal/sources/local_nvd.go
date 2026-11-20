@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/workflow"
 )
@@ -16,7 +17,7 @@ func (c *Client) localNVD(ctx context.Context, a model.Asset, s model.Settings, 
 	}
 	result, err := c.LocalNVD.Query(ctx, a.Name, a.CPE)
 	if err != nil {
-		notify(reports, model.SyncProgress{Phase: "cache_error", Item: "Local NVD matching is unavailable; checking the query cache or NVD API"})
+		notifyIssue(reports, apperror.New("nvd_local_unavailable", "Local NVD matching is unavailable; checking the query cache or NVD API"))
 		return c.query(ctx, "nvd", a, s, reports)
 	}
 	match := "review"
@@ -28,7 +29,7 @@ func (c *Client) localNVD(ctx context.Context, a model.Asset, s model.Settings, 
 		items = append(items, nvdFinding(record, a, match))
 	}
 	if result.Uncertain && modeFor(ctx) != "local" {
-		notify(reports, model.SyncProgress{Phase: "cache_error", Item: "NVD API validation is needed for a conditional, deprecated, or unsupported CPE match"})
+		notifyIssue(reports, apperror.New("nvd_api_validation", "NVD API validation is needed for a conditional, deprecated, or unsupported CPE match"))
 		remote, err := c.query(ctx, "nvd", a, s, reports)
 		if err == nil {
 			return remote, nil
@@ -50,10 +51,10 @@ func (c *Client) localNVD(ctx context.Context, a model.Asset, s model.Settings, 
 	}
 	var warning error
 	if stale {
-		warning = errors.New("local NVD data is stale; update the NVD database")
+		warning = apperror.New("local_nvd_data_is_stale_update_the_nvd_database", "local NVD data is stale; update the NVD database")
 	}
 	if result.Uncertain {
-		warning = errors.Join(warning, errors.New("local CPE applicability needs review; use normal sync for NVD API validation"))
+		warning = errors.Join(warning, apperror.New("nvd_local_match_uncertain", "local CPE applicability needs review; use normal sync for NVD API validation"))
 	}
 	phase, status := "cached", "cache"
 	if stale || result.Uncertain {

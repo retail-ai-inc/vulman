@@ -3,13 +3,13 @@ package engine
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/cvedb"
 	"vulman/internal/model"
 	"vulman/internal/nvddb"
@@ -44,26 +44,26 @@ type activeRun struct {
 	queued  *queuedSync
 }
 
-var ErrAssetNotFound = errors.New("tech stack component not found")
-var ErrInvalidMode = errors.New("invalid sync mode")
-var ErrInvalidSeverity = errors.New("invalid sync severity")
+var ErrAssetNotFound = apperror.New("tech_stack_component_not_found", "tech stack component not found")
+var ErrInvalidMode = apperror.New("invalid_sync_mode", "invalid sync mode")
+var ErrInvalidSeverity = apperror.New("invalid_sync_severity", "invalid sync severity")
 
 const codeScanMode = "code"
 
 func New(s *store.Store) (*Engine, error) {
 	catalogue, err := s.OpenCVEDatabase()
 	if err != nil {
-		return nil, fmt.Errorf("could not open the local CVE catalogue: %w", err)
+		return nil, apperror.Newf("open_cve", "could not open the local CVE catalogue: %w", err)
 	}
 	nvd, err := s.OpenNVDDatabase()
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("could not open the local NVD catalogue: %w", err), catalogue.Close())
+		return nil, errors.Join(apperror.Newf("open_nvd", "could not open the local NVD catalogue: %w", err), catalogue.Close())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	osv, err := s.OpenOSVDatabase()
 	if err != nil {
 		cancel()
-		return nil, errors.Join(fmt.Errorf("could not open the local OSV catalogue: %w", err), catalogue.Close(), nvd.Close())
+		return nil, errors.Join(apperror.Newf("open_osv", "could not open the local OSV catalogue: %w", err), catalogue.Close(), nvd.Close())
 	}
 
 	e := &Engine{Store: s, Sources: sources.New(s), ctx: ctx, cancel: cancel, active: map[string]activeRun{}}
@@ -84,7 +84,13 @@ func New(s *store.Store) (*Engine, error) {
 					finishPause(&p.Runs[j])
 					p.Runs[j].Status = "interrupted"
 					p.Runs[j].FinishedAt = time.Now()
-					p.Runs[j].Warnings = append(p.Runs[j].Warnings, "Application stopped before assessment finished.")
+					run := &p.Runs[j]
+					for len(run.WarningMessages) < len(run.Warnings) {
+						run.WarningMessages = append(run.WarningMessages, apperror.Message{Code: "legacy", Fallback: run.Warnings[len(run.WarningMessages)]})
+					}
+					message := apperror.New("assessment_startup_interrupted", "Application stopped before assessment finished.").PublicMessage()
+					run.Warnings = append(run.Warnings, message.English())
+					run.WarningMessages = append(run.WarningMessages, message)
 					interruptSteps(&p.Runs[j])
 					if queued {
 						addLog(&p.Runs[j], "", "queue_interrupted", "")
@@ -211,7 +217,7 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
-		return fmt.Errorf("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 
 	var snapshot model.Project
@@ -227,16 +233,16 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 			}
 
 			if p.Syncing {
-				return fmt.Errorf("project is already syncing")
+				return apperror.New("project_is_already_syncing", "project is already syncing")
 			}
 
 			settings = st.Settings
 			if mode == codeScanMode {
 				if !p.ScanCode || (p.LocalPath == "" && len(p.Repositories()) == 0) {
-					return errors.New("enable code scanning and set a repository in Edit project")
+					return apperror.New("enable_code_scanning_and_set_a_repository_in_edit_project", "enable code scanning and set a repository in Edit project")
 				}
 				if len(scanner.EnabledTools(settings.Scanners)) == 0 {
-					return errors.New("enable a code scanner in Configuration")
+					return apperror.New("enable_a_code_scanner_in_configuration", "enable a code scanner in Configuration")
 				}
 				settings.Sources = nil
 			}
@@ -285,7 +291,7 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 			return nil
 		}
 
-		return fmt.Errorf("project not found")
+		return apperror.New("project_not_found", "project not found")
 	})
 
 	if err != nil {
@@ -322,6 +328,12 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 	ctx := sources.WithMode(control.Context(), mode)
 	all := []model.Finding{}
 	warnings := []string{}
+	warningMessages := []apperror.Message{}
+	addWarning := func(err error) {
+		message := apperror.Public(err)
+		warnings = append(warnings, message.English())
+		warningMessages = append(warningMessages, *message)
+	}
 	successes := 0
 	usedData := false
 	report := func(stepID string) func(model.SyncProgress) {
@@ -334,7 +346,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 	}
 
 	if len(p.Assets) == 0 && !p.ScanCode {
-		warnings = append(warnings, "No components registered. Add inventory before assessing this project.")
+		addWarning(apperror.New("assessment_no_components", "No components registered. Add inventory before assessing this project."))
 	}
 
 	for _, a := range p.Assets {
@@ -358,7 +370,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 			all = append(all, items...)
 
 			if err != nil {
-				warnings = append(warnings, fmt.Sprintf("NVD · %s: %v", a.Name, err))
+				addWarning(apperror.Newf("source_component", "%s · %s: %w", "NVD", a.Name, err))
 			} else {
 				successes++
 			}
@@ -375,7 +387,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 			all = append(all, items...)
 
 			if err != nil {
-				warnings = append(warnings, fmt.Sprintf("OSV · %s: %v", a.Name, err))
+				addWarning(apperror.Newf("source_component", "%s · %s: %w", "OSV", a.Name, err))
 			} else {
 				successes++
 			}
@@ -428,8 +440,8 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 			if r.err != nil {
 				if !ok {
 					failed++
-					tracker.event("cve", "failed", f.ID+": "+r.err.Error())
-					warnings = append(warnings, fmt.Sprintf("CVE · %s: %v", f.ID, r.err))
+					tracker.errorEvent("cve", "failed", apperror.Newf("context", "%s: %w", f.ID, r.err))
+					addWarning(apperror.Newf("source_component", "%s · %s: %w", "CVE", f.ID, r.err))
 				}
 				continue
 			}
@@ -444,7 +456,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 		tracker.progress("cve", model.SyncProgress{Phase: "page", Processed: processed, Total: len(ids), Found: processed - failed})
 		var cveErr error
 		if failed > 0 {
-			cveErr = fmt.Errorf("%d CVE records could not be retrieved", failed)
+			cveErr = apperror.Newf("cve_records_failed", "%d CVE records could not be retrieved", failed)
 		}
 
 		if ctx.Err() != nil {
@@ -462,7 +474,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 		scannerSkipReason = "scanner_skipped_disabled"
 	case mode == "local":
 		scannerSkipReason = "scanner_skipped_cache"
-		warnings = append(warnings, "Cache-only assessment skips repository scanners; run normal sync for complete scanner coverage.")
+		addWarning(apperror.New("assessment_scanners_skipped", "Cache-only assessment skips repository scanners; run normal sync for complete scanner coverage."))
 	case workflow.Wait(ctx) != nil:
 		scannerSkipReason = "scanner_skipped_ended"
 	}
@@ -472,7 +484,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 	if scannerSkipReason == "" {
 		tracker.start("scanner")
 		scannersCompleted := 0
-		items, warns := scanner.Scan(ctx, p, s, filepath.Dir(e.Store.Paths().Database), func(event scanner.ScanEvent) {
+		items, warns := scanner.ScanDetailed(ctx, p, s, filepath.Dir(e.Store.Paths().Database), func(event scanner.ScanEvent) {
 			if event.Phase == "scanner_completed" {
 				scannersCompleted++
 			}
@@ -481,7 +493,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 		var scanErr error
 
 		if len(warns) > 0 {
-			scanErr = fmt.Errorf("%s", strings.Join(warns, "; "))
+			scanErr = errors.Join(warns...)
 		}
 
 		if ctx.Err() != nil {
@@ -490,7 +502,9 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 
 		tracker.finish("scanner", severityCount(items, severity), scanErr)
 		all = append(all, items...)
-		warnings = append(warnings, warns...)
+		for _, warning := range warns {
+			addWarning(warning)
+		}
 		successes += scannersCompleted
 	}
 
@@ -533,7 +547,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 	}
 
 	if ctx.Err() != nil {
-		warnings = append(warnings, "Assessment timed out or application stopped.")
+		addWarning(apperror.New("assessment_interrupted", "Assessment timed out or application stopped."))
 		status = "interrupted"
 		all = appendPrior(all, previous, assetID, severity)
 	}
@@ -555,7 +569,9 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 		all = p.Findings
 		runCount = 0
 		runSeverityCounts = nil
-		warnings = []string{"Assessment stopped by user. Unsaved assessment results were discarded; previous findings were kept."}
+		warnings = []string{}
+		warningMessages = []apperror.Message{}
+		addWarning(apperror.New("assessment_stopped", "Assessment stopped by user. Unsaved assessment results were discarded; previous findings were kept."))
 	}
 
 	fullAssessmentComplete := status == "complete" && assetID == "" && severity == "" && mode != codeScanMode
@@ -589,6 +605,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 					r.Status = status
 					r.FinishedAt = time.Now()
 					r.Warnings = warnings
+					r.WarningMessages = warningMessages
 					r.Count = runCount
 					r.SeverityCounts = runSeverityCounts
 					if fullAssessmentComplete {

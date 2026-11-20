@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +14,8 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+
+	"vulman/internal/apperror"
 )
 
 const batchSize = 256
@@ -79,7 +80,7 @@ func Open(dir string, aead cipher.AEAD) (*Store, error) {
 	path := filepath.Join(root.Name(), Filename)
 	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: time.Second, OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {
 		if name != path {
-			return nil, errors.New("unexpected OSV database path")
+			return nil, apperror.New("unexpected_osv_database_path", "unexpected OSV database path")
 		}
 
 		return root.OpenFile(Filename, flags, mode)
@@ -108,7 +109,7 @@ func Open(dir string, aead cipher.AEAD) (*Store, error) {
 		}
 
 		if s.meta.Ecosystems == nil || s.meta.Next < 0 || s.meta.Next > len(s.meta.Plan) {
-			return errors.New("invalid OSV metadata")
+			return apperror.New("invalid_osv_metadata", "invalid OSV metadata")
 		}
 
 		return nil
@@ -142,7 +143,7 @@ func (s *Store) encode(identity string, value any) ([]byte, error) {
 func (s *Store) decode(identity string, data []byte, out any) error {
 	n := s.aead.NonceSize()
 	if len(data) < n {
-		return errors.New("invalid encrypted OSV record")
+		return apperror.New("invalid_encrypted_osv_record", "invalid encrypted OSV record")
 	}
 
 	plain, err := s.aead.Open(nil, data[:n], data[n:], []byte("vulman-osv-v1:"+identity))
@@ -321,7 +322,7 @@ func (s *Store) remove(tx *bolt.Tx, ecosystem, generation, id string) error {
 	}
 
 	if records.Sequence() == 0 {
-		return errors.New("invalid OSV record counter")
+		return apperror.New("invalid_osv_record_counter", "invalid OSV record counter")
 	}
 
 	return records.SetSequence(records.Sequence() - 1)
@@ -362,7 +363,7 @@ func (s *Store) putRows(ctx context.Context, rows []json.RawMessage, offset int,
 	return s.update(func(tx *bolt.Tx, m *metadata) error {
 		j := m.Job
 		if j == nil || offset < j.Offset {
-			return errors.New("invalid OSV import checkpoint")
+			return apperror.New("invalid_osv_import_checkpoint", "invalid OSV import checkpoint")
 		}
 
 		b := catalogue(tx, j.Ecosystem, j.Target)
@@ -378,7 +379,7 @@ func (s *Store) putRows(ctx context.Context, rows []json.RawMessage, offset int,
 			}
 
 			if !recordID.MatchString(record.ID) || record.Modified.IsZero() || !supportedSchema(record.SchemaVersion) {
-				return errors.New("invalid OSV advisory identity or modification timestamp")
+				return apperror.New("invalid_osv_advisory_identity_or_modification_timestamp", "invalid OSV advisory identity or modification timestamp")
 			}
 
 			if old := records.Get([]byte(record.ID)); old != nil {
@@ -425,7 +426,7 @@ func (s *Store) putRows(ctx context.Context, rows []json.RawMessage, offset int,
 	})
 }
 
-var ErrNotReady = errors.New("initialize this OSV ecosystem in Configuration")
+var ErrNotReady = apperror.New("initialize_this_osv_ecosystem_in_configuration", "initialize this OSV ecosystem in Configuration")
 
 type QueryResult struct {
 	Records   []Record
@@ -501,16 +502,16 @@ func (s *Store) finish(ctx context.Context, advance bool) error {
 
 		j := m.Job
 		if j == nil {
-			return errors.New("missing OSV import")
+			return apperror.New("missing_osv_import", "missing OSV import")
 		}
 
 		if j.Full && (j.Total <= 0 || j.Offset != j.Total) {
-			return errors.New("OSV baseline import is incomplete")
+			return apperror.New("osv_baseline_import_is_incomplete", "OSV baseline import is incomplete")
 		}
 
 		if !j.Full {
 			if key, _ := tx.Bucket([]byte("pending")).Cursor().First(); !j.Planned || key != nil {
-				return errors.New("OSV changes remain unprocessed")
+				return apperror.New("osv_changes_remain_unprocessed", "OSV changes remain unprocessed")
 			}
 		}
 
@@ -580,7 +581,7 @@ func (s *Store) clearPending(ctx context.Context) error {
 func (s *Store) fileSize() (int64, error) {
 	info, err := s.root.Stat(Filename)
 	if err != nil {
-		return 0, fmt.Errorf("OSV database size: %w", err)
+		return 0, apperror.Newf("osv_size", "OSV database size: %w", err)
 	}
 
 	return info.Size(), nil

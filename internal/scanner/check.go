@@ -3,20 +3,22 @@ package scanner
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+
+	"vulman/internal/apperror"
 )
 
 type CheckResult struct {
-	Status   string `json:"status"`
-	Platform string `json:"platform"`
-	Path     string `json:"path,omitempty"`
-	Detail   string `json:"detail,omitempty"`
+	Message  *apperror.Message `json:"message,omitempty"`
+	Status   string            `json:"status"`
+	Platform string            `json:"platform"`
+	Path     string            `json:"path,omitempty"`
+	Detail   string            `json:"detail,omitempty"`
 }
 
 // Check runs an informational command with the same executable resolution and
@@ -63,7 +65,8 @@ func Check(ctx context.Context, name string) (CheckResult, error) {
 		return result, nil
 	}
 	result.Status = "failed"
-	result.Detail = err.Error()
+	result.Message = apperror.Public(err)
+	result.Detail = result.Message.English()
 	return result, nil
 }
 
@@ -82,12 +85,13 @@ func newScannerProbe(ctx context.Context, name string) (*exec.Cmd, error) {
 	case "snyk":
 		return exec.CommandContext(ctx, "snyk", "--version"), nil
 	default:
-		return nil, fmt.Errorf("scanner availability check is unsupported for %q", name)
+		return nil, apperror.Newf("scanner_check_unsupported", "scanner availability check is unsupported for %q", name)
 	}
 }
 
 func checkFailure(result CheckResult, err error) CheckResult {
-	result.Detail = err.Error()
+	result.Message = apperror.Public(err)
+	result.Detail = result.Message.English()
 	switch {
 	case errors.Is(err, os.ErrPermission) || blockedByPolicy(err):
 		result.Status = "permission"
@@ -99,6 +103,7 @@ func checkFailure(result CheckResult, err error) CheckResult {
 		if errors.As(err, &lookup) {
 			if path := deniedExecutableOnPath(lookup.Name); path != "" {
 				result.Status, result.Path, result.Detail = "permission", path, ""
+				result.Message = nil
 			}
 		}
 	default:

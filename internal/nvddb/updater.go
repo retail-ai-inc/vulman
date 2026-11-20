@@ -12,17 +12,21 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+
+	"vulman/internal/apperror"
 )
 
 type Updater struct {
-	store             *Store
-	HTTP              *http.Client
-	feedBase          string
-	mu                sync.Mutex
-	cancel            context.CancelFunc
-	wg                sync.WaitGroup
-	closed            bool
-	phase, lastError  string
+	store            *Store
+	HTTP             *http.Client
+	feedBase         string
+	mu               sync.Mutex
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	closed           bool
+	phase, lastError string
+	lastFailure      error
+
 	downloaded, total int64
 	importTotal       int
 }
@@ -31,7 +35,7 @@ func NewUpdater(s *Store) *Updater {
 	return &Updater{store: s, feedBase: "https://nvd.nist.gov/feeds/json", HTTP: &http.Client{Timeout: 20 * time.Minute,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 || req.URL.Scheme != "https" || req.URL.User != nil || req.URL.Hostname() != "nvd.nist.gov" {
-				return errors.New("unexpected NVD download redirect")
+				return apperror.New("unexpected_nvd_download_redirect", "unexpected NVD download redirect")
 			}
 			return nil
 		},
@@ -58,6 +62,7 @@ func (u *Updater) Stats() (Stats, error) {
 	u.mu.Lock()
 	s.Running, s.Phase = u.cancel != nil, u.phase
 	s.Downloaded, s.DownloadTotal, s.Error = u.downloaded, u.total, u.lastError
+	s.ErrorMessage = apperror.Public(u.lastFailure)
 	s.ImportTotal = u.importTotal
 	u.mu.Unlock()
 	if !s.Running && s.Resumable && s.Error == "" {
@@ -71,15 +76,16 @@ func (u *Updater) start(parent context.Context, rebuild bool) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.closed {
-		return errors.New("NVD catalogue is closing")
+		return apperror.New("nvd_catalogue_is_closing", "NVD catalogue is closing")
 	}
 	if u.cancel != nil {
-		return errors.New("NVD update is already running")
+		return apperror.New("nvd_update_is_already_running", "NVD update is already running")
 	}
 	ctx, cancel := context.WithCancel(parent)
 	u.cancel = cancel
 	u.phase = "checking"
 	u.lastError = ""
+	u.lastFailure = nil
 	u.downloaded, u.total = 0, 0
 	u.importTotal = 0
 	u.wg.Add(1)
@@ -95,7 +101,8 @@ func (u *Updater) start(parent context.Context, rebuild bool) error {
 			u.phase = "interrupted"
 		} else if err != nil {
 			u.phase = "failed"
-			u.lastError = err.Error()
+			u.lastError = apperror.Public(err).English()
+			u.lastFailure = err
 		}
 	}()
 	return nil
@@ -167,7 +174,7 @@ func (u *Updater) sync(ctx context.Context, rebuild bool) error {
 				}
 				continue
 			}
-			return fmt.Errorf("%s: %w", pending.ID, err)
+			return apperror.Newf("context", "%s: %w", pending.ID, err)
 		}
 		if !j.Full && j.Offset == 0 && m.Hashes[feed.ID] == feed.SHA {
 			if err := u.store.finishFeed(ctx, feed, false); err != nil {
@@ -201,11 +208,11 @@ func (u *Updater) sync(ctx context.Context, rebuild bool) error {
 			return err
 		}
 		if err := u.download(ctx, feed); err != nil {
-			return fmt.Errorf("%s: %w", feed.ID, err)
+			return apperror.Newf("context", "%s: %w", feed.ID, err)
 		}
 		u.progress("importing", feed.Compressed, feed.Compressed)
 		if err := u.importFeed(ctx, feed); err != nil {
-			return fmt.Errorf("%s: %w", feed.ID, err)
+			return apperror.Newf("context", "%s: %w", feed.ID, err)
 		}
 		if err := u.store.finishFeed(ctx, feed, true); err != nil {
 			return err
@@ -272,7 +279,7 @@ func (u *Updater) importFeed(ctx context.Context, feed Feed) error {
 			}
 			value := item[field]
 			if len(value) == 0 {
-				return errors.New("NVD feed record has no payload")
+				return apperror.New("nvd_feed_record_has_no_payload", "NVD feed record has no payload")
 			}
 			batch = append(batch, value)
 			bytes += len(value)
@@ -285,7 +292,7 @@ func (u *Updater) importFeed(ctx context.Context, feed Feed) error {
 			return err
 		}
 		if total >= 0 && total != *info.Total {
-			return errors.New("CPE dictionary chunks disagree on their total count")
+			return apperror.New("cpe_dictionary_chunks_disagree_on_their_total_count", "CPE dictionary chunks disagree on their total count")
 		}
 		total = *info.Total
 		u.importProgress(total)
@@ -295,13 +302,13 @@ func (u *Updater) importFeed(ctx context.Context, feed Feed) error {
 		return err
 	}
 	if processed < offset {
-		return errors.New("NVD stream does not match its saved checkpoint")
+		return apperror.New("nvd_stream_does_not_match_its_saved_checkpoint", "NVD stream does not match its saved checkpoint")
 	}
 	if processed != total {
-		return errors.New("NVD feed is missing records or dictionary chunks")
+		return apperror.New("nvd_feed_is_missing_records_or_dictionary_chunks", "NVD feed is missing records or dictionary chunks")
 	}
 	if processed == 0 && !strings.EqualFold(feed.ID, "modified") {
-		return errors.New("empty NVD source feed")
+		return apperror.New("empty_nvd_source_feed", "empty NVD source feed")
 	}
 	return flush()
 }

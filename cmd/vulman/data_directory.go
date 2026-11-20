@@ -3,12 +3,12 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 
+	"vulman/internal/apperror"
 	"vulman/internal/engine"
 	"vulman/internal/store"
 )
@@ -47,7 +47,7 @@ func readDataDirectory(defaultDir string) (string, error) {
 	}
 
 	if !filepath.IsAbs(dir) {
-		return "", errors.New("invalid saved data directory")
+		return "", apperror.New("invalid_saved_data_directory", "invalid saved data directory")
 	}
 
 	return dir, nil
@@ -144,12 +144,16 @@ func openWorkspace(dir string, isDefault bool) (*store.Store, *engine.Engine, er
 }
 
 // ChangeDataDirectory switches workspaces after opening the replacement fully.
-func (d *Desktop) ChangeDataDirectory(path string) error {
+func (d *Desktop) ChangeDataDirectory(path string) (resultErr error) {
+	defer func() {
+		resultErr = apperror.Expose(resultErr)
+	}()
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if d.closed {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 
 	if path == "" {
@@ -184,7 +188,7 @@ func (d *Desktop) ChangeDataDirectory(path string) error {
 		}
 
 		if err != nil {
-			return fmt.Errorf("could not open the default data directory: %w", err)
+			return apperror.Newf("open_default_directory", "could not open the default data directory: %w", err)
 		}
 	} else if !isDefault {
 		target = current
@@ -196,7 +200,7 @@ func (d *Desktop) ChangeDataDirectory(path string) error {
 			err = errors.Join(err, next.Close())
 		}
 
-		return fmt.Errorf("could not save the data directory: %w", err)
+		return apperror.Newf("save_data_directory", "could not save the data directory: %w", err)
 	}
 
 	d.storageWarning = warning

@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +16,8 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+
+	"vulman/internal/apperror"
 )
 
 const batchSize = 256
@@ -62,25 +63,26 @@ type metadata struct {
 	Job       *job              `json:"job,omitempty"`
 }
 type Stats struct {
-	Path          string    `json:"path"`
-	Records       uint64    `json:"records"`
-	CPEs          uint64    `json:"cpes"`
-	Bytes         int64     `json:"bytes"`
-	Initialized   bool      `json:"initialized"`
-	SourceAt      time.Time `json:"source_at"`
-	CPEAt         time.Time `json:"cpe_at"`
-	CheckedAt     time.Time `json:"checked_at"`
-	Resumable     bool      `json:"resumable"`
-	Imported      int       `json:"imported"`
-	ImportTotal   int       `json:"import_total"`
-	Feed          string    `json:"feed"`
-	FeedsDone     int       `json:"feeds_done"`
-	FeedsTotal    int       `json:"feeds_total"`
-	Running       bool      `json:"running"`
-	Phase         string    `json:"phase"`
-	Downloaded    int64     `json:"downloaded"`
-	DownloadTotal int64     `json:"download_total"`
-	Error         string    `json:"error,omitempty"`
+	Path          string            `json:"path"`
+	Records       uint64            `json:"records"`
+	CPEs          uint64            `json:"cpes"`
+	Bytes         int64             `json:"bytes"`
+	Initialized   bool              `json:"initialized"`
+	SourceAt      time.Time         `json:"source_at"`
+	CPEAt         time.Time         `json:"cpe_at"`
+	CheckedAt     time.Time         `json:"checked_at"`
+	Resumable     bool              `json:"resumable"`
+	Imported      int               `json:"imported"`
+	ImportTotal   int               `json:"import_total"`
+	Feed          string            `json:"feed"`
+	FeedsDone     int               `json:"feeds_done"`
+	FeedsTotal    int               `json:"feeds_total"`
+	Running       bool              `json:"running"`
+	Phase         string            `json:"phase"`
+	Downloaded    int64             `json:"downloaded"`
+	DownloadTotal int64             `json:"download_total"`
+	ErrorMessage  *apperror.Message `json:"error_message,omitempty"`
+	Error         string            `json:"error,omitempty"`
 }
 type Store struct {
 	db   *bolt.DB
@@ -99,7 +101,7 @@ func Open(dir string, aead cipher.AEAD) (*Store, error) {
 	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: time.Second, InitialMmapSize: 256 << 20,
 		OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {
 			if name != path {
-				return nil, errors.New("unexpected NVD database path")
+				return nil, apperror.New("unexpected_nvd_database_path", "unexpected NVD database path")
 			}
 			return root.OpenFile(Filename, flags, mode)
 		},
@@ -131,7 +133,7 @@ func Open(dir string, aead cipher.AEAD) (*Store, error) {
 			return err
 		}
 		if (s.meta.NVD != "nvd-a" && s.meta.NVD != "nvd-b") || (s.meta.CPE != "cpe-a" && s.meta.CPE != "cpe-b") || s.meta.Hashes == nil {
-			return errors.New("invalid NVD catalogue metadata")
+			return apperror.New("invalid_nvd_catalogue_metadata", "invalid NVD catalogue metadata")
 		}
 		return nil
 	})
@@ -156,7 +158,7 @@ func (s *Store) encode(identity string, value any) ([]byte, error) {
 func (s *Store) decode(identity string, data []byte, out any) error {
 	n := s.aead.NonceSize()
 	if len(data) < n {
-		return errors.New("invalid encrypted NVD record")
+		return apperror.New("invalid_encrypted_nvd_record", "invalid encrypted NVD record")
 	}
 	plain, err := s.aead.Open(nil, data[:n], data[n:], []byte("vulman-nvd-v1:"+identity))
 	if err != nil {
@@ -245,7 +247,7 @@ func changePostings(b *bolt.Bucket, keys []string, id string, add bool) error {
 			}
 			count := bucket.Sequence()
 			if count == 0 {
-				return errors.New("invalid NVD index count")
+				return apperror.New("invalid_nvd_index_count", "invalid NVD index count")
 			}
 			if count == 1 {
 				if err := root.DeleteBucket(hash[:]); err != nil {
@@ -316,7 +318,7 @@ func (s *Store) remove(tx *bolt.Tx, generation, kind, id string) error {
 	}
 	count := records.Sequence()
 	if count == 0 {
-		return errors.New("invalid NVD record count")
+		return apperror.New("invalid_nvd_record_count", "invalid NVD record count")
 	}
 	return records.SetSequence(count - 1)
 }
@@ -380,7 +382,7 @@ func (s *Store) batch(ctx context.Context, rows []json.RawMessage, next int) err
 		}
 		j := m.Job
 		if j == nil || j.Feed >= len(j.Feeds) || next < j.Offset {
-			return errors.New("invalid NVD import checkpoint")
+			return apperror.New("invalid_nvd_import_checkpoint", "invalid NVD import checkpoint")
 		}
 		feed := j.Feeds[j.Feed]
 		generation := j.NVDTarget
@@ -428,7 +430,7 @@ func (s *Store) finishFeed(ctx context.Context, feed Feed, changed bool) error {
 		}
 		j := m.Job
 		if j == nil || j.Feed >= len(j.Feeds) || j.Feeds[j.Feed].ID != feed.ID {
-			return errors.New("invalid completed NVD feed")
+			return apperror.New("invalid_completed_nvd_feed", "invalid completed NVD feed")
 		}
 		if feed.Kind == "cpe" {
 			j.CPEChanged = changed
@@ -450,7 +452,7 @@ func (s *Store) publish(ctx context.Context) error {
 		}
 		j := m.Job
 		if j == nil || j.Feed != len(j.Feeds) {
-			return errors.New("NVD import is incomplete")
+			return apperror.New("nvd_import_is_incomplete", "NVD import is incomplete")
 		}
 		if j.Full {
 			m.NVD = j.NVDTarget
@@ -459,7 +461,7 @@ func (s *Store) publish(ctx context.Context) error {
 			m.CPE = j.CPETarget
 		}
 		if tx.Bucket([]byte(m.NVD)).Bucket([]byte("records")).Sequence() == 0 || tx.Bucket([]byte(m.CPE)).Bucket([]byte("records")).Sequence() == 0 {
-			return errors.New("empty NVD catalogue or CPE dictionary")
+			return apperror.New("empty_nvd_catalogue_or_cpe_dictionary", "empty NVD catalogue or CPE dictionary")
 		}
 		m.Ready = true
 		m.NVDAt = j.NVDAt
@@ -508,7 +510,7 @@ type QueryResult struct {
 	Uncertain bool
 }
 
-var ErrNotReady = errors.New("initialize the local NVD database in Configuration")
+var ErrNotReady = apperror.New("initialize_the_local_nvd_database_in_configuration", "initialize the local NVD database in Configuration")
 
 // Query pages through an inverted index with short read transactions. Publication
 // takes the write lock, so one query consistently uses one catalogue generation.
@@ -530,13 +532,13 @@ func (s *Store) Query(ctx context.Context, name, cpe string) (QueryResult, error
 		}
 		key := productKey(target)
 		if key == "product:*" {
-			return result, errors.New("local matching needs a concrete CPE vendor and product")
+			return result, apperror.New("local_matching_needs_a_concrete_cpe_vendor_and_product", "local matching needs a concrete CPE vendor and product")
 		}
 		keys = []string{key, "product:*"}
 	} else {
 		terms := words(name)
 		if len(terms) == 0 || len(terms[0]) > 256 {
-			return result, errors.New("component name cannot be indexed locally")
+			return result, apperror.New("component_name_cannot_be_indexed_locally", "component name cannot be indexed locally")
 		}
 		keys = []string{"word:" + terms[0]}
 	}
@@ -620,7 +622,7 @@ func (s *Store) Query(ctx context.Context, name, cpe string) (QueryResult, error
 			return nil
 		})
 		if err != nil {
-			return result, fmt.Errorf("could not read the CPE dictionary: %w", err)
+			return result, apperror.Newf("read_cpe", "could not read the CPE dictionary: %w", err)
 		}
 	}
 	return result, nil

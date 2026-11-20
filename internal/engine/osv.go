@@ -1,11 +1,11 @@
 package engine
 
 import (
-	"errors"
 	"slices"
 	"strings"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/osvdb"
 )
@@ -40,7 +40,7 @@ func (e *Engine) updateOSV(rebuild bool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
-		return errors.New("application is stopping")
+		return apperror.New("application_is_stopping", "application is stopping")
 	}
 
 	st, err := e.Store.Read()
@@ -49,7 +49,7 @@ func (e *Engine) updateOSV(rebuild bool) error {
 	}
 
 	if !st.Settings.Sources["osv"] || strings.TrimRight(st.Settings.OSVURL, "/") != model.DefaultOSVURL {
-		return errors.New("enable the default OSV endpoint to update the local catalogue")
+		return apperror.New("osv_default_endpoint_required", "enable the default OSV endpoint to update the local catalogue")
 	}
 
 	e.lastOSVAttempt = time.Now()

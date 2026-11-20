@@ -2176,3 +2176,49 @@ test('live workflow updates preserve the log scroll position and keyboard focus'
   assert.equal(run('updatedLogs.scrollTop'), 148);
   assert.equal(run('updatedLogs.focusOptions.preventScroll'), true);
 });
+
+test('structured errors translate at display time and preserve parameter values and fallback messages', () => {
+  const run = app();
+  run(`const failure = {cause:{code:'project_name_invalid',fallback:'project name must contain 1–120 characters'}}`);
+  assert.match(run('formatError(failure)'), /1–120/);
+  run(`lang='ja'`);
+  assert.equal(run('formatError(failure)'), 'プロジェクト名は1〜120文字で入力してください。');
+  assert.equal(run(`formatError({cause:{code:'upstream_http',params:{arg0:'429'}}})`), '接続先からHTTP 429が返されました。');
+  assert.equal(run(`messageText({code:'context',params:{arg0:'$&<script>'},causes:[{code:'permission_denied'}]})`), '$&<script>: 権限がありません。ファイルまたはツールの実行権限を確認してください。');
+  run(`localizations['fr'] = {name:'Français',messages:{}}; lang='fr'`);
+  assert.equal(run('formatError(failure)'), 'project name must contain 1–120 characters');
+  assert.equal(run(`formatError({cause:{code:'future_code',fallback:'Safe fallback'}})`), 'Safe fallback');
+  assert.match(run(`formatError({cause:{code:'future_code'}})`), /unexpected error/);
+  assert.equal(run(`formatError(new Error('Already translated client message'))`), 'Already translated client message');
+});
+
+test('saved workflow warnings and scanner logs change language without changing saved data', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const savedRun = {
+      warnings:['Legacy warning','Snyk skipped: configure a Snyk token.'],
+      warning_messages:[{code:'legacy',fallback:'Legacy warning'},{code:'scan_snyk_token'}],
+      logs:[{step_id:'scanner',event:'scanner_failed',tool:'trivy',message:{code:'scanner_exit',params:{arg0:'2'}},detail:'old English error'}],
+    };
+  `);
+  assert.match(run(`workflowLogs(savedRun, [])`), /exit 2; no clean scan was recorded/);
+  run(`lang='ja'`);
+  assert.match(run(`workflowLogs(savedRun, [])`), /Trivy.*終了コード2/);
+  assert.doesNotMatch(run(`workflowLogs(savedRun, [])`), /old English error|exit 2/);
+  assert.equal(run(`runWarnings(savedRun)[0]`), 'Legacy warning');
+  assert.equal(run(`runWarnings(savedRun)[1]`), 'Snykをスキップしました。Snykトークンを設定してください。');
+  assert.equal(run(`savedRun.warnings[1]`), 'Snyk skipped: configure a Snyk token.');
+  assert.equal(run(`workflowLogs({logs:[{step_id:'scanner',event:'scanner_failed',detail:'Previous diagnostic'}]}, [])`).includes('Previous diagnostic'), true);
+});
+
+test('database failures, queued errors, and scanner status details use structured translations', () => {
+  const run = app();
+  inventory(run);
+  run(`lang='ja'; const failure = {phase:'failed',error:'English failure',error_message:{code:'upstream_http',params:{arg0:'403'}}};`);
+  for (const render of ['cveDatabaseStatusHTML', 'nvdDatabaseStatusHTML', 'osvDatabaseStatusHTML']) {
+    assert.match(run(`${render}(failure)`), /接続先からHTTP 403/);
+    assert.doesNotMatch(run(`${render}(failure)`), /English failure/);
+  }
+  assert.match(run(`scannerResultHTML('trivy',{status:'failed',platform:'darwin',detail:'English failure',message:{code:'permission_denied'}})`), /権限がありません/);
+});

@@ -4,9 +4,10 @@ package cvedb
 
 import (
 	"encoding/json"
-	"errors"
 	"regexp"
 	"time"
+
+	"vulman/internal/apperror"
 )
 
 const Filename = "vulman-cve.db"
@@ -43,7 +44,7 @@ func Parse(data []byte) (Record, error) {
 		return Record{}, err
 	}
 	if !validID.MatchString(raw.Metadata.ID) || (raw.Metadata.State != "PUBLISHED" && raw.Metadata.State != "REJECTED") {
-		return Record{}, errors.New("invalid CVE record identity or state")
+		return Record{}, apperror.New("invalid_cve_record_identity_or_state", "invalid CVE record identity or state")
 	}
 	var updated time.Time
 	if raw.Metadata.Updated != "" {
@@ -54,7 +55,7 @@ func Parse(data []byte) (Record, error) {
 			updated, err = time.Parse("2006-01-02T15:04:05.999999999", raw.Metadata.Updated)
 		}
 		if err != nil {
-			return Record{}, errors.New("invalid CVE modification date")
+			return Record{}, apperror.New("invalid_cve_modification_date", "invalid CVE modification date")
 		}
 	}
 	r := Record{ID: raw.Metadata.ID, State: raw.Metadata.State, UpdatedAt: updated, Title: raw.Containers.CNA.Title}

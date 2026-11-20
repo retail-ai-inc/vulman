@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/workflow"
 )
@@ -57,10 +58,10 @@ func prepareCommand(dir string, cmd *exec.Cmd, token string) error {
 	}
 	// Require a resolved executable before switching into the project directory.
 	if !filepath.IsAbs(cmd.Path) {
-		return fmt.Errorf("scanner executable must resolve to an absolute path")
+		return apperror.New("scanner_executable_must_resolve_to_an_absolute_path", "scanner executable must resolve to an absolute path")
 	}
 	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.Ext(cmd.Path), ".exe") {
-		return fmt.Errorf("scanner requires a Windows executable")
+		return apperror.New("scanner_requires_a_windows_executable", "scanner requires a Windows executable")
 	}
 
 	configureProcess(cmd)
@@ -92,7 +93,7 @@ func run(ctx context.Context, dir string, cmd *exec.Cmd, token string) ([]byte, 
 	}
 
 	if output.exceeded {
-		return nil, -1, fmt.Errorf("scanner output exceeded 16 MiB")
+		return nil, -1, apperror.New("scanner_output_exceeded_16_mib", "scanner output exceeded 16 MiB")
 	}
 
 	if err != nil {
@@ -124,12 +125,23 @@ func EnabledTools(scanners map[string]bool) []string {
 	return tools
 }
 
-func Scan(ctx context.Context, p model.Project, s model.Settings, dataDir string, report func(ScanEvent)) (findings []model.Finding, warnings []string) {
+// Scan preserves the English CLI report format. Desktop assessments use the
+// structured causes from ScanDetailed so saved warnings follow the UI language.
+func Scan(ctx context.Context, p model.Project, s model.Settings, dataDir string, report func(ScanEvent)) ([]model.Finding, []string) {
+	findings, problems := ScanDetailed(ctx, p, s, dataDir, report)
+	warnings := make([]string, 0, len(problems))
+	for _, problem := range problems {
+		warnings = append(warnings, apperror.Public(problem).English())
+	}
+	return findings, warnings
+}
+
+func ScanDetailed(ctx context.Context, p model.Project, s model.Settings, dataDir string, report func(ScanEvent)) (findings []model.Finding, warnings []error) {
 	findings = []model.Finding{}
-	warnings = []string{}
+	warnings = []error{}
 	enabled := EnabledTools(s.Scanners)
 	if len(enabled) == 0 {
-		return findings, []string{"Code scanning enabled on project, but no scanner is enabled in settings."}
+		return findings, []error{apperror.New("scan_no_tools", "Code scanning enabled on project, but no scanner is enabled in settings.")}
 	}
 
 	type scanTarget struct{ kind, location, key, repository string }
@@ -141,24 +153,24 @@ func Scan(ctx context.Context, p model.Project, s model.Settings, dataDir string
 		targets = append(targets, scanTarget{kind: "remote", location: repository, key: RemoteTargetKey(repository), repository: RepositoryLabel(repository)})
 	}
 	if len(targets) == 0 {
-		return findings, []string{"Code scanning requires a local folder or repository URL."}
+		return findings, []error{apperror.New("scan_no_repository", "Code scanning requires a local folder or repository URL.")}
 	}
 	root, err := openScratchRoot(dataDir, true)
 	if err != nil {
-		return findings, []string{fmt.Sprintf("Could not create temporary scan storage: %v", err)}
+		return findings, []error{apperror.Newf("scan_storage_create", "Could not create temporary scan storage: %w", err)}
 	}
 	defer func() {
 		if err := root.Close(); err != nil {
-			warnings = append(warnings, fmt.Sprintf("Could not close temporary scan storage: %v", err))
+			warnings = append(warnings, apperror.Newf("scan_storage_close", "Could not close temporary scan storage: %w", err))
 		}
 	}()
 	if err := cleanAbandonedScans(root); err != nil {
-		warnings = append(warnings, fmt.Sprintf("Could not remove abandoned scan files: %v", err))
+		warnings = append(warnings, apperror.Newf("scan_abandoned_cleanup", "Could not remove abandoned scan files: %w", err))
 	}
 
 	for _, target := range targets {
 		if err := workflow.Wait(ctx); err != nil {
-			warnings = append(warnings, err.Error())
+			warnings = append(warnings, err)
 			break
 		}
 		items, problems := scanRepository(ctx, root, target.kind, target.location, enabled, s.Tokens, func(event ScanEvent) {
@@ -173,15 +185,15 @@ func Scan(ctx context.Context, p model.Project, s model.Settings, dataDir string
 			items[i].ScanRepository = target.repository
 		}
 		findings = append(findings, items...)
-		label := "Local folder"
-		if target.kind == "remote" {
-			label = "Remote repository"
-			if target.repository != "" {
-				label = target.repository
-			}
-		}
 		for _, problem := range problems {
-			warnings = append(warnings, label+": "+problem)
+			switch {
+			case target.kind == "local":
+				warnings = append(warnings, apperror.Newf("scan_local_target", "Local folder: %w", problem))
+			case target.repository != "":
+				warnings = append(warnings, apperror.Newf("context", "%s: %w", target.repository, problem))
+			default:
+				warnings = append(warnings, apperror.Newf("scan_remote_target", "Remote repository: %w", problem))
+			}
 		}
 	}
 	return findings, warnings
@@ -200,10 +212,10 @@ func RepositoryLabel(repository string) string {
 	return parsed.Host + parsed.EscapedPath()
 }
 
-func scanRepository(ctx context.Context, root *os.Root, kind, location string, enabled []string, tokens map[string]string, report func(ScanEvent)) (findings []model.Finding, warnings []string) {
-	targetFailed := func(err error) ([]model.Finding, []string) {
+func scanRepository(ctx context.Context, root *os.Root, kind, location string, enabled []string, tokens map[string]string, report func(ScanEvent)) (findings []model.Finding, warnings []error) {
+	targetFailed := func(err error) ([]model.Finding, []error) {
 		report(ScanEvent{Phase: "scanner_target_failed", Err: err})
-		return nil, []string{err.Error()}
+		return nil, []error{err}
 	}
 	scratch, err := newScanScratch(root)
 	if err != nil {
@@ -211,7 +223,7 @@ func scanRepository(ctx context.Context, root *os.Root, kind, location string, e
 	}
 	defer func() {
 		if err := scratch.remove(); err != nil {
-			warnings = append(warnings, fmt.Sprintf("Could not remove temporary scan files: %v", err))
+			warnings = append(warnings, apperror.Newf("scan_cleanup", "Could not remove temporary scan files: %w", err))
 			report(ScanEvent{Phase: "scanner_cleanup_failed", Err: err})
 			return
 		}
@@ -227,12 +239,12 @@ func scanRepository(ctx context.Context, root *os.Root, kind, location string, e
 
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
-		return targetFailed(fmt.Errorf("repository folder is unavailable"))
+		return targetFailed(apperror.New("repository_folder_is_unavailable", "repository folder is unavailable"))
 	}
 
 	for _, name := range enabled {
 		if err := workflow.Wait(ctx); err != nil {
-			warnings = append(warnings, err.Error())
+			warnings = append(warnings, err)
 			break
 		}
 		var token string
@@ -241,7 +253,7 @@ func scanRepository(ctx context.Context, root *os.Root, kind, location string, e
 		}
 		if name == "snyk" && token == "" {
 			report(ScanEvent{Phase: "scanner_missing_token", Tool: name})
-			warnings = append(warnings, "Snyk skipped: configure a Snyk token.")
+			warnings = append(warnings, apperror.New("scan_snyk_token", "Snyk skipped: configure a Snyk token."))
 			continue
 		}
 
@@ -254,7 +266,7 @@ func scanRepository(ctx context.Context, root *os.Root, kind, location string, e
 				phase = "scanner_interrupted"
 			}
 			report(ScanEvent{Phase: phase, Tool: name, Err: err})
-			warnings = append(warnings, fmt.Sprintf("%s: %v", name, err))
+			warnings = append(warnings, apperror.Newf("scanner_tool_failed", "%s: %w", name, err))
 			continue
 		}
 		findings = append(findings, items...)
@@ -292,9 +304,9 @@ func cloneRepository(ctx context.Context, location string, scratch *scanScratch,
 		if err == nil && code == 0 {
 			return dir, nil
 		}
-		return "", fmt.Errorf("repository clone failed. Check HTTPS access and whether the GitHub token has read access to this repository")
+		return "", apperror.New("repository_clone_access_failed", "repository clone failed. Check HTTPS access and whether the GitHub token has read access to this repository")
 	}
-	return "", fmt.Errorf("repository clone failed. Check Git and HTTPS access. For private repositories, configure a GitHub token with read access")
+	return "", apperror.New("repository_clone_failed", "repository clone failed. Check Git and HTTPS access. For private repositories, configure a GitHub token with read access")
 }
 
 func scanTool(ctx context.Context, dir string, scratch *scanScratch, name, token string, started func()) ([]model.Finding, error) {
@@ -321,7 +333,7 @@ func scanTool(ctx context.Context, dir string, scratch *scanScratch, name, token
 	}
 	allowed := code == 0 || (name != "trivy" && code == 1) || (name == "govulncheck" && code == 3)
 	if !allowed {
-		return nil, fmt.Errorf("exit %d; no clean scan was recorded", code)
+		return nil, apperror.Newf("scanner_exit", "exit %d; no clean scan was recorded", code)
 	}
 	return Parse(name, data)
 }
@@ -368,7 +380,7 @@ func Parse(name string, data []byte) ([]model.Finding, error) {
 		}
 
 		if doc.Error != nil || doc.Vulnerabilities == nil {
-			return nil, fmt.Errorf("npm audit returned an error or unsupported report (requires npm 7+)")
+			return nil, apperror.New("npm_report_invalid", "npm audit returned an error or unsupported report (requires npm 7+)")
 		}
 
 		for pkg, v := range doc.Vulnerabilities {
@@ -408,7 +420,7 @@ func Parse(name string, data []byte) ([]model.Finding, error) {
 		}
 
 		if len(doc.Advisories) == 0 || string(doc.Advisories) == "null" {
-			return nil, fmt.Errorf("composer report has no advisories field")
+			return nil, apperror.New("composer_report_has_no_advisories_field", "composer report has no advisories field")
 		}
 
 		if string(bytes.TrimSpace(doc.Advisories)) == "[]" {
@@ -446,7 +458,7 @@ func Parse(name string, data []byte) ([]model.Finding, error) {
 		}
 
 		if doc.SchemaVersion == 0 {
-			return nil, fmt.Errorf("unsupported Trivy report")
+			return nil, apperror.New("unsupported_trivy_report", "unsupported Trivy report")
 		}
 
 		for _, r := range doc.Results {
@@ -464,7 +476,7 @@ func Parse(name string, data []byte) ([]model.Finding, error) {
 				return nil, err
 			}
 			if len(docs) == 0 {
-				return nil, fmt.Errorf("empty Snyk report")
+				return nil, apperror.New("empty_snyk_report", "empty Snyk report")
 			}
 		} else {
 			docs = []json.RawMessage{data}
@@ -486,7 +498,7 @@ func Parse(name string, data []byte) ([]model.Finding, error) {
 			}
 
 			if doc.Error != nil || doc.OK == nil {
-				return nil, fmt.Errorf("Snyk returned an error or unsupported report") //nolint:staticcheck
+				return nil, apperror.New("snyk_returned_an_error_or_unsupported_report", "Snyk returned an error or unsupported report")
 			}
 
 			for _, v := range doc.Vulnerabilities {
@@ -534,7 +546,7 @@ func Parse(name string, data []byte) ([]model.Finding, error) {
 			}
 
 			if msg.Config == nil && msg.Progress == nil && msg.SBOM == nil && msg.OSV == nil && msg.Finding == nil {
-				return nil, fmt.Errorf("unrecognized govulncheck message")
+				return nil, apperror.New("unrecognized_govulncheck_message", "unrecognized govulncheck message")
 			}
 
 			count++
@@ -573,10 +585,10 @@ func Parse(name string, data []byte) ([]model.Finding, error) {
 		}
 
 		if count == 0 {
-			return nil, fmt.Errorf("empty govulncheck report")
+			return nil, apperror.New("empty_govulncheck_report", "empty govulncheck report")
 		}
 	default:
-		return nil, fmt.Errorf("unsupported scanner")
+		return nil, apperror.New("unsupported_scanner", "unsupported scanner")
 	}
 	return out, nil
 }

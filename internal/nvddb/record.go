@@ -4,10 +4,11 @@ package nvddb
 
 import (
 	"encoding/json"
-	"errors"
 	"regexp"
 	"strings"
 	"unicode"
+
+	"vulman/internal/apperror"
 )
 
 const Filename = "vulman-nvd.db"
@@ -86,7 +87,7 @@ func indexKeys(kind string, raw json.RawMessage) (string, []string, error) {
 			return "", nil, err
 		}
 		if !cveID.MatchString(r.ID) {
-			return "", nil, errors.New("invalid NVD CVE identity")
+			return "", nil, apperror.New("invalid_nvd_cve_identity", "invalid NVD CVE identity")
 		}
 		id = r.ID
 		if !strings.EqualFold(r.VulnStatus, "Rejected") {
@@ -124,12 +125,12 @@ func indexKeys(kind string, raw json.RawMessage) (string, []string, error) {
 		}
 		_, err := parseCPE(c.Name)
 		if err != nil || c.ID == "" || len(c.ID) > 100 || strings.ContainsRune(c.ID, 0) {
-			return "", nil, errors.New("invalid CPE dictionary record")
+			return "", nil, apperror.New("invalid_cpe_dictionary_record", "invalid CPE dictionary record")
 		}
 		id = c.ID
 		keys["name:"+strings.ToLower(c.Name)] = true
 	} else {
-		return "", nil, errors.New("invalid NVD dataset")
+		return "", nil, apperror.New("invalid_nvd_dataset", "invalid NVD dataset")
 	}
 	for _, word := range words(text) {
 		if len(word) <= 256 {

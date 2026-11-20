@@ -20,6 +20,8 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+
+	"vulman/internal/apperror"
 )
 
 const (
@@ -49,7 +51,7 @@ func (r release) at() (time.Time, error) {
 func (r release) archive(base bool) (Archive, error) {
 	at, err := r.at()
 	if err != nil || r.Draft || r.Prerelease {
-		return Archive{}, errors.New("invalid CVE release")
+		return Archive{}, apperror.New("invalid_cve_release", "invalid CVE release")
 	}
 	marker := "_delta_CVEs_at_"
 	if base {
@@ -62,28 +64,30 @@ func (r release) archive(base bool) (Archive, error) {
 		}
 		u, err := url.Parse(asset.URL)
 		if err != nil || u.Scheme != "https" || u.Host != "github.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || !strings.HasPrefix(u.Path, "/CVEProject/cvelistV5/releases/download/") {
-			return Archive{}, errors.New("unexpected CVE archive URL")
+			return Archive{}, apperror.New("unexpected_cve_archive_url", "unexpected CVE archive URL")
 		}
 		digest, err := hex.DecodeString(strings.TrimPrefix(asset.Digest, "sha256:"))
 		if !strings.HasPrefix(asset.Digest, "sha256:") || err != nil || len(digest) != sha256.Size || asset.Size <= 0 || asset.Size > maxArchiveBytes {
-			return Archive{}, errors.New("CVE archive has invalid size or SHA-256 digest")
+			return Archive{}, apperror.New("cve_archive_has_invalid_size_or_sha_256_digest", "CVE archive has invalid size or SHA-256 digest")
 		}
 		return Archive{Name: asset.Name, URL: asset.URL, Digest: asset.Digest, Size: asset.Size, At: at, Base: base}, nil
 	}
-	return Archive{}, errors.New("CVE release archive is unavailable")
+	return Archive{}, apperror.New("cve_release_archive_is_unavailable", "CVE release archive is unavailable")
 }
 
 // Updater runs independently of project assessments. Its context is owned by
 // the engine so closing or switching a workspace cancels and joins its work.
 type Updater struct {
-	store             *Store
-	HTTP              *http.Client
-	apiURL            string
-	mu                sync.Mutex
-	cancel            context.CancelFunc
-	wg                sync.WaitGroup
-	closed            bool
-	phase             string
+	store       *Store
+	HTTP        *http.Client
+	apiURL      string
+	mu          sync.Mutex
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	closed      bool
+	phase       string
+	lastFailure error
+
 	downloaded, total int64
 	importTotal       int
 	lastError         string
@@ -94,11 +98,11 @@ func NewUpdater(s *Store) *Updater {
 		Timeout: 20 * time.Minute,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 || req.URL.Scheme != "https" || req.URL.User != nil {
-				return errors.New("unsafe CVE download redirect")
+				return apperror.New("unsafe_cve_download_redirect", "unsafe CVE download redirect")
 			}
 			host := req.URL.Hostname()
 			if host != "github.com" && host != "api.github.com" && host != "release-assets.githubusercontent.com" && host != "objects.githubusercontent.com" {
-				return errors.New("unexpected CVE download host")
+				return apperror.New("unexpected_cve_download_host", "unexpected CVE download host")
 			}
 			return nil
 		},
@@ -126,6 +130,7 @@ func (u *Updater) Stats() (Stats, error) {
 	u.mu.Lock()
 	s.Running, s.Phase = u.cancel != nil, u.phase
 	s.Downloaded, s.DownloadTotal, s.Error = u.downloaded, u.total, u.lastError
+	s.ErrorMessage = apperror.Public(u.lastFailure)
 	s.ImportTotal = u.importTotal
 	u.mu.Unlock()
 	if !s.Running && s.Resumable && s.Error == "" {
@@ -146,13 +151,14 @@ func (u *Updater) start(parent context.Context, rebuild bool) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.closed {
-		return errors.New("CVE database is closing")
+		return apperror.New("cve_database_is_closing", "CVE database is closing")
 	}
 	if u.cancel != nil {
-		return errors.New("CVE database update is already running")
+		return apperror.New("cve_database_update_is_already_running", "CVE database update is already running")
 	}
 	ctx, cancel := context.WithCancel(parent)
 	u.cancel, u.phase, u.lastError = cancel, "checking", ""
+	u.lastFailure = nil
 	u.downloaded, u.total = 0, 0
 	u.importTotal = 0
 	u.wg.Add(1)
@@ -167,7 +173,8 @@ func (u *Updater) start(parent context.Context, rebuild bool) error {
 		if errors.Is(err, context.Canceled) {
 			u.phase = "interrupted"
 		} else if err != nil {
-			u.phase, u.lastError = "failed", err.Error()
+			u.phase, u.lastError = "failed", apperror.Public(err).English()
+			u.lastFailure = err
 		}
 	}()
 	return nil
@@ -214,7 +221,7 @@ func (u *Updater) get(ctx context.Context, endpoint string, consume func(*http.R
 		if seconds, parseErr := strconv.Atoi(resp.Header.Get("Retry-After")); parseErr == nil && seconds > 0 {
 			if seconds > 30 {
 				_ = resp.Body.Close()
-				return errors.New("CVE download rate limited; retry later")
+				return apperror.New("cve_download_rate_limited_retry_later", "CVE download rate limited; retry later")
 			}
 			delay = time.Duration(seconds) * time.Second
 		} else if until, parseErr := http.ParseTime(resp.Header.Get("Retry-After")); parseErr == nil && time.Until(until) > delay {
@@ -224,7 +231,7 @@ func (u *Updater) get(ctx context.Context, endpoint string, consume func(*http.R
 			return err
 		}
 		if delay > 30*time.Second || attempt == 2 || (status != 429 && status != 502 && status != 503 && status != 504) {
-			return fmt.Errorf("CVE download returned HTTP %d; retry later", status)
+			return apperror.Newf("cve_download_http", "CVE download returned HTTP %d; retry later", status)
 		}
 		u.progress("waiting", 0, 0)
 		timer := time.NewTimer(delay)
@@ -235,7 +242,7 @@ func (u *Updater) get(ctx context.Context, endpoint string, consume func(*http.R
 		case <-timer.C:
 		}
 	}
-	return errors.New("CVE download failed")
+	return apperror.New("cve_download_failed", "CVE download failed")
 }
 
 func (u *Updater) readJSON(ctx context.Context, endpoint string, out any) error {
@@ -245,7 +252,7 @@ func (u *Updater) readJSON(ctx context.Context, endpoint string, out any) error 
 			return err
 		}
 		if len(data) > 16<<20 {
-			return errors.New("CVE release metadata exceeds size limit")
+			return apperror.New("cve_release_metadata_exceeds_size_limit", "CVE release metadata exceeds size limit")
 		}
 		return json.Unmarshal(data, out)
 	})
@@ -314,7 +321,7 @@ func (u *Updater) plan(ctx context.Context, latest release, since time.Time) ([]
 		archives, complete = build(since)
 	}
 	if !complete {
-		return nil, errors.New("CVE release history has a gap; retry when complete archives are available")
+		return nil, apperror.New("cve_release_gap", "CVE release history has a gap; retry when complete archives are available")
 	}
 	if base {
 		a, err := latest.archive(true)
@@ -418,7 +425,7 @@ func (u *Updater) download(ctx context.Context, a Archive) error {
 		r := &contextReader{ctx: ctx, reader: resp.Body, report: func(n int64) { u.progress("downloading", n, a.Size) }}
 		n, copyErr := io.Copy(io.MultiWriter(f, hash), io.LimitReader(r, a.Size+1))
 		if copyErr == nil && (n != a.Size || "sha256:"+hex.EncodeToString(hash.Sum(nil)) != a.Digest) {
-			copyErr = errors.New("CVE archive size or SHA-256 verification failed")
+			copyErr = apperror.New("cve_archive_size_or_sha_256_verification_failed", "CVE archive size or SHA-256 verification failed")
 		}
 		if copyErr == nil {
 			copyErr = f.Sync()
@@ -452,7 +459,7 @@ func (u *Updater) openZIP(ctx context.Context) (*zip.Reader, func(), error) {
 	}
 	if len(z.File) != 1 || !strings.HasSuffix(z.File[0].Name, ".zip") || z.File[0].UncompressedSize64 > uint64(maxArchiveBytes) {
 		closeOuter()
-		return nil, nil, errors.New("Unsupported CVE archive layout") // nolint:staticcheck
+		return nil, nil, apperror.New("unsupported_cve_archive_layout", "Unsupported CVE archive layout")
 	}
 	r, err := z.File[0].Open()
 	if err != nil {
@@ -470,7 +477,7 @@ func (u *Updater) openZIP(ctx context.Context) (*zip.Reader, func(), error) {
 	closeOuter()
 	closeInner := func() { _ = inner.Close(); _ = u.store.root.Remove(innerFile) }
 	if err == nil && n > maxArchiveBytes {
-		err = errors.New("nested CVE archive exceeds size limit")
+		err = apperror.New("nested_cve_archive_exceeds_size_limit", "nested CVE archive exceeds size limit")
 	}
 	if err == nil {
 		z, err = zip.NewReader(inner, n)
@@ -498,13 +505,13 @@ func (u *Updater) importArchive(ctx context.Context, a Archive) error {
 	var expanded uint64
 	for _, f := range z.File {
 		if f.UncompressedSize64 > maxExpandedBytes-expanded {
-			return errors.New("expanded CVE archive exceeds size limit")
+			return apperror.New("expanded_cve_archive_exceeds_size_limit", "expanded CVE archive exceeds size limit")
 		}
 		expanded += f.UncompressedSize64
 	}
 	pending := u.store.snapshot().Pending
 	if pending.Next > len(z.File) {
-		return errors.New("CVE archive does not match saved import checkpoint")
+		return apperror.New("cve_archive_does_not_match_saved_import_checkpoint", "CVE archive does not match saved import checkpoint")
 	}
 
 	// The durable checkpoint counts ZIP entries, including non-record members.
@@ -520,10 +527,10 @@ func (u *Updater) importArchive(ctx context.Context, a Archive) error {
 		if validID.MatchString(id) && strings.HasSuffix(f.Name, ".json") {
 			r, err := readRecord(f)
 			if err != nil {
-				return fmt.Errorf("%s: %w", id, err)
+				return apperror.Newf("context", "%s: %w", id, err)
 			}
 			if r.ID != id {
-				return errors.New("CVE archive record identity mismatch")
+				return apperror.New("cve_archive_record_identity_mismatch", "CVE archive record identity mismatch")
 			}
 			batch = append(batch, r)
 			batchBytes += f.UncompressedSize64
@@ -561,7 +568,7 @@ func (u *Updater) importArchive(ctx context.Context, a Archive) error {
 
 func readRecord(f *zip.File) (Record, error) {
 	if f.UncompressedSize64 > 8<<20 {
-		return Record{}, errors.New("CVE record exceeds size limit")
+		return Record{}, apperror.New("cve_record_exceeds_size_limit", "CVE record exceeds size limit")
 	}
 	r, err := f.Open()
 	if err != nil {
@@ -572,7 +579,7 @@ func readRecord(f *zip.File) (Record, error) {
 		return Record{}, err
 	}
 	if len(data) > 8<<20 {
-		return Record{}, errors.New("CVE record exceeds size limit")
+		return Record{}, apperror.New("cve_record_exceeds_size_limit", "CVE record exceeds size limit")
 	}
 	return Parse(data)
 }
