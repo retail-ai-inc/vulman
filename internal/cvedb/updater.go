@@ -452,7 +452,7 @@ func (u *Updater) openZIP(ctx context.Context) (*zip.Reader, func(), error) {
 	}
 	if len(z.File) != 1 || !strings.HasSuffix(z.File[0].Name, ".zip") || z.File[0].UncompressedSize64 > uint64(maxArchiveBytes) {
 		closeOuter()
-		return nil, nil, errors.New("unsupported CVE archive layout")
+		return nil, nil, errors.New("Unsupported CVE archive layout") // nolint:staticcheck
 	}
 	r, err := z.File[0].Open()
 	if err != nil {
