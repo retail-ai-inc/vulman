@@ -122,6 +122,10 @@ func runUsesRemovedComponent(run model.Run, removed map[string]bool) bool {
 }
 
 func runUsesRemovedLocation(run model.Run, removed, labels map[string]bool, allLocationsRemoved bool) bool {
+	if run.ScanTarget != "" {
+		return allLocationsRemoved || removed[run.ScanTarget]
+	}
+
 	if len(run.ScanTargets) != 0 {
 		return allLocationsRemoved || slices.ContainsFunc(run.ScanTargets, func(target string) bool { return removed[target] })
 	}

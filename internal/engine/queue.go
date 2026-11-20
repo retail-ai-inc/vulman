@@ -349,6 +349,6 @@ func (e *Engine) controlQueued(projectID string, a activeRun, action string) err
 
 		return errors.Join(failures...)
 	default:
-		return apperror.Newf("queued_actions", "queued syncs can only be cancelled, retried, or started with available data for project %s", projectID)
+		return apperror.Newf("queued_actions", "queued assessments can only be cancelled, retried, or started with available data for project %s", projectID)
 	}
 }

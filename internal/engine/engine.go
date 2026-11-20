@@ -45,8 +45,8 @@ type activeRun struct {
 }
 
 var ErrAssetNotFound = apperror.New("tech_stack_component_not_found", "tech stack component not found")
-var ErrInvalidMode = apperror.New("invalid_sync_mode", "invalid sync mode")
-var ErrInvalidSeverity = apperror.New("invalid_sync_severity", "invalid sync severity")
+var ErrInvalidMode = apperror.New("invalid_sync_mode", "invalid assessment mode")
+var ErrInvalidSeverity = apperror.New("invalid_sync_severity", "invalid assessment severity")
 
 const codeScanMode = "code"
 
@@ -187,6 +187,11 @@ func (e *Engine) StartAssetMode(id, trigger, assetID, mode string) error {
 }
 
 func (e *Engine) StartFiltered(id, trigger, assetID, mode, severity string) error {
+	return e.StartScoped(id, trigger, assetID, "", mode, severity)
+}
+
+// StartScoped assesses inventory, or scans one registered repository in isolation.
+func (e *Engine) StartScoped(id, trigger, assetID, scanTarget, mode, severity string) error {
 	severity = strings.ToUpper(strings.TrimSpace(severity))
 	if severity == "ALL" {
 		severity = ""
@@ -206,14 +211,22 @@ func (e *Engine) StartFiltered(id, trigger, assetID, mode, severity string) erro
 		return ErrInvalidMode
 	}
 
-	return e.startRun(id, trigger, assetID, mode, severity)
+	if scanTarget != "" {
+		if assetID != "" || mode != "auto" {
+			return apperror.New("repository_scan_scope_invalid", "Select either a component or a repository. Repository scans use normal assessment mode.")
+		}
+
+		mode = codeScanMode
+	}
+
+	return e.startRun(id, trigger, assetID, scanTarget, mode, severity)
 }
 
 func (e *Engine) StartCodeScan(id string) error {
-	return e.startRun(id, "manual", "", codeScanMode, "")
+	return e.startRun(id, "manual", "", "", codeScanMode, "")
 }
 
-func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
+func (e *Engine) startRun(id, trigger, assetID, scanTarget, mode, severity string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -233,7 +246,12 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 			}
 
 			if p.Syncing {
-				return apperror.New("project_is_already_syncing", "project is already syncing")
+				return apperror.New("project_is_already_syncing", "an assessment is already running for this project")
+			}
+
+			scanProject, ok := projectForScanTarget(*p, scanTarget)
+			if !ok {
+				return apperror.New("scan_repository_not_registered", "The selected repository is no longer registered in this project.")
 			}
 
 			settings = st.Settings
@@ -263,6 +281,11 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 			p.Syncing = true
 			now := time.Now()
 			run := model.Run{ID: runID, StartedAt: now, Status: "running", Trigger: trigger, AssetID: assetID, AssetName: assetName, Mode: mode, Severity: severity, Warnings: []string{}, Steps: planSteps(*p, settings, assetID)}
+			run.ScanTarget = scanTarget
+			if scanTarget != "" && scanTarget != "local" {
+				run.ScanRepository = scanner.RepositoryLabel(scanProject.Repositories()[0])
+			}
+
 			waits, err := e.databaseDependenciesForAsset(*p, settings, mode, assetID)
 			if err != nil {
 				return err
@@ -316,13 +339,13 @@ func (e *Engine) startRun(id, trigger, assetID, mode, severity string) error {
 			}
 		}
 
-		e.assess(snapshot, settings, runID, assetID, mode, severity, control)
+		e.assess(snapshot, settings, runID, assetID, scanTarget, mode, severity, control)
 	}()
 
 	return nil
 }
 
-func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode, severity string, control *workflow.Control) {
+func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, scanTarget, mode, severity string, control *workflow.Control) {
 	tracker := newTracker(e.Store, p.ID, runID)
 	s = model.EffectiveSettings(s)
 	ctx := sources.WithMode(control.Context(), mode)
@@ -474,17 +497,19 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 		scannerSkipReason = "scanner_skipped_disabled"
 	case mode == "local":
 		scannerSkipReason = "scanner_skipped_cache"
-		addWarning(apperror.New("assessment_scanners_skipped", "Cache-only assessment skips repository scanners; run normal sync for complete scanner coverage."))
+		addWarning(apperror.New("assessment_scanners_skipped", "Reassessing from local data skips repository scanners; run a normal assessment for complete scanner coverage."))
 	case workflow.Wait(ctx) != nil:
 		scannerSkipReason = "scanner_skipped_ended"
 	}
 
-	tracker.scannerSetup(p, scanner.EnabledTools(s.Scanners), scannerSkipReason)
+	// The target was validated against this immutable snapshot before starting.
+	scanProject, _ := projectForScanTarget(p, scanTarget)
+	tracker.scannerSetup(scanProject, scanner.EnabledTools(s.Scanners), scannerSkipReason)
 
 	if scannerSkipReason == "" {
 		tracker.start("scanner")
 		scannersCompleted := 0
-		items, warns := scanner.ScanDetailed(ctx, p, s, filepath.Dir(e.Store.Paths().Database), func(event scanner.ScanEvent) {
+		items, warns := scanner.ScanDetailed(ctx, scanProject, s, filepath.Dir(e.Store.Paths().Database), func(event scanner.ScanEvent) {
 			if event.Phase == "scanner_completed" {
 				scannersCompleted++
 			}
@@ -524,15 +549,15 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 	defer delete(e.active, p.ID)
 	status := "complete"
 	previous := p.Findings
-	var inventoryFindings []model.Finding
+	var preservedFindings []model.Finding
 
 	if mode == codeScanMode {
 		previous = nil
 		for _, finding := range p.Findings {
-			if finding.Match == "scanner" {
+			if finding.Match == "scanner" && (scanTarget == "" || findingInScanTarget(finding, p, scanTarget)) {
 				previous = append(previous, finding)
 			} else {
-				inventoryFindings = append(inventoryFindings, finding)
+				preservedFindings = append(preservedFindings, finding)
 			}
 		}
 	}
@@ -560,8 +585,8 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, mode,
 	}
 
 	all = retainOutsideScope(all, previous, assetID, severity)
-	if len(inventoryFindings) > 0 {
-		all = sources.Merge(append(all, inventoryFindings...))
+	if len(preservedFindings) > 0 {
+		all = sources.Merge(append(all, preservedFindings...))
 	}
 
 	if control.Stopped() {

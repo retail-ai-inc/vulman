@@ -351,9 +351,10 @@ func (d *Desktop) DeleteRun(id, runID string) (resultErr error) {
 }
 
 type SyncInput struct {
-	AssetID  string `json:"asset_id"`
-	Mode     string `json:"mode"`
-	Severity string `json:"severity"`
+	AssetID    string `json:"asset_id"`
+	ScanTarget string `json:"scan_target"`
+	Mode       string `json:"mode"`
+	Severity   string `json:"severity"`
 }
 
 func (d *Desktop) Sync(id string, in SyncInput) (resultErr error) {
@@ -363,7 +364,7 @@ func (d *Desktop) Sync(id string, in SyncInput) (resultErr error) {
 
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.engine.StartFiltered(id, "manual", in.AssetID, in.Mode, in.Severity)
+	return d.engine.StartScoped(id, "manual", in.AssetID, in.ScanTarget, in.Mode, in.Severity)
 }
 
 func (d *Desktop) ScanCode(id string) (resultErr error) {

@@ -54,7 +54,7 @@ func (c *Client) localNVD(ctx context.Context, a model.Asset, s model.Settings, 
 		warning = apperror.New("local_nvd_data_is_stale_update_the_nvd_database", "local NVD data is stale; update the NVD database")
 	}
 	if result.Uncertain {
-		warning = errors.Join(warning, apperror.New("nvd_local_match_uncertain", "local CPE applicability needs review; use normal sync for NVD API validation"))
+		warning = errors.Join(warning, apperror.New("nvd_local_match_uncertain", "local CPE applicability needs review; use a normal assessment for NVD API validation"))
 	}
 	phase, status := "cached", "cache"
 	if stale || result.Uncertain {

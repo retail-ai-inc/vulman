@@ -57,6 +57,8 @@ type Run struct {
 	Mode            string             `json:"mode,omitempty"`
 	Severity        string             `json:"severity,omitempty"`
 	ScanTargets     []string           `json:"scan_targets,omitempty"`
+	ScanTarget      string             `json:"scan_target,omitempty"`
+	ScanRepository  string             `json:"scan_repository,omitempty"`
 	DataCheckedAt   time.Time          `json:"data_checked_at"`
 	PausedAt        time.Time          `json:"paused_at"`
 	PausedSeconds   float64            `json:"paused_seconds,omitempty"`

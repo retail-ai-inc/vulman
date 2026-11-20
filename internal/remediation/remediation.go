@@ -43,7 +43,7 @@ func Public(f model.Finding, lang string) Advice {
 	if lang == "ja" {
 		text += "\n\n変更後にテストを実行し、登録バージョンを更新して再評価してください。"
 	} else {
-		text += "\n\nAfter applying a verified fix, run your tests, update the registered component version, and sync again."
+		text += "\n\nAfter applying a verified fix, run your tests, update the registered component version, and reassess the project."
 	}
 	return Advice{Provider: "public", Text: text, References: f.References}
 }

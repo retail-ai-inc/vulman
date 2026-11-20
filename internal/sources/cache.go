@@ -16,7 +16,7 @@ import (
 )
 
 var ErrRejected = apperror.New("cve_record_is_rejected", "CVE record is rejected")
-var ErrCacheMiss = apperror.New("no_cached_data_is_available_use_normal_sync_or_force_refresh", "no cached data is available; use normal sync or force refresh")
+var ErrCacheMiss = apperror.New("no_cached_data_is_available_use_normal_sync_or_force_refresh", "no cached data is available; use a normal assessment or force refresh")
 
 type optionsKey struct{}
 

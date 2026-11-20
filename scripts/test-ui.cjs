@@ -15,7 +15,7 @@ function app(byName) {
   const elements = new Map();
   const document = {
     querySelector(selector) {
-      if (!elements.has(selector)) elements.set(selector, {listeners:{}, addEventListener(type,callback) {this.listeners[type]=callback;}, insertAdjacentHTML(position,html) {this.insertedHTML=html;}, innerHTML:''});
+      if (!elements.has(selector)) elements.set(selector, {listeners:{}, addEventListener(type,callback) {this.listeners[type]=callback;}, setAttribute(name,value) {this[name]=value;}, insertAdjacentHTML(position,html) {this.insertedHTML=html;}, innerHTML:''});
       return elements.get(selector);
     },
     querySelectorAll() {return [];},
@@ -532,19 +532,43 @@ test('sync defaults to everything and keeps a selected component on redraw', () 
   const run = app();
   run(`var p={id:'p',assets:[{id:'a',kind:'database',name:'PostgreSQL',version:'16'}]};`);
   let html = run('syncControls(p)');
+  assert.match(html, /data-action="sync"[^>]*>[^]*?Match VDBs &amp; Scan Code<\/button>/);
   assert.match(html, /<option value="">Everything<\/option>/);
   assert.doesNotMatch(html.match(/<select id="sync-asset"[\s\S]*?<\/select>/)[0], / selected/);
   assert.match(html, /Database · PostgreSQL 16/);
   run(`syncSelection.p='a'`);
   assert.match(run('syncControls(p)'), /value="a" selected/);
+  assert.match(run('syncControls(p)'), /data-action="sync"[^>]*>[^]*?Match VDBs<\/button>/);
   run('p.assets=[]');
   assert.doesNotMatch(run('syncControls(p)').match(/<select id="sync-asset"[\s\S]*?<\/select>/)[0], / selected/);
+});
+
+test('assessment action wording follows component and local-data selections without changing request modes', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const selection={value:'shared',dataset:{syncProject:'p'},matches:selector=>selector==='[data-sync-project]'};
+    document.listeners.change({target:selection});
+  `);
+  assert.match(run(`$('#project-assessment-action').innerHTML`), /Match VDBs$/);
+  assert.doesNotMatch(run(`componentSyncControls(state.projects[0],state.projects[0].assets[0])`), /Scan Code<\/button>/);
+  run(`selection.value='';document.listeners.change({target:selection})`);
+  assert.match(run(`$('#project-assessment-action').innerHTML`), /Match VDBs &amp; Scan Code$/);
+  run(`
+    const modeSelection={value:'local',dataset:{syncModeProject:'p'},matches:selector=>selector==='[data-sync-mode-project]'};
+    document.listeners.change({target:modeSelection});
+  `);
+  assert.match(run(`$('#project-assessment-action').innerHTML`), /Match VDBs$/);
+  assert.equal(run('syncModeSelection.p'), 'local');
+  run(`modeSelection.value='auto';lang='ja';document.listeners.change({target:modeSelection})`);
+  assert.match(run(`$('#project-assessment-action').innerHTML`), /VDB照合・コードスキャン$/);
+  assert.match(run(`componentSyncControls(state.projects[0],state.projects[0].assets[0])`), />VDB照合<\/button>/);
 });
 
 test('sync selection is localized and component names are escaped', () => {
   const run=app();
   const html=run(`lang='ja';syncControls({id:'p',assets:[{id:'a',kind:'library',name:'<script>',version:'1'}]})`);
-  assert.match(html,/技術スタック別の同期/);
+  assert.match(html,/照合する技術スタック/);
   assert.match(html,/すべて/);
   assert.match(html,/&lt;script&gt;/);
   assert.doesNotMatch(html,/<script>/);
@@ -559,6 +583,68 @@ test('sync requests distinguish everything from one component',async()=>{
     ['Sync','p',{}],
     ['Sync','p',{asset_id:'a'}]
   ]);
+});
+
+test('assessment selection scans one registered repository and restores component modes', async () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const target='remote:'+'a'.repeat(64);
+    state.scan_repositories={p:[{key:target,label:'github.com/owner/registered'}]};
+    const project=state.projects[0];
+    syncModeSelection.p='local';
+    const selection={value:scanLocationKey('p',target),dataset:{syncProject:'p'},matches:selector=>selector==='[data-sync-project]'};
+    document.listeners.change({target:selection});
+  `);
+  assert.match(run('syncControls(project)'), /Match by tech stack & repository/);
+  assert.match(run('syncControls(project)'), /Code scanner · github\.com\/owner\/registered/);
+  assert.match(run('syncControls(project)'), / selected>Code scanner · github\.com\/owner\/registered/);
+  assert.match(run('syncControls(project)'), /id="sync-mode"[^>]*disabled/);
+  assert.match(run('syncControls(project)'), /value="auto" selected/);
+  assert.match(run('syncControls(project)'), /data-action="sync"[^>]*>[^]*?Scan code<\/button>/);
+  assert.equal(run(`$('#sync-mode').disabled`), true);
+  assert.equal(run(`$('#sync-mode').value`), 'auto');
+  run(`var calls=[];invoke=async(...args)=>calls.push(args);refresh=async()=>{};toast=()=>{};`);
+  await run(`syncProject('p',selection.value,'local','HIGH')`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls)')), [
+    ['Sync','p',{scan_target:'remote:'+'a'.repeat(64),severity:'HIGH'}],
+  ]);
+  run(`selection.value='shared';document.listeners.change({target:selection})`);
+  assert.equal(run(`$('#sync-mode').disabled`), false);
+  assert.equal(run(`$('#sync-mode').value`), 'local');
+  run(`lang='ja'`);
+  assert.match(run('syncControls(project)'), /照合する技術スタック・リポジトリ/);
+  run(`delete state.scan_repositories.p;syncSelection.p=scanLocationKey('p',target)`);
+  assert.doesNotMatch(run('syncControls(project)'), /value="[^\"]*remote/);
+  assert.doesNotMatch(run('syncControls(project)'), /技術スタック・リポジトリ/);
+});
+
+test('repository labels follow the vulnerability filter project scope in both languages', () => {
+  const run = app();
+  inventory(run);
+  run(`state.scan_repositories={p:[{key:'remote:'+'a'.repeat(64),label:'github.com/owner/<repo>'}]};`);
+  assert.match(run('techStackFilterHTML()'), /All tech stacks & repositories/);
+  assert.match(run(`techStackFilterHTML('p')`), /All tech stacks & repositories/);
+  assert.match(run(`techStackFilterHTML('q')`), />All tech stacks<\/option>/);
+  assert.match(run(`syncControls(state.projects[0])`), /github.com\/owner\/&lt;repo&gt;/);
+  assert.doesNotMatch(run(`syncControls(state.projects[0])`), /<repo>/);
+  run(`bindFilters();document.querySelector('#project-filter').listeners.change({target:{value:'q'}})`);
+  assert.match(run(`$('#tech-stack-filter').innerHTML`), />All tech stacks<\/option>/);
+  assert.equal(run(`$('#tech-stack-filter')['aria-label']`), 'All tech stacks');
+  run(`lang='ja';filter.project='p'`);
+  assert.match(run('techStackFilterHTML()'), /すべての技術スタック・リポジトリ/);
+  run(`state.projects[1].local_path='/checkout'`);
+  assert.match(run(`syncControls(state.projects[1])`), /コードスキャナー · ローカルフォルダー/);
+});
+
+test('repository-only workflow and activity identify the selected repository', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`Object.assign(workflow,{mode:'code',scan_target:'remote:'+'a'.repeat(64),scan_repository:'github.com/owner/<repo>',project_id:'p',project_name:'Project One'});`);
+  assert.match(run('workflowRun(project,workflow)'), /github.com\/owner\/&lt;repo&gt; · All severities/);
+  assert.match(run('activityList([workflow])'), /github.com\/owner\/&lt;repo&gt; ·  All severities/);
+  run(`workflow.scan_target='local';workflow.scan_repository='';lang='ja';`);
+  assert.match(run('workflowRun(project,workflow)'), /ローカルフォルダー · すべての深刻度/);
 });
 
 test('successful component sync does not mark a project fully assessed',()=>{
@@ -737,7 +823,7 @@ test('stack filters localize labels and escape component and project names',()=>
   run(`lang='ja';state.projects[0].name='<script>';state.projects[0].assets[0].name='"<img>'`);
   const html=run('techStackFilterHTML()');
   assert.match(html,/すべての技術スタック/);
-  assert.match(html,/aria-label="技術スタック"/);
+  assert.match(html,/aria-label="すべての技術スタック"/);
   assert.match(html,/&lt;script&gt;/);
   assert.match(html,/&quot;&lt;img&gt;/);
   assert.doesNotMatch(html,/<script>|<img>/);
@@ -830,7 +916,7 @@ test('Scan code uses its own action and reports a separate workflow and activity
 test('compact sync panel shows actual steps, active source, and rate-limit wait',()=>{
   const run=app();workflowFixture(run);
   const html=run('workflowRun(project,workflow)');
-  assert.match(html,/Sync workflow · Project One/);
+  assert.match(html,/Assessment workflow · Project One/);
   assert.match(html,/0 of 3 steps finished/);
   assert.match(html,/NIST NVD · demo 1/);
   assert.match(html,/Waiting for API rate limit/);
@@ -945,7 +1031,7 @@ test('workflow logs distinguish configured scanners, findings, errors, and skipp
     workflow.asset_id = 'a';
     expandedRuns.add('run-1');
   `);
-  assert.match(run('workflowBody(project,workflow)'),/Code scanners · Skipped for a component-only sync/);
+  assert.match(run('workflowBody(project,workflow)'),/Code scanners · Skipped for a component-only assessment/);
   run(`
     const at = workflow.started_at;
     workflow.logs.push(
@@ -1050,7 +1136,7 @@ test('a completed scoped workflow identifies where the earlier full-project sync
     renderProject('p');
   `);
   const html = run(`$('#main').innerHTML`);
-  assert.match(html, /<span class="pill interrupted full-sync-interruption">Full-project sync interrupted during CVE Program<\/span>/);
+  assert.match(html, /<span class="pill interrupted full-sync-interruption">Full-project assessment interrupted during CVE Program<\/span>/);
   assert.match(html, /class="sync-workflow complete"[^>]+data-sync-scope="scoped"/);
   assert.match(html, /Go 1\.26\.3 · Critical/);
   assert.match(html, /The latest full-project assessment is incomplete/);
@@ -1073,7 +1159,7 @@ test('workflow localizes interface and escapes external error details',()=>{
   const run=app();workflowFixture(run);
   run(`lang='ja';expandedRuns.add('run-1');workflow.logs.push({at:new Date().toISOString(),event:'failed',detail:'<script>unsafe</script>'})`);
   const html=run('workflowBody(project,workflow)');
-  assert.match(html,/同期ワークフロー/);
+  assert.match(html,/評価ワークフロー/);
   assert.match(html,/詳細を閉じる/);
   assert.match(html,/実行ログ/);
   assert.match(html,/&lt;script&gt;unsafe&lt;\/script&gt;/);
@@ -1112,7 +1198,7 @@ test('project workflow can be closed only after the run finishes',()=>{
   }
   assert.doesNotMatch(run('workflowRun(project,workflow)'),/data-dismiss-workflow/);
   run(`lang='ja'`);
-  assert.match(run('workflowRun(project,workflow,true)'),/aria-label="同期ワークフローを閉じる"/);
+  assert.match(run('workflowRun(project,workflow,true)'),/aria-label="評価ワークフローを閉じる"/);
 });
 
 test('closing a workflow removes only its project panel and preserves filters and history',()=>{
@@ -1345,7 +1431,7 @@ test('project sync controls default to all severities and preserve the selected 
   run(`syncSeveritySelection.p='CRITICAL'`);select=run('syncControls(p)').match(/<select id="sync-severity"[\s\S]*?<\/select>/)[0];
   assert.match(select,/value="CRITICAL" selected>Critical/);
   assert.match(select,/value="UNKNOWN"[^>]*>Unrated/);
-  run(`lang='ja'`);assert.match(run('syncControls(p)'),/深刻度別の同期/);
+  run(`lang='ja'`);assert.match(run('syncControls(p)'),/評価する深刻度/);
 });
 
 test('severity sync requests combine with a tech stack and refresh mode',async()=>{
@@ -1364,7 +1450,7 @@ test('global sync controls offer severity selection independently of display fil
 
 test('severity-scoped workflows identify their scope without claiming full-project completion',()=>{
   const run=app();workflowFixture(run);run(`workflow.severity='CRITICAL'`);
-  assert.match(run('workflowBody(project,workflow)'),/Everything · Critical · Normal sync/);
+  assert.match(run('workflowBody(project,workflow)'),/Everything · Critical · Normal assessment/);
   const html=run(`projectStatus({revision:1,assessed_revision:0,last_sync:'0001-01-01T00:00:00Z',runs:[{severity:'CRITICAL',status:'complete'}]})`);
   assert.match(html,/Full-project assessment needed/);
   const partial=run(`projectStatus({revision:1,assessed_revision:1,last_sync:'2026-01-01',runs:[{severity:'HIGH',status:'complete'},{status:'partial'}]})`);
@@ -1811,7 +1897,7 @@ test('component Critical counts isolate project and asset IDs from duplicate nam
   assert.match(run(`document.querySelector('#project-tab-content').innerHTML`),/class="stack-critical-count"><span>Critical<\/span><span class="pill critical">1<\/span>/);
 });
 
-test('changed components show Sync needed and warn about retained project totals until reassessment', () => {
+test('changed components show Reassessment needed and warn about retained project totals until reassessment', () => {
   const run = app();
   inventory(run);
   run(`
@@ -1824,15 +1910,15 @@ test('changed components show Sync needed and warn about retained project totals
     renderProject('p');
   `);
   assert.match(run(`$('#main').innerHTML`), /Saved findings and project totals may refer to previous versions/);
-  assert.match(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), />Sync needed<\/span>/);
+  assert.match(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), />Reassessment needed<\/span>/);
   assert.doesNotMatch(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), /class="pill critical">1/);
   assert.match(run(`projectListSummary(state.projects[0], '2 components')`), /Severity counts need refresh/);
-  assert.match(run(`projectStatus(state.projects[0])`), /Inventory changed · resync needed/);
+  assert.match(run(`projectStatus(state.projects[0])`), /Inventory changed · reassessment needed/);
 
   run(`lang = 'ja'`);
-  assert.match(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), /要同期/);
+  assert.match(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), /要再評価/);
   run(`state.projects[0].assets[0].needs_assessment = false`);
-  assert.doesNotMatch(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), /要同期/);
+  assert.doesNotMatch(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), /要再評価/);
 });
 
 test('saving a version change prompts reassessment without starting a sync', async () => {
@@ -1858,7 +1944,7 @@ test('saving a version change prompts reassessment without starting a sync', asy
   assert.equal(run('requests.length'), 1);
   assert.equal(run('requests[0][0]'), 'UpdateProject');
   assert.equal(run('requests[0][2].revision'), 1);
-  assert.match(run('messages[0]'), /Sync the changed tech stack to refresh severity counts/);
+  assert.match(run('messages[0]'), /Reassess the changed tech stack to refresh severity counts/);
   assert.equal(run('location.hash'), 'project/p');
   assert.equal(run('projectTab'), 'techStack');
   assert.equal(run('submit.disabled'), false);
@@ -1898,7 +1984,7 @@ test('component severity changes survive redraws and stay isolated across compon
   assert.doesNotMatch(run(`componentSyncControls(state.projects[0],state.projects[0].assets[0])`),/<option[^>]* selected/);
 });
 
-test('component Sync now sends that card severity and resetting to all omits the severity restriction',async()=>{
+test('component Match VDBs sends that card severity and resetting to all omits the severity restriction',async()=>{
   const run=app();inventory(run);
   run(`var calls=[];invoke=async(...args)=>calls.push(args);refresh=async()=>{};toast=()=>{};syncSeveritySelection.p='HIGH';componentSyncSeveritySelection.set(stackKey('p','shared'),'CRITICAL');var target={dataset:{action:'sync-asset',id:'p',asset:'shared'},closest:selector=>selector==='[data-action]'?target:null}`);
   await run(`document.listeners.click({target})`);
@@ -1913,7 +1999,7 @@ test('component Sync now sends that card severity and resetting to all omits the
 test('component severity controls localize, escape identifiers, and disable while the project syncs',()=>{
   const run=app();inventory(run);run(`lang='ja';state.projects[0].syncing=true;state.projects[0].assets[0].id='\"<asset>'`);
   const html=run(`componentSyncControls(state.projects[0],state.projects[0].assets[0])`);
-  assert.match(html,/深刻度別の同期/);assert.match(html,/value="">すべての深刻度/);
+  assert.match(html,/評価する深刻度/);assert.match(html,/value="">すべての深刻度/);
   assert.match(html,/data-asset-id="&quot;&lt;asset&gt;"/);
   assert.match(html,/<select[^>]+ disabled>/);assert.match(html,/<button[^>]+ disabled>/);
   assert.doesNotMatch(html,/<asset>/);
@@ -1952,7 +2038,7 @@ test('queued workflows name required databases and expose recovery only after an
   run(`lang = 'ja'`);
   html = run('workflowBody(project, workflow)');
   assert.match(html, /NVDデータベースとCPE辞書/);
-  assert.match(html, /待機中の同期をキャンセル/);
+  assert.match(html, /待機中の評価をキャンセル/);
 });
 
 test('queued workflows show separate live download and committed import progress', () => {
@@ -2081,11 +2167,11 @@ test('queued sync requests keep their selected scope and show a queued notificat
   `);
 
   await run(`syncProject(project.id, 'component', 'refresh', 'CRITICAL')`);
-  assert.match(run('notice'), /sync queued/);
+  assert.match(run('notice'), /assessment queued/);
   assert.deepEqual(JSON.parse(run('JSON.stringify(calls[0][2])')), {asset_id:'component', mode:'refresh', severity:'CRITICAL'});
 
   run(`workflow.status = 'interrupted'; workflow.logs = [{event:'queue_interrupted'}]`);
-  assert.equal(run('interruptionMessage(workflow)'), 'Application closed before queued sync started');
+  assert.equal(run('interruptionMessage(workflow)'), 'Application closed before queued assessment started');
 });
 
 test('workflow controls offer Pause and Stop while running and Resume while paused or pausing',()=>{

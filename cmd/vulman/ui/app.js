@@ -356,7 +356,7 @@ function workflowBody(project,run,dismissible=false){
   const statusMessage = {pausing:'pauseHint', paused:'pausedHint', stopping:'stoppingHint', partial:'assessmentPartial', queued:'queuedSyncHint', waiting_databases:'blockedSyncHint'}[run.status];
   const summary = run.status === 'interrupted' ? interruptionMessage(run) : statusMessage && t(statusMessage);
   const codeScan = run.mode === 'code';
-  const scope = codeScan ? syncSeverityLabel(run.severity) : `${run.asset_name || t('syncEverything')} · ${syncSeverityLabel(run.severity)} · ${t('mode_' + (run.mode || 'auto'))}`;
+  const scope = codeScan ? [run.scan_repository || (run.scan_target === 'local' ? t('scanTarget_local') : ''), syncSeverityLabel(run.severity)].filter(Boolean).join(' · ') : `${run.asset_name || t('syncEverything')} · ${syncSeverityLabel(run.severity)} · ${t('mode_' + (run.mode || 'auto'))}`;
   const progress=t('stepsFinished').replace('{done}',done).replace('{total}',steps.length);
   return `<div class="workflow-heading"><div><h3>${t(codeScan ? 'codeScanWorkflow' : 'workflow')} · ${esc(project.name)}</h3><p>${esc(scope)} · ${t('elapsed')} ${workflowElapsed(run)}</p>${validDate(run.data_checked_at)?`<p title="${t('sourceDataHint')}">${t('sourceDataChecked')}: ${fmtDate(run.data_checked_at)}</p>`:''}</div><div class="workflow-actions">${pill(t(run.status),run.status)}${workflowControls(project,run)}<button type="button" class="button secondary small" data-toggle-workflow="${esc(run.id)}" aria-expanded="${expanded}" aria-controls="${esc(detailsID)}">${t(expanded?'showLess':'showMore')}</button>${dismissible&&canDismissWorkflow(run)?`<button type="button" class="icon-button workflow-close" data-dismiss-workflow="${esc(run.id)}" data-project-id="${esc(project.id)}" aria-label="${t('closeWorkflow')}" title="${t('closeWorkflow')}">×</button>`:''}</div></div><div class="workflow-progress"><progress max="${Math.max(1,steps.length)}" value="${done}" aria-label="${esc(progress)}"></progress><span>${esc(progress)}</span></div><div class="workflow-current" role="status">${summary?esc(summary):current?`${esc(stepLabel(current))}<span>${esc(stepProgress(current)||t('phase_queued'))}</span>`:esc(t(run.status==='running'?'finishing':run.status))}</div>${databaseWaitNotice(run)}${codeScanSeverityBreakdown(project, run)}<div class="workflow-details" id="${esc(detailsID)}" ${expanded?'':'hidden'}>${expanded?`<ol class="workflow-stepper">${steps.map(step=>`<li class="workflow-step ${esc(step.status)}"><span class="workflow-step-marker" aria-hidden="true">${{complete:'✓',running:'↻',failed:'!',interrupted:'!',stopped:'■',skipped:'–',pending:'·'}[step.status]||'·'}</span><div><strong>${esc(stepLabel(step))}</strong><p>${esc(stepProgress(step))}</p></div>${pill(t(step.status),step.status)}</li>`).join('')}</ol><div class="workflow-log-heading"><h3>${t('workflowLogs')}</h3><small>${t('workflowLogsHint')}</small></div><ol class="workflow-logs" tabindex="0" aria-label="${esc(t('workflowLogs'))}">${workflowLogs(run, steps)}</ol>`:''}</div>`;
 }
@@ -448,8 +448,46 @@ function projectNeedsAssessment(project) {
 function projectStatus(p){const full=latestFullRun(p);if(p.syncing){const status=p.runs?.[0]?.status;return ['pausing','paused','stopping','queued','waiting_databases'].includes(status)?pill(t(status),status):pill(t(p.runs?.[0]?.mode==='code'?'scanningCode':'syncing'),'running pulse');}if(projectNeedsAssessment(p))return pill(t(p.runs?.length||p.findings?.length?'stale':'fullAssessmentNeeded'),'review');if(full&&full.status!=='complete')return pill(t(full.status),full.status);if(p.revision!==p.assessed_revision&&p.assessed_revision)return pill(t('stale'),'review');if(!validDate(p.last_sync))return pill(t('fullAssessmentNeeded'));return pill(t('complete'));}
 function syncSeverityLabel(severity){return severity?t(severityKey(severity)):t('anySeverity');}
 function severityOptions(selected=''){return `<option value="">${t('anySeverity')}</option>`+findingSeverities.map(value=>`<option value="${value}" ${selected===value?'selected':''}>${syncSeverityLabel(value)}</option>`).join('');}
-function syncAllControls(primary=false){return `<div class="sync-all-controls"><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-all-severity" data-sync-all-severity aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}">${severityOptions(syncAllSeverity)}</select></label>${button('syncAll','sync-all',primary,'refresh')}</div>`;}
-function syncControls(p){const selected=p.assets.some(a=>a.id===syncSelection[p.id])?syncSelection[p.id]:'';return `<div class="sync-controls"><label class="sync-scope"><span>${t('syncScope')}</span><select id="sync-asset" data-sync-project="${p.id}" aria-label="${t('syncScope')}" ${p.syncing?'disabled':''}><option value="">${t('syncEverything')}</option>${p.assets.map(a=>`<option value="${esc(a.id)}" ${selected===a.id?'selected':''}>${esc(t(a.kind)+' · '+a.name+' '+a.version)}</option>`).join('')}</select></label><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-severity" data-sync-severity-project="${p.id}" aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}" ${p.syncing?'disabled':''}>${severityOptions(syncSeveritySelection[p.id]||'')}</select></label><label class="sync-scope sync-mode"><span>${t('syncMode')}</span><select id="sync-mode" data-sync-mode-project="${p.id}" aria-label="${t('syncMode')}" ${p.syncing?'disabled':''}>${['auto','local','refresh'].map(mode=>`<option value="${mode}" ${(syncModeSelection[p.id]||'auto')===mode?'selected':''}>${t('mode_'+mode)}</option>`).join('')}</select></label><button class="button primary" data-action="sync" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('refresh')}${t(p.syncing&&p.runs?.[0]&&queuedWorkflow(p.runs[0])?p.runs[0].status:p.syncing&&p.runs?.[0]?.mode!=='code'?'syncing':'sync')}</button></div>`;}
+function syncAllControls(primary=false){return `<div class="sync-all-controls"><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-all-severity" data-sync-all-severity aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}">${severityOptions(syncAllSeverity)}</select></label>${button('syncAll','sync-all',primary,'search')}</div>`;}
+
+function assessmentActionKey(project) {
+  if (project.syncing && queuedWorkflow(project.runs?.[0] || {})) return project.runs[0].status;
+  if (project.syncing) return project.runs?.[0]?.mode === 'code' ? 'scanningCode' : 'syncing';
+  if (selectedScanLocation(project)) return 'runCodeScan';
+  const component = project.assets.some(asset => asset.id === syncSelection[project.id]);
+  return component || syncModeSelection[project.id] === 'local' ? 'matchVDBs' : 'sync';
+}
+
+function selectedScanLocation(project, selection = syncSelection[project.id]) {
+  return scanLocations(project).find(location => location.key === selection);
+}
+
+function updateAssessmentAction(projectID) {
+  const project = state?.projects?.find(project => project.id === projectID);
+  const action = $('#project-assessment-action');
+  if (!project || !action) return;
+
+  const repository = selectedScanLocation(project);
+  action.innerHTML = icon('search') + esc(t(assessmentActionKey(project)));
+  action.title = t(repository ? 'repositoryScanHint' : 'assessmentActionHint');
+  const mode = $('#sync-mode');
+  if (mode) {
+    mode.disabled = Boolean(project.syncing || repository);
+    mode.value = repository ? 'auto' : syncModeSelection[projectID] || 'auto';
+  }
+}
+
+function syncControls(p) {
+  const locations = scanLocations(p);
+  const repository = selectedScanLocation(p);
+  const selected = repository || p.assets.some(a => a.id === syncSelection[p.id]) ? syncSelection[p.id] : '';
+  const label = t(locations.length ? 'syncScopeRepository' : 'syncScope');
+  const mode = repository ? 'auto' : syncModeSelection[p.id] || 'auto';
+  const components = p.assets.map(a => `<option value="${esc(a.id)}" ${selected === a.id ? 'selected' : ''}>${esc(t(a.kind) + ' · ' + a.name + ' ' + a.version)}</option>`).join('');
+  const repositories = locations.map(location => `<option value="${esc(location.key)}" ${selected === location.key ? 'selected' : ''}>${esc(t('scanner') + ' · ' + location.label)}</option>`).join('');
+
+  return `<div class="sync-controls"><label class="sync-scope"><span>${label}</span><select id="sync-asset" data-sync-project="${p.id}" aria-label="${label}" ${p.syncing ? 'disabled' : ''}><option value="">${t('syncEverything')}</option>${components}${repositories}</select></label><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-severity" data-sync-severity-project="${p.id}" aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}" ${p.syncing ? 'disabled' : ''}>${severityOptions(syncSeveritySelection[p.id] || '')}</select></label><label class="sync-scope sync-mode"><span>${t('syncMode')}</span><select id="sync-mode" data-sync-mode-project="${p.id}" aria-label="${t('syncMode')}" ${p.syncing || repository ? 'disabled' : ''}>${['auto','local','refresh'].map(value => `<option value="${value}" ${mode === value ? 'selected' : ''}>${t('mode_' + value)}</option>`).join('')}</select></label><button class="button primary" id="project-assessment-action" data-action="sync" data-id="${p.id}" title="${esc(t(repository ? 'repositoryScanHint' : 'assessmentActionHint'))}" ${p.syncing ? 'disabled' : ''}>${icon('search')}${esc(t(assessmentActionKey(p)))}</button></div>`;
+}
 
 function projectList(projects = state.projects, showEdit = false) {
   if (!projects.length) return empty('noProjects','noProjectsSub','projects',button('firstProject','new-project',true,'plus')+`<button class="sample-button" data-action="sample">${t('sample')}</button>`);
@@ -487,7 +525,7 @@ function breakdown(counts) {
 }
 function canDeleteActivity(run){return !!run&&['interrupted','partial','failed','stopped'].includes(run.status);}
 async function deleteActivity(projectID,runID){const p=state.projects.find(p=>p.id===projectID),run=p?.runs?.find(r=>r.id===runID);if(!canDeleteActivity(run))return false;if(!(await confirmAction(t('confirmDeleteActivity')+'\n\n'+p.name+' · '+fmtDate(run.started_at))))return false;await invoke('DeleteRun',projectID,runID);expandedRuns.delete(runID);dismissedRuns.delete(runID);await refresh();toast(t('activityDeleted'));return true;}
-function activityList(runs=allRuns(),compact=false){if(!runs.length)return empty('noActivity','noActivitySub','activity');return runs.map(r=>`<div class="activity-item"><span class="activity-symbol">${r.status==='complete'?'✓':r.status==='running'?'↻':['pausing','paused'].includes(r.status)?'Ⅱ':['stopping','stopped'].includes(r.status)?'■':'!'}</span><div class="activity-content"><strong><a href="#project/${r.project_id}">${esc(r.project_name)}</a> · ${t(r.mode==='code'?'codeScan':'assessment')}</strong><p>${t(r.trigger==='schedule'?'scheduled':'manual')} · ${r.mode==='code'?'':esc(r.asset_id?r.asset_name:t('syncEverything'))+' · '} ${syncSeverityLabel(r.severity)} · ${t(r.status)} · ${r.count} ${t('findings')}</p>${workflowRun({id:r.project_id,name:r.project_name},r)}${r.warnings?.length?`<details><summary>${t('warnings')} (${r.warnings.length})</summary><ul>${runWarnings(r).map(w=>`<li>${esc(w)}</li>`).join('')}</ul></details>`:''}</div><div class="activity-actions"><span class="activity-time">${fmtDate(r.started_at)}</span>${canDeleteActivity(r)?`<button type="button" class="button danger small" data-action="delete-activity" data-id="${esc(r.project_id)}" data-run="${esc(r.id)}">${t('deleteActivity')}</button>`:''}</div></div>`).join('');}
+function activityList(runs=allRuns(),compact=false){if(!runs.length)return empty('noActivity','noActivitySub','activity');return runs.map(r=>`<div class="activity-item"><span class="activity-symbol">${r.status==='complete'?'✓':r.status==='running'?'↻':['pausing','paused'].includes(r.status)?'Ⅱ':['stopping','stopped'].includes(r.status)?'■':'!'}</span><div class="activity-content"><strong><a href="#project/${r.project_id}">${esc(r.project_name)}</a> · ${t(r.mode==='code'?'codeScan':'assessment')}</strong><p>${t(r.trigger==='schedule'?'scheduled':'manual')} · ${r.mode==='code'?(r.scan_target?esc(r.scan_repository||t('scanTarget_local'))+' · ':''):esc(r.asset_id?r.asset_name:t('syncEverything'))+' · '} ${syncSeverityLabel(r.severity)} · ${t(r.status)} · ${r.count} ${t('findings')}</p>${workflowRun({id:r.project_id,name:r.project_name},r)}${r.warnings?.length?`<details><summary>${t('warnings')} (${r.warnings.length})</summary><ul>${runWarnings(r).map(w=>`<li>${esc(w)}</li>`).join('')}</ul></details>`:''}</div><div class="activity-actions"><span class="activity-time">${fmtDate(r.started_at)}</span>${canDeleteActivity(r)?`<button type="button" class="button danger small" data-action="delete-activity" data-id="${esc(r.project_id)}" data-run="${esc(r.id)}">${t('deleteActivity')}</button>`:''}</div></div>`).join('');}
 function renderOverview(){
   const counts = Object.create(null);
   let total = 0, assets = 0;
@@ -504,7 +542,7 @@ function scanLocationKey(projectID, target) {
   return JSON.stringify([projectID, 'scanner', target]);
 }
 function scanLocations(project) {
-  const repositories = state.scan_repositories?.[project.id] || [];
+  const repositories = state?.scan_repositories?.[project.id] || [];
   const labelCounts = new Map();
   for (const {label} of repositories) labelCounts.set(label, (labelCounts.get(label) || 0) + 1);
   const labelIndex = new Map();
@@ -551,9 +589,14 @@ function techStackOptions(projectID) {
 function techStackFilterOptions(projectID){
   const options=techStackOptions(projectID);
   if(filter.stack&&!options.some(option=>option.key===filter.stack))filter.stack='';
-  return `<option value="">${t('anyTechStack')}</option>`+options.map(option=>`<option value="${esc(option.key)}" ${filter.stack===option.key?'selected':''}>${esc(option.label)}</option>`).join('');
+  return `<option value="">${techStackFilterLabel(projectID)}</option>`+options.map(option=>`<option value="${esc(option.key)}" ${filter.stack===option.key?'selected':''}>${esc(option.label)}</option>`).join('');
 }
-function techStackFilterHTML(projectID){return `<select id="tech-stack-filter" aria-label="${t('techStack')}">${techStackFilterOptions(projectID)}</select>`;}
+function techStackFilterLabel(projectID) {
+  const scope = projectID || filter.project;
+  const repositories = state.projects.some(project => (!scope || project.id === scope) && scanLocations(project).length);
+  return t(repositories ? 'anyTechStackRepository' : 'anyTechStack');
+}
+function techStackFilterHTML(projectID){return `<select id="tech-stack-filter" aria-label="${techStackFilterLabel(projectID)}">${techStackFilterOptions(projectID)}</select>`;}
 function filtersHTML(showProject,projectID){return `<div class="filters"><div class="search-wrap">${icon('search')}<input id="finding-search" aria-label="${t('search')}" placeholder="${t('search')}" value="${esc(filter.search)}"></div><select id="severity-filter" aria-label="${t('severity')}">${severityOptions(filter.severity)}</select>${showProject?`<select id="project-filter" aria-label="${t('project')}"><option value="">${t('anyProject')}</option>${state.projects.map(p=>`<option value="${p.id}" ${filter.project===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>`:''}${techStackFilterHTML(projectID)}<select id="match-filter" aria-label="${t('match')}"><option value="">${t('anyMatch')}</option>${['review','package','cpe','scanner'].map(m=>`<option value="${m}" ${filter.match===m?'selected':''}>${t(m)}</option>`).join('')}</select></div>`;}
 function resultsSummary(matches, total, start, filtered) {
   let text;
@@ -635,7 +678,10 @@ function bindFilters(projectID) {
   for (const [id,key] of [['severity-filter','severity'],['project-filter','project'],['tech-stack-filter','stack'],['match-filter','match']]) {
     $('#'+id)?.addEventListener('change', e => {
       filter[key] = e.target.value;
-      if (key === 'project') $('#tech-stack-filter').innerHTML = techStackFilterOptions(projectID);
+      if (key === 'project') {
+        $('#tech-stack-filter').innerHTML = techStackFilterOptions(projectID);
+        $('#tech-stack-filter').setAttribute('aria-label', techStackFilterLabel(projectID));
+      }
       updateResults();
     });
   }
@@ -649,7 +695,7 @@ function turnFindingPage(direction) {
     results.querySelector('[data-finding-page]:not(:disabled)');
   button?.focus({preventScroll:true});
 }
-function componentSyncControls(project,asset){const selected=componentSyncSeveritySelection.get(stackKey(project.id,asset.id))||'';return `<div class="stack-sync-controls"><label class="sync-scope stack-sync-severity"><span>${t('syncSeverity')}</span><select data-sync-component-severity data-project-id="${esc(project.id)}" data-asset-id="${esc(asset.id)}" title="${t('severitySyncHint')}" ${project.syncing?'disabled':''}>${severityOptions(selected)}</select></label><button class="button secondary small stack-sync" data-action="sync-asset" data-id="${esc(project.id)}" data-asset="${esc(asset.id)}" ${project.syncing?'disabled':''}>${icon('refresh')}${t('sync')}</button></div>`;}
+function componentSyncControls(project,asset){const selected=componentSyncSeveritySelection.get(stackKey(project.id,asset.id))||'';return `<div class="stack-sync-controls"><label class="sync-scope stack-sync-severity"><span>${t('syncSeverity')}</span><select data-sync-component-severity data-project-id="${esc(project.id)}" data-asset-id="${esc(asset.id)}" title="${t('severitySyncHint')}" ${project.syncing?'disabled':''}>${severityOptions(selected)}</select></label><button class="button secondary small stack-sync" title="${esc(t('componentMatchHint'))}" data-action="sync-asset" data-id="${esc(project.id)}" data-asset="${esc(asset.id)}" ${project.syncing?'disabled':''}>${icon('search')}${t('matchVDBs')}</button></div>`;}
 function componentCriticalCount(project, asset) {
   if (asset.needs_assessment) {
     return `<div class="stack-critical-count"><span>${t('critical')}</span><span class="pill review" title="${esc(t('componentResyncHint'))}">${t('componentSyncNeeded')}</span></div><p class="component-resync-note">${esc(t('componentResyncHint'))}</p>`;
@@ -1345,15 +1391,17 @@ async function scanProjectCode(id) {
   toast(t('codeScanStarted'));
 }
 async function syncProject(id, assetID = '', mode = 'auto', severity = '') {
-  const options = assetID ? {asset_id:assetID} : {};
-  if (mode !== 'auto') options.mode = mode;
+  const project = state?.projects?.find(project => project.id === id);
+  const repository = project && selectedScanLocation(project, assetID);
+  const options = repository ? {scan_target:repository.target} : assetID ? {asset_id:assetID} : {};
+  if (!repository && mode !== 'auto') options.mode = mode;
   if (severity) options.severity = severity;
 
   await invoke('Sync', id, options);
   await refresh();
 
   const run = state?.projects?.find(project => project.id === id)?.runs?.[0];
-  toast(t(run && queuedWorkflow(run) ? 'syncQueued' : 'syncStarted'));
+  toast(t(run && queuedWorkflow(run) ? 'syncQueued' : repository ? 'codeScanStarted' : 'syncStarted'));
 }
 async function sample(){const p=await invoke('CreateProject',{name:'Sample · Java service',description:t('sampleDescription'),repository:'',local_path:'',scan_code:false,schedule:'off',assets:[{id:'',kind:'library',name:'org.apache.logging.log4j:log4j-core',version:'2.14.1',ecosystem:'Maven',cpe:'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*'}]});await refresh(false);location.hash='project/'+p.id;projectTab='techStack';render();toast(t('sampleAdded'));}
 function showFinding(id,asset,project){
@@ -1431,7 +1479,7 @@ case'update-cve-database':case'stop-cve-database':case'rebuild-cve-database':{
   break;
 }
 case'browse-local-repository':await browseFolder(target.closest('form').elements.local_path,'chooseRepositoryFolder');break;case'use-data-directory':{const input=$('#data-directory');if(!input.value.trim()){input.focus();return;}await changeDataDirectory(input.value);break;}case'reset-data-directory':await changeDataDirectory('');break;case'check-scanner':{const input=$('[data-scanner-check="'+target.dataset.scanner+'"]');if(input)await checkScanner(input);break;}case'advice':await getAdvice($('#advice-provider').value);break;}}catch(err){toast(formatError(err),true);target.disabled=false;}});
-document.addEventListener('change',e=>{if(e.target.matches('[data-scanner-check]'))checkScanner(e.target);if(e.target.matches('[data-sync-project]'))syncSelection[e.target.dataset.syncProject]=e.target.value;if(e.target.matches('[data-sync-mode-project]'))syncModeSelection[e.target.dataset.syncModeProject]=e.target.value;if(e.target.matches('[data-sync-severity-project]'))syncSeveritySelection[e.target.dataset.syncSeverityProject]=e.target.value;if(e.target.matches('[data-sync-all-severity]'))syncAllSeverity=e.target.value;if(e.target.matches('[data-sync-component-severity]'))componentSyncSeveritySelection.set(stackKey(e.target.dataset.projectId,e.target.dataset.assetId),e.target.value);});
+document.addEventListener('change',e=>{if(e.target.matches('[data-scanner-check]'))checkScanner(e.target);if(e.target.matches('[data-sync-project]')){syncSelection[e.target.dataset.syncProject]=e.target.value;updateAssessmentAction(e.target.dataset.syncProject);}if(e.target.matches('[data-sync-mode-project]')){syncModeSelection[e.target.dataset.syncModeProject]=e.target.value;updateAssessmentAction(e.target.dataset.syncModeProject);}if(e.target.matches('[data-sync-severity-project]'))syncSeveritySelection[e.target.dataset.syncSeverityProject]=e.target.value;if(e.target.matches('[data-sync-all-severity]'))syncAllSeverity=e.target.value;if(e.target.matches('[data-sync-component-severity]'))componentSyncSeveritySelection.set(stackKey(e.target.dataset.projectId,e.target.dataset.assetId),e.target.value);});
 document.addEventListener('input', e => {
   const input = e.target;
   if (!input.matches('[data-credential-input]')) return;

@@ -1,9 +1,58 @@
 package engine
 
 import (
+	"strings"
+
 	"vulman/internal/model"
+	"vulman/internal/scanner"
 	"vulman/internal/sources"
 )
+
+func projectForScanTarget(p model.Project, target string) (model.Project, bool) {
+	if target == "" {
+		return p, true
+	}
+
+	selected := p
+	selected.Repository = ""
+	selected.RepositoryURLs = nil
+	selected.LocalPath = ""
+	if target == "local" && p.LocalPath != "" {
+		selected.LocalPath = p.LocalPath
+		return selected, true
+	}
+
+	for _, repository := range p.Repositories() {
+		if scanner.RemoteTargetKey(repository) == target {
+			selected.RepositoryURLs = []string{repository}
+			return selected, true
+		}
+	}
+
+	return selected, false
+}
+
+func findingInScanTarget(f model.Finding, p model.Project, target string) bool {
+	if strings.HasPrefix(f.AssetID, "code:remote:") || strings.HasPrefix(f.AssetID, "code:local:") {
+		return strings.HasPrefix(f.AssetID, "code:"+target+":")
+	}
+
+	if target == "local" {
+		return f.ScanTarget == "local"
+	}
+
+	// Older findings only recorded a display label. Preserve ambiguous records.
+	labelMatches := 0
+	selected := false
+	for _, repository := range p.Repositories() {
+		if scanner.RepositoryLabel(repository) == f.ScanRepository && f.ScanRepository != "" {
+			labelMatches++
+			selected = selected || scanner.RemoteTargetKey(repository) == target
+		}
+	}
+
+	return selected && labelMatches == 1
+}
 
 func matchesSeverity(f model.Finding, severity string) bool {
 	return severity == "" || model.NormalizeSeverity(f.Severity) == severity
