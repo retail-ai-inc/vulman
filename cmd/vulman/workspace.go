@@ -351,10 +351,12 @@ func (d *Desktop) DeleteRun(id, runID string) (resultErr error) {
 }
 
 type SyncInput struct {
-	AssetID    string `json:"asset_id"`
-	ScanTarget string `json:"scan_target"`
-	Mode       string `json:"mode"`
-	Severity   string `json:"severity"`
+	AssetID     string   `json:"asset_id"`
+	ScanTarget  string   `json:"scan_target"`
+	AssetIDs    []string `json:"asset_ids"`
+	ScanTargets []string `json:"scan_targets"`
+	Mode        string   `json:"mode"`
+	Severity    string   `json:"severity"`
 }
 
 func (d *Desktop) Sync(id string, in SyncInput) (resultErr error) {
@@ -364,6 +366,14 @@ func (d *Desktop) Sync(id string, in SyncInput) (resultErr error) {
 
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+	if in.AssetIDs != nil || in.ScanTargets != nil {
+		if in.AssetID != "" || in.ScanTarget != "" {
+			return apperror.New("assessment_selection_conflict", "Use either the single-item fields or the multiple-selection fields.")
+		}
+
+		return d.engine.StartSelected(id, "manual", in.AssetIDs, in.ScanTargets, in.Mode, in.Severity)
+	}
+
 	return d.engine.StartScoped(id, "manual", in.AssetID, in.ScanTarget, in.Mode, in.Severity)
 }
 

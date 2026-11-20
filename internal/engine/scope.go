@@ -3,33 +3,158 @@ package engine
 import (
 	"strings"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/scanner"
 	"vulman/internal/sources"
 )
 
-func projectForScanTarget(p model.Project, target string) (model.Project, bool) {
-	if target == "" {
-		return p, true
+type assessmentScope struct {
+	all          bool
+	assets       map[string]bool
+	repositories map[string]bool
+}
+
+func newAssessmentScope(assetIDs, scanTargets []string) (assessmentScope, error) {
+	scope := assessmentScope{all: assetIDs == nil && scanTargets == nil}
+	if scope.all {
+		return scope, nil
 	}
 
-	selected := p
-	selected.Repository = ""
-	selected.RepositoryURLs = nil
-	selected.LocalPath = ""
-	if target == "local" && p.LocalPath != "" {
-		selected.LocalPath = p.LocalPath
-		return selected, true
+	scope.assets = make(map[string]bool, len(assetIDs))
+	for _, id := range assetIDs {
+		scope.assets[id] = true
 	}
 
-	for _, repository := range p.Repositories() {
-		if scanner.RemoteTargetKey(repository) == target {
-			selected.RepositoryURLs = []string{repository}
-			return selected, true
+	scope.repositories = make(map[string]bool, len(scanTargets))
+	for _, target := range scanTargets {
+		scope.repositories[target] = true
+	}
+
+	if len(scope.assets)+len(scope.repositories) == 0 {
+		return scope, apperror.New("assessment_selection_empty", "Select at least one tech stack component or repository, or choose Everything.")
+	}
+
+	return scope, nil
+}
+
+func (scope assessmentScope) hasAsset(id string) bool {
+	return scope.all || scope.assets[id]
+}
+
+func (scope assessmentScope) validate(p model.Project) error {
+	if scope.all {
+		return nil
+	}
+
+	assets := make(map[string]bool, len(p.Assets))
+	for _, asset := range p.Assets {
+		assets[asset.ID] = true
+	}
+	for id := range scope.assets {
+		if id == "" || !assets[id] {
+			return ErrAssetNotFound
 		}
 	}
 
-	return selected, false
+	repositories := make(map[string]bool)
+	if p.LocalPath != "" {
+		repositories["local"] = true
+	}
+	for _, repository := range p.Repositories() {
+		repositories[scanner.RemoteTargetKey(repository)] = true
+	}
+	for target := range scope.repositories {
+		if !repositories[target] {
+			return apperror.New("scan_repository_not_registered", "The selected repository is no longer registered in this project.")
+		}
+	}
+
+	return nil
+}
+
+func (scope assessmentScope) project(p model.Project) model.Project {
+	if scope.all {
+		return p
+	}
+
+	selected := p
+	selected.Assets = nil
+	for _, asset := range p.Assets {
+		if scope.assets[asset.ID] {
+			selected.Assets = append(selected.Assets, asset)
+		}
+	}
+
+	selected.Repository = ""
+	selected.RepositoryURLs = nil
+	selected.LocalPath = ""
+	selected.ScanCode = p.ScanCode && len(scope.repositories) > 0
+	if scope.repositories["local"] {
+		selected.LocalPath = p.LocalPath
+	}
+	for _, repository := range p.Repositories() {
+		if scope.repositories[scanner.RemoteTargetKey(repository)] {
+			selected.RepositoryURLs = append(selected.RepositoryURLs, repository)
+		}
+	}
+
+	return selected
+}
+
+func (scope assessmentScope) selection(p model.Project) *model.AssessmentSelection {
+	if scope.all {
+		return nil
+	}
+
+	selected := scope.project(p)
+	selection := &model.AssessmentSelection{}
+	for _, asset := range selected.Assets {
+		selection.Assets = append(selection.Assets, model.AssessmentItem{ID: asset.ID, Label: asset.Name + " " + asset.Version})
+	}
+	if selected.LocalPath != "" {
+		selection.Repositories = append(selection.Repositories, model.AssessmentItem{ID: "local"})
+	}
+	for _, repository := range selected.Repositories() {
+		selection.Repositories = append(selection.Repositories, model.AssessmentItem{ID: scanner.RemoteTargetKey(repository), Label: scanner.RepositoryLabel(repository)})
+	}
+
+	return selection
+}
+
+func (scope assessmentScope) findings(p model.Project, mode string) (selected, preserved []model.Finding) {
+	for _, finding := range p.Findings {
+		included := scope.hasAsset(finding.AssetID)
+		if finding.Match == "scanner" {
+			included = scope.all
+			if !scope.all {
+				switch {
+				case strings.HasPrefix(finding.AssetID, "code:remote:"):
+					key, _, _ := strings.Cut(strings.TrimPrefix(finding.AssetID, "code:remote:"), ":")
+					included = scope.repositories["remote:"+key]
+				case strings.HasPrefix(finding.AssetID, "code:local:"):
+					included = scope.repositories["local"]
+				default:
+					for target := range scope.repositories {
+						if findingInScanTarget(finding, p, target) {
+							included = true
+							break
+						}
+					}
+				}
+			}
+		} else if mode == codeScanMode {
+			included = false
+		}
+
+		if included {
+			selected = append(selected, finding)
+		} else {
+			preserved = append(preserved, finding)
+		}
+	}
+
+	return selected, preserved
 }
 
 func findingInScanTarget(f model.Finding, p model.Project, target string) bool {

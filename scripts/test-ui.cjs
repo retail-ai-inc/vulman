@@ -533,26 +533,27 @@ test('sync defaults to everything and keeps a selected component on redraw', () 
   run(`var p={id:'p',assets:[{id:'a',kind:'database',name:'PostgreSQL',version:'16'}]};`);
   let html = run('syncControls(p)');
   assert.match(html, /data-action="sync"[^>]*>[^]*?Match VDBs &amp; Scan Code<\/button>/);
-  assert.match(html, /<option value="">Everything<\/option>/);
-  assert.doesNotMatch(html.match(/<select id="sync-asset"[\s\S]*?<\/select>/)[0], / selected/);
+  assert.match(html, /data-assessment-everything[^>]*checked/);
+  assert.doesNotMatch(html, /data-assessment-item[^>]*checked/);
   assert.match(html, /Database · PostgreSQL 16/);
   run(`syncSelection.p='a'`);
-  assert.match(run('syncControls(p)'), /value="a" selected/);
+  assert.match(run('syncControls(p)'), /value="a" checked/);
   assert.match(run('syncControls(p)'), /data-action="sync"[^>]*>[^]*?Match VDBs<\/button>/);
   run('p.assets=[]');
-  assert.doesNotMatch(run('syncControls(p)').match(/<select id="sync-asset"[\s\S]*?<\/select>/)[0], / selected/);
+  assert.doesNotMatch(run('syncControls(p)'), /data-assessment-item/);
+  assert.match(run('syncControls(p)'), /data-action="sync"[^>]*disabled/);
 });
 
 test('assessment action wording follows component and local-data selections without changing request modes', () => {
   const run = app();
   inventory(run);
   run(`
-    const selection={value:'shared',dataset:{syncProject:'p'},matches:selector=>selector==='[data-sync-project]'};
+    const selection={value:'shared',checked:true,dataset:{syncProject:'p'},matches:selector=>selector==='[data-sync-project]'};
     document.listeners.change({target:selection});
   `);
   assert.match(run(`$('#project-assessment-action').innerHTML`), /Match VDBs$/);
   assert.doesNotMatch(run(`componentSyncControls(state.projects[0],state.projects[0].assets[0])`), /Scan Code<\/button>/);
-  run(`selection.value='';document.listeners.change({target:selection})`);
+  run(`changeAssessmentSelection({checked:true,dataset:{syncProject:'p'},matches:selector=>selector==='[data-assessment-everything]'})`);
   assert.match(run(`$('#project-assessment-action').innerHTML`), /Match VDBs &amp; Scan Code$/);
   run(`
     const modeSelection={value:'local',dataset:{syncModeProject:'p'},matches:selector=>selector==='[data-sync-mode-project]'};
@@ -593,12 +594,12 @@ test('assessment selection scans one registered repository and restores componen
     state.scan_repositories={p:[{key:target,label:'github.com/owner/registered'}]};
     const project=state.projects[0];
     syncModeSelection.p='local';
-    const selection={value:scanLocationKey('p',target),dataset:{syncProject:'p'},matches:selector=>selector==='[data-sync-project]'};
+    const selection={value:scanLocationKey('p',target),checked:true,dataset:{syncProject:'p'},matches:selector=>selector==='[data-sync-project]'};
     document.listeners.change({target:selection});
   `);
-  assert.match(run('syncControls(project)'), /Match by tech stack & repository/);
+  assert.match(run('syncControls(project)'), /Match by tech stack &amp; repository/);
   assert.match(run('syncControls(project)'), /Code scanner · github\.com\/owner\/registered/);
-  assert.match(run('syncControls(project)'), / selected>Code scanner · github\.com\/owner\/registered/);
+  assert.match(run('syncControls(project)'), /checked[^>]*><span>Code scanner · github\.com\/owner\/registered/);
   assert.match(run('syncControls(project)'), /id="sync-mode"[^>]*disabled/);
   assert.match(run('syncControls(project)'), /value="auto" selected/);
   assert.match(run('syncControls(project)'), /data-action="sync"[^>]*>[^]*?Scan code<\/button>/);
@@ -609,7 +610,7 @@ test('assessment selection scans one registered repository and restores componen
   assert.deepEqual(JSON.parse(run('JSON.stringify(calls)')), [
     ['Sync','p',{scan_target:'remote:'+'a'.repeat(64),severity:'HIGH'}],
   ]);
-  run(`selection.value='shared';document.listeners.change({target:selection})`);
+  run(`selection.checked=false;document.listeners.change({target:selection});selection.value='shared';selection.checked=true;document.listeners.change({target:selection})`);
   assert.equal(run(`$('#sync-mode').disabled`), false);
   assert.equal(run(`$('#sync-mode').value`), 'local');
   run(`lang='ja'`);
@@ -623,13 +624,13 @@ test('repository labels follow the vulnerability filter project scope in both la
   const run = app();
   inventory(run);
   run(`state.scan_repositories={p:[{key:'remote:'+'a'.repeat(64),label:'github.com/owner/<repo>'}]};`);
-  assert.match(run('techStackFilterHTML()'), /All tech stacks & repositories/);
-  assert.match(run(`techStackFilterHTML('p')`), /All tech stacks & repositories/);
-  assert.match(run(`techStackFilterHTML('q')`), />All tech stacks<\/option>/);
+  assert.match(run('techStackFilterHTML()'), /All tech stacks &amp; repositories/);
+  assert.match(run(`techStackFilterHTML('p')`), /All tech stacks &amp; repositories/);
+  assert.match(run(`techStackFilterHTML('q')`), />All tech stacks<\/span>/);
   assert.match(run(`syncControls(state.projects[0])`), /github.com\/owner\/&lt;repo&gt;/);
   assert.doesNotMatch(run(`syncControls(state.projects[0])`), /<repo>/);
   run(`bindFilters();document.querySelector('#project-filter').listeners.change({target:{value:'q'}})`);
-  assert.match(run(`$('#tech-stack-filter').innerHTML`), />All tech stacks<\/option>/);
+  assert.match(run(`$('#tech-stack-filter-options').innerHTML`), />All tech stacks<\/span>/);
   assert.equal(run(`$('#tech-stack-filter')['aria-label']`), 'All tech stacks');
   run(`lang='ja';filter.project='p'`);
   assert.match(run('techStackFilterHTML()'), /すべての技術スタック・リポジトリ/);
@@ -645,6 +646,307 @@ test('repository-only workflow and activity identify the selected repository', (
   assert.match(run('activityList([workflow])'), /github.com\/owner\/&lt;repo&gt; ·  All severities/);
   run(`workflow.scan_target='local';workflow.scan_repository='';lang='ja';`);
   assert.match(run('workflowRun(project,workflow)'), /ローカルフォルダー · すべての深刻度/);
+});
+
+test('checkbox dropdown submits mixed multiple selection and never turns an empty selection into Everything', async () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const firstTarget='remote:'+'a'.repeat(64), secondTarget='remote:'+'b'.repeat(64);
+    state.scan_repositories={p:[{key:firstTarget,label:'github.com/owner/first'},{key:secondTarget,label:'github.com/owner/second'}]};
+    const project=state.projects[0];
+    const checkboxes=assessmentOptions(project).map(option=>({
+      value:option.key,checked:false,dataset:{syncProject:'p'},
+      matches:selector=>selector==='[data-sync-project]'||selector==='[data-assessment-item]',
+    }));
+    document.querySelectorAll=selector=>selector==='[data-assessment-item]'?checkboxes:[];
+    const everything=$('[data-assessment-everything]');
+    everything.dataset={syncProject:'p'};
+    everything.matches=selector=>selector==='[data-assessment-everything]'||selector==='[data-sync-project]';
+    function choose(key,checked=true) {
+      const input=checkboxes.find(input=>input.value===key);
+      input.checked=checked;
+      document.listeners.change({target:input});
+    }
+    choose('shared');
+    choose('no-findings');
+  `);
+  assert.equal(run(`$('#assessment-scope-summary').textContent`), '2 items selected');
+  assert.equal(run('everything.checked'), false);
+  assert.equal(run(`$('#sync-mode').disabled`), false);
+  run(`choose(scanLocationKey('p',firstTarget));choose(scanLocationKey('p',secondTarget));`);
+  assert.equal(run(`$('#assessment-scope-summary').textContent`), '4 items selected');
+  assert.match(run(`$('#project-assessment-action').innerHTML`), /Match VDBs &amp; Scan Code$/);
+  assert.equal(run(`$('#sync-mode').disabled`), true);
+  assert.equal(run('checkboxes.filter(input=>input.checked).length'), 4);
+  assert.match(run('syncControls(project)'), /4 items selected/);
+  run(`var calls=[];invoke=async(...args)=>calls.push(args);refresh=async()=>{};toast=()=>{};$('#sync-severity').value='HIGH';`);
+  await run(`
+    const target={dataset:{action:'sync',id:'p'},closest:selector=>selector==='[data-action]'?target:null};
+    document.listeners.click({target});
+  `);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls)')), [
+    ['Sync','p',{asset_ids:['shared','no-findings'],scan_targets:['remote:'+'a'.repeat(64),'remote:'+'b'.repeat(64)],severity:'HIGH'}],
+  ]);
+  run(`checkboxes.forEach(input=>choose(input.value,false));`);
+  assert.equal(run(`$('#project-assessment-action').disabled`), true);
+  assert.equal(run(`$('#assessment-scope-summary').textContent`), 'Select at least one item');
+  assert.equal(run('everything.checked'), false);
+  await assert.rejects(run(`syncProject('p',[])`), /Select at least one item/);
+  assert.equal(run('calls.length'), 1);
+  run(`everything.checked=true;document.listeners.change({target:everything});`);
+  assert.equal(run(`$('#project-assessment-action').disabled`), false);
+  assert.equal(run(`$('#assessment-scope-summary').textContent`), 'Everything');
+  assert.equal(run('assessmentSelection(project)'), null);
+  await run(`syncProject('p',syncSelection.p||'')`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls[1])')), ['Sync','p',{}]);
+  run(`lang='ja';choose('shared');choose('no-findings');`);
+  assert.equal(run(`$('#assessment-scope-summary').textContent`), '2件を選択中');
+  run(`project.syncing=true;choose('shared',false);`);
+  assert.equal(run('syncSelection.p.length'), 2);
+  assert.match(run('syncControls(project)'), /aria-disabled="true" tabindex="-1"/);
+});
+
+test('multiple assessment requests deduplicate items and reject stale selections', async () => {
+  const run = app();
+  inventory(run);
+  run(`var calls=[];invoke=async(...args)=>calls.push(args);refresh=async()=>{};toast=()=>{};`);
+  await run(`syncProject('p',['shared','no-findings','shared'],'local','CRITICAL')`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls[0])')), ['Sync','p',{
+    asset_ids:['shared','no-findings'],scan_targets:[],mode:'local',severity:'CRITICAL',
+  }]);
+  await assert.rejects(run(`syncProject('p',['shared','deleted'])`), /no longer registered/);
+  assert.equal(run('calls.length'), 1);
+});
+
+test('selection dropdown closes with Escape or an outside click', () => {
+  const run = app();
+  run(`
+    var focused=false;
+    const picker={open:true,contains:target=>target==='inside',querySelector:()=>({focus(){focused=true;}})};
+    document.querySelectorAll=()=>[picker];
+    const query=document.querySelector.bind(document);
+    document.querySelector=(selector,root)=>root===picker?picker.querySelector():query(selector);
+    closeAssessmentPicker({type:'click',target:'inside'});
+  `);
+  assert.equal(run('picker.open'), true);
+  run(`closeAssessmentPicker({type:'keydown',key:'Escape',target:'inside'})`);
+  assert.equal(run('picker.open'), false);
+  assert.equal(run('focused'), true);
+  run(`picker.open=true;focused=false;closeAssessmentPicker({type:'click',target:'outside'})`);
+  assert.equal(run('picker.open'), false);
+  assert.equal(run('focused'), false);
+});
+
+test('selection menus stay within the window and open upward when space below is limited', () => {
+  const run = app();
+  run(`
+    window.innerHeight=768;window.innerWidth=1024;
+    let rect={top:680,bottom:718,right:600};
+    const menu={scrollHeight:2000,offsetWidth:420,style:{}};
+    const summary={getBoundingClientRect:()=>rect};
+    const picker={open:true,querySelector:selector=>selector==='summary'?summary:menu};
+    positionScopePicker(picker);
+  `);
+  assert.equal(run('menu.style.top'), 'auto');
+  assert.equal(run('menu.style.bottom'), 'calc(100% + 7px)');
+  assert.equal(run('menu.style.maxHeight'), '420px');
+  assert.equal(run('menu.style.right'), '0px');
+  run(`rect={top:100,bottom:140,right:1040};positionScopePicker(picker);`);
+  assert.equal(run('menu.style.top'), 'calc(100% + 7px)');
+  assert.equal(run('menu.style.bottom'), 'auto');
+  assert.equal(run('menu.style.right'), '32px');
+  run(`window.innerHeight=300;window.innerWidth=320;menu.offsetWidth=288;rect={top:70,bottom:110,right:300};positionScopePicker(picker);`);
+  assert.equal(run('menu.style.maxHeight'), '167px');
+  assert.equal(run('menu.style.right'), '-4px');
+  run(`picker.open=false;summary.getBoundingClientRect=()=>{throw new Error('measured hidden menu');};positionScopePicker(picker);`);
+});
+
+test('selection menus reposition on resize and outer scrolling without disturbing internal scrolling', () => {
+  const run = app();
+  run(`
+    window.innerHeight=800;window.innerWidth=1200;
+    let measurements=0;
+    const summary={getBoundingClientRect(){measurements++;return {top:100,bottom:138,right:600};}};
+    const menu={scrollHeight:2000,offsetWidth:420,style:{}};
+    const picker={open:true,querySelector:selector=>selector==='summary'?summary:menu};
+    document.querySelectorAll=()=>[picker];
+    positionOpenScopePickers({target:{closest:()=>menu}});
+  `);
+  assert.equal(run('measurements'), 0);
+  run(`positionOpenScopePickers({target:{closest:()=>null}})`);
+  assert.equal(run('measurements'), 1);
+  run(`window.innerHeight=380;window.listeners.resize({});`);
+  assert.equal(run('measurements'), 2);
+  assert.equal(run('menu.style.maxHeight'), '219px');
+});
+
+test('both selection menus expose a keyboard-focusable scroll region with full item names', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    state.projects[0].assets.push(...Array.from({length:150},(_,i)=>({id:'long-'+i,kind:'library',name:'org.example.'+'long-name.'.repeat(25)+i,version:'1'})));
+  `);
+  const pattern = /class="scope-picker-menu"[^>]*tabindex="0"[^>]*role="region"[^>]*aria-label="Components and repositories"/;
+  assert.match(run('assessmentPicker(state.projects[0],t("syncScope"))'), pattern);
+  assert.match(run(`techStackFilterHTML('p')`), pattern);
+  assert.match(run(`techStackFilterHTML('p')`), /long-name\.149 1/);
+  run(`lang='ja'`);
+  assert.match(run(`techStackFilterHTML('p')`), /aria-label="コンポーネントとリポジトリ"/);
+});
+
+function scopeSearchFixture(run, labels) {
+  run(`
+    var scopeGroups=${JSON.stringify(labels)}.map(labels=>({
+      hidden:false,rows:labels.map(textContent=>({textContent,hidden:false})),
+      querySelectorAll(){return this.rows;},
+    }));
+    var scopeEmpty={hidden:true};
+    var scopeSearch={value:'',focusCount:0,focus(){this.focusCount++;},
+      matches:selector=>selector==='[data-scope-search]',
+      closest:selector=>selector==='.scope-picker-menu'?scopeMenu:null,
+    };
+    var scopeClear={hidden:true,dataset:{action:'clear-scope-search'},closest:selector=>
+      selector==='[data-action]'?scopeClear:selector==='.scope-picker-menu'?scopeMenu:null};
+    var scopeMenu={scrollTop:200,scrollHeight:1200,offsetWidth:420,style:{},
+      closest:selector=>selector==='details.scope-picker'?scopePicker:null,
+      querySelector:selector=>({'[data-scope-empty]':scopeEmpty,'[data-scope-search]':scopeSearch,'[data-action="clear-scope-search"]':scopeClear})[selector],
+      querySelectorAll:selector=>selector==='.scope-group'?scopeGroups:selector==='.scope-group .scope-choice'?scopeGroups.flatMap(group=>group.rows):[],
+    };
+    var scopeSummary={getBoundingClientRect:()=>({top:100,bottom:138,right:600})};
+    var scopePicker={open:false,querySelector:selector=>({'summary':scopeSummary,'.scope-picker-menu':scopeMenu,'[data-scope-search]':scopeSearch})[selector]};
+    window.innerWidth=1200;window.innerHeight=800;
+    var typeScopeSearch=value=>{scopeSearch.value=value;document.listeners.input({target:scopeSearch});};
+    var visibleScopeLabels=()=>scopeGroups.flatMap(group=>group.rows).filter(row=>!row.hidden).map(row=>row.textContent);
+  `);
+}
+
+test('dropdown search matches names, versions, multiple terms, and Japanese without changing selection', async () => {
+  const run = app();
+  scopeSearchFixture(run, [
+    ['Language / runtime · Go 1.26.3','Database · PostgreSQL 16','OSS library · acme/core 2.0'],
+    ['Code scanner · github.com/Acme/payments','Code scanner · 日本語リポジトリ'],
+  ]);
+  run(`syncSelection.p=['selected-hidden-item'];filter.stack=['selected-hidden-repository'];`);
+  run(`typeScopeSearch(' ＧＯ １．２６ ');`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(visibleScopeLabels())')), ['Language / runtime · Go 1.26.3']);
+  assert.equal(run('scopeGroups[0].hidden'), false);
+  assert.equal(run('scopeGroups[1].hidden'), true);
+  assert.equal(run('scopeMenu.scrollTop'), 0);
+  run(`typeScopeSearch('github   ACME');`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(visibleScopeLabels())')), ['Code scanner · github.com/Acme/payments']);
+  run(`typeScopeSearch('日本語 リポジトリ');`);
+  assert.equal(run('visibleScopeLabels().length'), 1);
+  assert.match(run('visibleScopeLabels()[0]'), /日本語リポジトリ/);
+  run(`typeScopeSearch('does-not-exist');`);
+  assert.equal(run('visibleScopeLabels().length'), 0);
+  assert.equal(run('scopeEmpty.hidden'), false);
+  assert.equal(run('scopeClear.hidden'), false);
+  assert.equal(run('scopeGroups.every(group=>group.hidden)'), true);
+  assert.equal(run('syncSelection.p.join()'), 'selected-hidden-item');
+  assert.equal(run('filter.stack.join()'), 'selected-hidden-repository');
+  await run(`document.listeners.click({target:scopeClear})`);
+  assert.equal(run('scopeSearch.value'), '');
+  assert.equal(run('visibleScopeLabels().length'), 5);
+  assert.equal(run('scopeEmpty.hidden'), true);
+  assert.equal(run('scopeClear.hidden'), true);
+  assert.equal(run('scopeSearch.focusCount'), 1);
+  run(`typeScopeSearch('   ')`);
+  assert.equal(run('visibleScopeLabels().length'), 5);
+  assert.equal(run('scopeEmpty.hidden'), true);
+});
+
+test('searching assessment choices preserves hidden checked components and repositories in the request', async () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const repository='remote:'+'a'.repeat(64);
+    state.scan_repositories={p:[{key:repository,label:'github.com/owner/demo'}]};
+    syncSelection.p=['shared',scanLocationKey('p',repository)];
+    var calls=[];invoke=async(...args)=>calls.push(args);refresh=async()=>{};toast=()=>{};
+  `);
+  const options = JSON.parse(run('JSON.stringify(assessmentOptions(state.projects[0]))'));
+  scopeSearchFixture(run, [options.filter(option => !option.target).map(option => option.label), options.filter(option => option.target).map(option => option.label)]);
+  run(`typeScopeSearch('postgresql');`);
+  assert.equal(run('visibleScopeLabels().length'), 1);
+  assert.equal(run('syncSelection.p.length'), 2);
+  assert.equal(run('calls.length'), 0);
+  run(`changeAssessmentSelection({value:'no-findings',checked:true,dataset:{syncProject:'p'},matches:()=>false})`);
+  assert.equal(run('syncSelection.p.length'), 3);
+  await run(`syncProject('p',syncSelection.p)`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls)')), [
+    ['Sync','p',{asset_ids:['shared','no-findings'],scan_targets:['remote:'+'a'.repeat(64)]}],
+  ]);
+});
+
+test('searching vulnerability filter choices preserves result counts and the active filters', () => {
+  const run = app();
+  repositoryFilterInventory(run);
+  run(`filter.stack=[stackKey('p','shared'),scanLocationKey('p',firstRepo)];bindFilters('p');`);
+  const options = JSON.parse(run(`JSON.stringify(techStackOptions('p'))`));
+  scopeSearchFixture(run, [options.filter(option => !option.repository).map(option => option.label), options.filter(option => option.repository).map(option => option.label)]);
+  run(`typeScopeSearch('postgresql')`);
+  assert.equal(run('visibleScopeLabels().length'), 1);
+  assert.match(run(`findingsTable('p')`), /Showing 5 matches \(9 total\)/);
+  chooseStackFilter(run, run(`stackKey('p','no-findings')`));
+  assert.equal(run('techStackFilterSelection().length'), 3);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 5 matches \(9 total\)/);
+  assert.equal(run('filter.search'), '');
+  run(`typeScopeSearch('no-such-repository')`);
+  assert.equal(run('scopeEmpty.hidden'), false);
+  assert.match(run(`findingsTable('p')`), /Showing 5 matches \(9 total\)/);
+});
+
+test('dropdown search focuses on opening, resets on closing, and stays separate from refreshed choices', () => {
+  const run = app();
+  inventory(run);
+  scopeSearchFixture(run, [['Project One · demo','Project Two · demo'], ['Code scanner · github.com/owner/demo']]);
+  run(`scopePicker.open=true;scopePickerToggled(scopePicker);typeScopeSearch('Project One');`);
+  assert.equal(run('scopeSearch.focusCount'), 1);
+  assert.equal(run('visibleScopeLabels().length'), 1);
+  run(`scopePicker.open=false;scopePickerToggled(scopePicker);`);
+  assert.equal(run('scopeSearch.value'), '');
+  assert.equal(run('visibleScopeLabels().length'), 3);
+  run(`
+    scopePicker.open=true;scopePickerToggled(scopePicker);typeScopeSearch('Project Two');
+    const query=document.querySelector.bind(document);
+    document.querySelector=selector=>selector==='#tech-stack-filter [data-scope-search]'?scopeSearch:query(selector);
+    bindFilters();$('#project-filter').listeners.change({target:{value:'q'}});
+  `);
+  assert.equal(run('scopeSearch.value'), 'Project Two');
+  assert.equal(run('visibleScopeLabels().length'), 1);
+  assert.match(run(`$('#tech-stack-filter-options').innerHTML`), /Project Two/);
+  assert.doesNotMatch(run(`$('#tech-stack-filter-options').innerHTML`), /data-scope-search/);
+});
+
+test('both dropdown searches include localized accessible labels and empty-result messages', () => {
+  const run = app();
+  inventory(run);
+  const assessment = run(`assessmentPicker(state.projects[0],t('syncScope'))`);
+  const filter = run(`techStackFilterHTML('p')`);
+  for (const html of [assessment, filter]) {
+    assert.match(html, /type="search" data-scope-search aria-label="Search components and repositories…"/);
+    assert.match(html, /data-action="clear-scope-search" aria-label="Clear dropdown search"/);
+    assert.match(html, /data-scope-empty role="status" aria-live="polite" hidden>No components or repositories match this search/);
+  }
+  run(`lang='ja'`);
+  assert.match(run(`techStackFilterHTML('p')`), /コンポーネント・リポジトリを検索…/);
+  assert.match(run(`techStackFilterHTML('p')`), /検索条件に一致するコンポーネントやリポジトリはありません/);
+});
+
+test('multiple assessment history names every chosen item without marking the full project assessed', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    workflow.selection={assets:[{id:'a',label:'Go 1.26.3'},{id:'b',label:'<PHP> 8.3'}],repositories:[{id:'remote:first',label:'github.com/owner/first'},{id:'local',label:''}]};
+    workflow.status='complete';workflow.project_id='p';workflow.project_name='Project One';
+  `);
+  assert.match(run('workflowRun(project,workflow)'), /data-sync-scope="scoped"/);
+  assert.match(run('workflowRun(project,workflow)'), /Go 1.26.3, &lt;PHP&gt; 8.3, github.com\/owner\/first, Local folder/);
+  assert.match(run('activityList([workflow])'), /Go 1.26.3, &lt;PHP&gt; 8.3, github.com\/owner\/first, Local folder/);
+  assert.equal(run('latestFullRun({...project,runs:[workflow]})'), undefined);
+  run(`lang='ja';workflow.mode='code';workflow.selection.assets=[];`);
+  assert.match(run('workflowRun(project,workflow)'), /github.com\/owner\/first, ローカルフォルダー/);
 });
 
 test('successful component sync does not mark a project fully assessed',()=>{
@@ -686,11 +988,18 @@ function inventory(run) {
 
 const findingIDs = html => [...html.matchAll(/data-finding="([^"]+)"/g)].map(m=>m[1]);
 
+function chooseStackFilter(run, key, checked = true) {
+  const attribute = key === null ? '[data-stack-filter-all]' : '[data-stack-filter-item]';
+  run(`$('#tech-stack-filter').listeners.change({target:{
+    value:${JSON.stringify(key || '')}, checked:${checked}, matches:selector=>selector.includes('${attribute}'),
+  }})`);
+}
+
 test('both vulnerability views default to all tech stacks with correctly scoped options',()=>{
   const run=app();inventory(run);
   const local=run(`filtersHTML(false,'p')`);
   assert.match(local,/id="tech-stack-filter"/);
-  assert.match(local,/<option value="">All tech stacks<\/option>/);
+  assert.match(local,/data-stack-filter-all checked><span>All tech stacks<\/span>/);
   assert.match(local,/Database · PostgreSQL 16/);
   assert.doesNotMatch(local,/Project Two|demo 2/);
   assert.deepEqual(findingIDs(run(`findingsTable('p')`)).sort(),['CVE-A','CVE-CODE','CVE-M','CVE-OLD']);
@@ -705,7 +1014,7 @@ test('tech stack filtering isolates the chosen project even with duplicate compo
   run(`filter.stack=stackKey('p','shared')`);
   assert.deepEqual(findingIDs(run(`findingsTable('p')`)),['CVE-A','CVE-M']);
   assert.deepEqual(findingIDs(run('findingsTable()')),['CVE-A','CVE-M']);
-  assert.match(run('filtersHTML(true)'),/selected/);
+  assert.match(run('filtersHTML(true)'),/data-stack-filter-item[^>]*checked/);
   run(`filter.stack=stackKey('q','shared')`);
   assert.deepEqual(findingIDs(run('findingsTable()')),['CVE-Q']);
 });
@@ -724,12 +1033,12 @@ test('changing project narrows the stack options and clears incompatible selecti
   const run=app();inventory(run);
   run(`filter.stack=stackKey('p','shared');bindFilters();document.querySelector('#project-filter').listeners.change({target:{value:'q'}})`);
   assert.equal(run('filter.stack'),'');
-  const options=run(`document.querySelector('#tech-stack-filter').innerHTML`);
+  const options=run(`document.querySelector('#tech-stack-filter-options').innerHTML`);
   assert.match(options,/Project Two · OSS library · demo 2/);
   assert.doesNotMatch(options,/Project One|PostgreSQL/);
   assert.deepEqual(findingIDs(run(`document.querySelector('#finding-results').innerHTML`)),['CVE-Q']);
-  run(`document.querySelector('#tech-stack-filter').listeners.change({target:{value:stackKey('q','shared')}})`);
-  assert.equal(run('filter.stack'),run(`stackKey('q','shared')`));
+  chooseStackFilter(run, run(`stackKey('q','shared')`));
+  assert.deepEqual(JSON.parse(run('JSON.stringify(filter.stack)')), [run(`stackKey('q','shared')`)]);
 });
 
 test('older inventory remains filterable and unattributed scanner findings stay in the Code scanner match filter',()=>{
@@ -816,6 +1125,143 @@ test('repositories sharing a display label keep their scanner findings separate'
   assert.match(options, /github\.com\/owner\/demo \(1\)/);
   assert.match(options, /github\.com\/owner\/demo \(2\)/);
   assert.deepEqual(findingIDs(run(`findingsTable('p')`)), ['CVE-1']);
+  run(`filter.stack=[scanLocationKey('p',first),scanLocationKey('p',second)]`);
+  assert.deepEqual(findingIDs(run(`findingsTable('p')`)), ['CVE-0','CVE-1']);
+});
+
+function repositoryFilterInventory(run) {
+  inventory(run);
+  run(`
+    const firstRepo='remote:'+'a'.repeat(64), secondRepo='remote:'+'b'.repeat(64);
+    const firstLabel='github.com/owner/first', secondLabel='github.com/owner/second';
+    state.scan_repositories={p:[{key:firstRepo,label:firstLabel},{key:secondRepo,label:secondLabel}],q:[{key:firstRepo,label:firstLabel}]};
+    state.projects[0].local_path='/checkout';
+    const code=(id,asset_id,severity,scan_repository,scan_target='remote')=>({
+      id,asset_id,severity,scan_repository,scan_target,component:'dependency',title:id,match:'scanner',sources:['Trivy'],
+    });
+    state.projects[0].findings.push(
+      code('CVE-R1','code:'+firstRepo+':dependency','CRITICAL',firstLabel),
+      code('CVE-R2','code:'+secondRepo+':dependency','HIGH',secondLabel),
+      code('CVE-LEGACY','code:legacy-package','LOW',firstLabel),
+      code('CVE-LOCAL','code:local:dependency','MEDIUM','','local'),
+      code('CVE-OVERLAP','code:legacy-overlap','LOW',firstLabel,'local'),
+    );
+    state.projects[1].findings.push(code('CVE-Q-REPO','code:'+firstRepo+':dependency','CRITICAL',firstLabel));
+  `);
+}
+
+test('both vulnerability views combine multiple components and repositories without duplicate rows', () => {
+  const run = app();
+  repositoryFilterInventory(run);
+  run(`filter.stack=[stackKey('p','shared'),scanLocationKey('p',firstRepo),scanLocationKey('p',secondRepo),scanLocationKey('p','local'),stackKey('p','shared')]`);
+  const projectTable = run(`findingsTable('p')`);
+  const globalTable = run('findingsTable()');
+  const expected = ['CVE-A','CVE-M','CVE-R1','CVE-R2','CVE-LEGACY','CVE-LOCAL','CVE-OVERLAP'].sort();
+  assert.deepEqual(findingIDs(projectTable).sort(), expected);
+  assert.deepEqual(findingIDs(globalTable).sort(), expected);
+  assert.match(projectTable, /Showing 7 matches \(9 total\)/);
+  assert.match(globalTable, /Showing 7 matches \(11 total\)/);
+  assert.match(projectTable, /Critical <strong>1<\/strong>/);
+  assert.match(projectTable, /High <strong>2<\/strong>/);
+  assert.match(projectTable, /Medium <strong>2<\/strong>/);
+  assert.match(projectTable, /Low <strong>2<\/strong>/);
+  assert.match(projectTable, /Unrated <strong>0<\/strong>/);
+  assert.match(run(`techStackFilterHTML('p')`), /4 items selected/);
+  assert.equal(run('techStackFilterSelection().length'), 4);
+  run(`filter.stack.push(stackKey('q','shared'),scanLocationKey('q',firstRepo))`);
+  assert.match(run('findingsTable()'), /Showing 9 matches \(11 total\)/);
+  assert.match(run('findingsTable()'), /Critical <strong>2<\/strong>/);
+  assert.match(run('findingsTable()'), /High <strong>3<\/strong>/);
+  run(`filter.severity='HIGH'`);
+  assert.deepEqual(findingIDs(run('findingsTable()')).sort(), ['CVE-A','CVE-R2','CVE-Q'].sort());
+  assert.match(run('findingsTable()'), /Critical <strong>2<\/strong>/);
+  run(`filter.search='dependency';filter.match='scanner'`);
+  assert.deepEqual(findingIDs(run('findingsTable()')), ['CVE-R2']);
+  assert.match(run('findingsTable()'), /High <strong>1<\/strong>/);
+  assert.match(run('findingsTable()'), /Medium <strong>1<\/strong>/);
+});
+
+test('checkbox filter updates counts, keeps the menu open, and distinguishes no selection from All', () => {
+  const run = app();
+  repositoryFilterInventory(run);
+  run(`
+    bindFilters('p');
+    const picker=$('#tech-stack-filter');picker.open=true;
+    const checks=techStackOptions('p').map(option=>({value:option.key,checked:false}));
+    document.querySelectorAll=selector=>selector==='[data-stack-filter-item]'?checks:[];
+    syncSelection.p=['shared'];findingsPage=4;
+  `);
+  chooseStackFilter(run, run(`stackKey('p','shared')`));
+  chooseStackFilter(run, run(`scanLocationKey('p',firstRepo)`));
+  assert.equal(run(`$('#tech-stack-filter-summary').textContent`), '2 items selected');
+  assert.equal(run(`$('[data-stack-filter-all]').checked`), false);
+  assert.equal(run('checks.filter(input=>input.checked).length'), 2);
+  assert.equal(run('picker.open'), true);
+  assert.equal(run('findingsPage'), 1);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 5 matches \(9 total\)/);
+  assert.match(run(`techStackFilterHTML('p')`), /2 items selected/);
+  assert.equal(run('syncSelection.p.join()'), 'shared');
+  chooseStackFilter(run, run(`stackKey('p','shared')`), false);
+  chooseStackFilter(run, run(`scanLocationKey('p',firstRepo)`), false);
+  assert.equal(run(`$('#tech-stack-filter-summary').textContent`), 'No items selected');
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 0 matches \(9 total\)/);
+  assert.equal((run(`$('#finding-results').innerHTML`).match(/<strong>0<\/strong>/g) || []).length, 5);
+  assert.equal(run(`$('[data-stack-filter-all]').checked`), false);
+  assert.match(run(`techStackFilterHTML('p')`), /No items selected/);
+  chooseStackFilter(run, null);
+  assert.equal(run(`$('[data-stack-filter-all]').checked`), true);
+  assert.equal(run('techStackFilterSelection()'), null);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 9 of 9 vulnerabilities/);
+  assert.equal(run('checks.filter(input=>input.checked).length'), 0);
+  run(`lang='ja'`);
+  chooseStackFilter(run, run(`stackKey('p','shared')`));
+  chooseStackFilter(run, run(`scanLocationKey('p',firstRepo)`));
+  assert.equal(run(`$('#tech-stack-filter-summary').textContent`), '2件を選択中');
+  assert.match(run(`$('#finding-results').innerHTML`), /一致する結果を 5 件表示（全 9 件）/);
+});
+
+test('project filtering retains compatible multiple selections and resets All when none remain', () => {
+  const run = app();
+  repositoryFilterInventory(run);
+  run(`filter.stack=[stackKey('p','shared'),stackKey('q','shared'),scanLocationKey('q',firstRepo)];bindFilters();`);
+  run(`$('#project-filter').listeners.change({target:{value:'q'}})`);
+  assert.equal(run('techStackFilterSelection().length'), 2);
+  assert.match(run(`$('#tech-stack-filter-summary').textContent`), /2 items selected/);
+  assert.match(run(`$('#tech-stack-filter-options').innerHTML`), /Project Two · Code scanner/);
+  assert.doesNotMatch(run(`$('#tech-stack-filter-options').innerHTML`), /Project One/);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 2 matches \(11 total\)/);
+  assert.equal(run(`$('#tech-stack-filter > summary')['aria-label']`), 'All tech stacks & repositories');
+  run(`$('#project-filter').listeners.change({target:{value:''}})`);
+  assert.equal(run('techStackFilterSelection().length'), 2);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 2 matches \(11 total\)/);
+  run(`$('#project-filter').listeners.change({target:{value:'p'}})`);
+  assert.equal(run('techStackFilterSelection()'), null);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 9 matches \(11 total\)/);
+  assert.equal(run(`$('[data-stack-filter-all]').checked`), true);
+});
+
+test('multiple stack filters retain pagination and severity ordering for 30000 findings', () => {
+  const run = app();
+  repositoryFilterInventory(run);
+  run(`
+    state.projects[0].findings=Array.from({length:30000},(_,i)=>({
+      id:'CVE-large-'+i,title:i>=29990?'Tail advisory':'Advisory',component:'demo',
+      asset_id:i%3===0?'shared':'code:'+(i%3===1?firstRepo:secondRepo)+':dependency',
+      match:i%3===0?'cpe':'scanner',severity:i===29998?'CRITICAL':'HIGH',sources:['NVD'],
+    }));
+    filter.stack=[stackKey('p','shared'),scanLocationKey('p',firstRepo)];bindFilters('p');
+  `);
+  const html = run(`findingsTable('p')`);
+  assert.equal(findingIDs(html).length, 100);
+  assert.equal(findingIDs(html)[0], 'CVE-large-29998');
+  assert.match(html, /Showing 1–100 of 20,000 matches \(30,000 total\)/);
+  assert.match(html, /Page 1 of 200/);
+  run(`findingsPage=100`);
+  chooseStackFilter(run, run(`scanLocationKey('p',firstRepo)`), false);
+  assert.equal(run('findingsPage'), 1);
+  assert.equal(findingIDs(run(`$('#finding-results').innerHTML`)).length, 100);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 1–100 of 10,000 matches \(30,000 total\)/);
+  assert.match(run(`$('#finding-results').innerHTML`), /Critical <strong>0<\/strong>/);
 });
 
 test('stack filters localize labels and escape component and project names',()=>{
@@ -840,7 +1286,8 @@ test('result counts use project totals in its tab and all-project totals in the 
 
 test('counts update on component, severity, search, and match changes including zero matches',()=>{
   const run=app();inventory(run);
-  run(`bindFilters('p');document.querySelector('#tech-stack-filter').listeners.change({target:{value:stackKey('p','shared')}})`);
+  run(`bindFilters('p')`);
+  chooseStackFilter(run, run(`stackKey('p','shared')`));
   assert.match(run(`document.querySelector('#finding-results').innerHTML`),/Showing 2 matches \(4 total\)/);
   run(`document.querySelector('#severity-filter').listeners.change({target:{value:'HIGH'}})`);
   assert.match(run(`document.querySelector('#finding-results').innerHTML`),/Showing 1 match \(4 total\)/);
@@ -850,7 +1297,8 @@ test('counts update on component, severity, search, and match changes including 
   const empty=run(`document.querySelector('#finding-results').innerHTML`);
   assert.match(empty,/Showing 0 matches \(4 total\)/);
   assert.match(empty,/No findings match these filters/);
-  run(`document.querySelector('#finding-search').listeners.input({target:{value:''}});document.querySelector('#severity-filter').listeners.change({target:{value:''}});document.querySelector('#tech-stack-filter').listeners.change({target:{value:''}})`);
+  run(`document.querySelector('#finding-search').listeners.input({target:{value:''}});document.querySelector('#severity-filter').listeners.change({target:{value:''}})`);
+  chooseStackFilter(run, null);
   assert.match(run(`document.querySelector('#finding-results').innerHTML`),/Showing 4 of 4 vulnerabilities/);
 });
 
@@ -1348,7 +1796,7 @@ test('the credential eye reveals drafts and displays saved previews inside the f
       };
     };
     var form = {querySelector: () => ({disabled:false})};
-    var input = {type:'password', value:'draft key', placeholder:'••••••', dataset:{credentialSaved:'true'}, form, matches: () => true, focus(){},
+    var input = {type:'password', value:'draft key', placeholder:'••••••', dataset:{credentialSaved:'true'}, form, matches: selector => selector === '[data-credential-input]', focus(){},
       closest: selector => selector === '.credential-field' ? field : input};
     var preview = {textContent:'', classList:classes()};
     var attrs = {'aria-pressed':'false'};

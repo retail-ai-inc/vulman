@@ -819,6 +819,23 @@
     "anyTechStackRepository": "All tech stacks & repositories",
     "repositoryScanHint": "Scan only the selected registered repository with configured code scanners. Other repository and tech stack findings are preserved. Repository scans require code scanning to be enabled for the project and use normal assessment mode.",
     "error_repository_scan_scope_invalid": "Select either a component or a repository. Repository scans use normal assessment mode.",
-    "error_scan_repository_not_registered": "The selected repository is no longer registered in this project."
+    "error_scan_repository_not_registered": "The selected repository is no longer registered in this project.",
+    "assessmentChooseItems": "Select at least one item",
+    "assessmentSelectedCount": "{count} items selected",
+    "assessmentRepositories": "Repositories",
+    "assessmentSelectionHint": "Choose any combination of components and repositories. Everything includes the whole project.",
+    "assessmentSelectionChanged": "Some selected items are no longer registered. Review your selection before starting.",
+    "selectedAssessmentHint": "Assess the selected tech stack components and scan the selected repositories. Other results are preserved. Repository selections require project code scanning and configured scanners; they use normal assessment mode.",
+    "error_assessment_selection_empty": "Select at least one tech stack component or repository, or choose Everything.",
+    "error_assessment_selection_conflict": "Use either the single-item fields or the multiple-selection fields.",
+    "error_repository_scan_mode_invalid": "Repository selections require normal assessment mode.",
+    "selectedComponentsHint": "Match only the selected tech stack components against enabled vulnerability databases. Repository scanners do not run for component-only selections.",
+    "filterNoItems": "No items selected",
+    "filterSelectedCount": "{count} items selected",
+    "filterMultipleHint": "Show findings for any selected component or repository. Choose All to clear the selection.",
+    "scopeChoices": "Components and repositories",
+    "scopeSearch": "Search components and repositories…",
+    "scopeSearchClear": "Clear dropdown search",
+    "scopeSearchEmpty": "No components or repositories match this search."
   }
 }

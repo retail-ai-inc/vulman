@@ -221,7 +221,7 @@ func (e *Engine) persistQueueState(projectID, runID string, waits []model.Databa
 
 					addLog(r, "", event, "")
 					addLog(r, "", "run_started", r.AssetName)
-					if interval := model.Interval(p.Schedule); interval > 0 && r.AssetID == "" && r.Severity == "" && mode != "local" {
+					if interval := model.Interval(p.Schedule); interval > 0 && r.Selection == nil && r.AssetID == "" && r.Severity == "" && mode != "local" {
 						p.NextRun = time.Now().Add(interval)
 					}
 				} else {

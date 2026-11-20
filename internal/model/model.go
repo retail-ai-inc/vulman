@@ -41,28 +41,39 @@ type Finding struct {
 }
 
 type Run struct {
-	ID              string             `json:"id"`
-	StartedAt       time.Time          `json:"started_at"`
-	FinishedAt      time.Time          `json:"finished_at"`
-	Status          string             `json:"status"`
-	Trigger         string             `json:"trigger"`
-	AssetID         string             `json:"asset_id,omitempty"`
-	AssetName       string             `json:"asset_name,omitempty"`
-	Count           int                `json:"count"`
-	SeverityCounts  map[string]int     `json:"severity_counts,omitempty"`
-	Warnings        []string           `json:"warnings"`
-	WarningMessages []apperror.Message `json:"warning_messages,omitempty"`
-	Steps           []SyncStep         `json:"steps,omitempty"`
-	Logs            []SyncLog          `json:"logs,omitempty"`
-	Mode            string             `json:"mode,omitempty"`
-	Severity        string             `json:"severity,omitempty"`
-	ScanTargets     []string           `json:"scan_targets,omitempty"`
-	ScanTarget      string             `json:"scan_target,omitempty"`
-	ScanRepository  string             `json:"scan_repository,omitempty"`
-	DataCheckedAt   time.Time          `json:"data_checked_at"`
-	PausedAt        time.Time          `json:"paused_at"`
-	PausedSeconds   float64            `json:"paused_seconds,omitempty"`
-	DatabaseWaits   []DatabaseWait     `json:"database_waits,omitempty"`
+	ID              string               `json:"id"`
+	StartedAt       time.Time            `json:"started_at"`
+	FinishedAt      time.Time            `json:"finished_at"`
+	Status          string               `json:"status"`
+	Trigger         string               `json:"trigger"`
+	AssetID         string               `json:"asset_id,omitempty"`
+	AssetName       string               `json:"asset_name,omitempty"`
+	Count           int                  `json:"count"`
+	SeverityCounts  map[string]int       `json:"severity_counts,omitempty"`
+	Warnings        []string             `json:"warnings"`
+	WarningMessages []apperror.Message   `json:"warning_messages,omitempty"`
+	Steps           []SyncStep           `json:"steps,omitempty"`
+	Logs            []SyncLog            `json:"logs,omitempty"`
+	Mode            string               `json:"mode,omitempty"`
+	Severity        string               `json:"severity,omitempty"`
+	ScanTargets     []string             `json:"scan_targets,omitempty"`
+	ScanTarget      string               `json:"scan_target,omitempty"`
+	ScanRepository  string               `json:"scan_repository,omitempty"`
+	Selection       *AssessmentSelection `json:"selection,omitempty"`
+	DataCheckedAt   time.Time            `json:"data_checked_at"`
+	PausedAt        time.Time            `json:"paused_at"`
+	PausedSeconds   float64              `json:"paused_seconds,omitempty"`
+	DatabaseWaits   []DatabaseWait       `json:"database_waits,omitempty"`
+}
+
+type AssessmentSelection struct {
+	Assets       []AssessmentItem `json:"assets,omitempty"`
+	Repositories []AssessmentItem `json:"repositories,omitempty"`
+}
+
+type AssessmentItem struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
 }
 
 type DatabaseWait struct {

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/engine"
 	"vulman/internal/model"
 	"vulman/internal/scanner"
@@ -93,6 +94,45 @@ func TestProjectRepositoryURLsPersistThroughDesktopUpdate(t *testing.T) {
 	}
 	if got := state.ScanRepositories[project.ID]; !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected scan repository identifiers in the workspace: %+v", got)
+	}
+}
+
+func TestDesktopSyncValidatesMultipleSelectionFields(t *testing.T) {
+	db := newTestStore(t)
+	if err := db.Update(func(st *model.State) error {
+		st.Settings.Sources = nil
+		st.Projects = []model.Project{{ID: "p", Assets: []model.Asset{{ID: "a", Name: "demo", Version: "1"}}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := engine.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(eng.Close)
+	desktop := &Desktop{store: db, engine: eng}
+	for _, tc := range []struct{ json, code string }{
+		{`{"asset_ids":[],"scan_targets":[]}`, "assessment_selection_empty"},
+		{`{"asset_ids":["a","missing"]}`, "tech_stack_component_not_found"},
+		{`{"asset_ids":["a"],"scan_targets":["local"]}`, "scan_repository_not_registered"},
+		{`{"asset_id":"a","asset_ids":["a"]}`, "assessment_selection_conflict"},
+	} {
+		var input SyncInput
+		if err := json.Unmarshal([]byte(tc.json), &input); err != nil {
+			t.Fatal(err)
+		}
+		err := desktop.Sync("p", input)
+		if message := apperror.Public(err); message == nil || message.Code != tc.code {
+			t.Fatalf("multiple-selection request was ignored or returned the wrong error: %s, %v", tc.json, err)
+		}
+	}
+	st, err := db.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Projects[0].Syncing || len(st.Projects[0].Runs) != 0 {
+		t.Fatal("invalid desktop selection started a full-project assessment")
 	}
 }
 

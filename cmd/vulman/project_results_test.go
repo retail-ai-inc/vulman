@@ -37,6 +37,7 @@ func TestProjectUpdateRemovesFindingsAndAffectedRuns(t *testing.T) {
 	}
 	keptRuns := []model.Run{
 		{ID: "kept-component", AssetID: "kept", Status: "complete", Count: 1},
+		{ID: "kept-multiple", Selection: &model.AssessmentSelection{Assets: []model.AssessmentItem{{ID: "kept"}}, Repositories: []model.AssessmentItem{{ID: keptKey}, {ID: "local"}}}},
 		{ID: "kept-scoped-scan", Mode: "code", ScanTarget: keptKey},
 		{ID: "kept-scan", Mode: "code", ScanTargets: []string{keptKey, "local"}, Count: 2},
 		{ID: "older-local-scan", Mode: "code", Logs: []model.SyncLog{{Event: "run_started"}, {ScanTarget: "local"}}},
@@ -47,6 +48,8 @@ func TestProjectUpdateRemovesFindingsAndAffectedRuns(t *testing.T) {
 		p.Findings = findings
 		p.Runs = append([]model.Run{
 			{ID: "removed-component", AssetID: "removed"},
+			{ID: "removed-multiple-component", Selection: &model.AssessmentSelection{Assets: []model.AssessmentItem{{ID: "removed"}, {ID: "kept"}}}},
+			{ID: "removed-multiple-repository", Selection: &model.AssessmentSelection{Repositories: []model.AssessmentItem{{ID: removedKey}, {ID: keptKey}}}},
 			{ID: "removed-scoped-scan", Mode: "code", ScanTarget: removedKey},
 			{ID: "mixed-assessment", Count: 4, Steps: []model.SyncStep{{ID: "nvd:kept"}, {ID: "osv:removed"}, {ID: "save"}}},
 			{ID: "removed-scan", Mode: "code", ScanTargets: []string{removedKey, keptKey}, Count: 2},

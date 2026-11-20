@@ -546,3 +546,60 @@ func TestOSVQueueWaitsOnlyForTheSelectedComponentEcosystem(t *testing.T) {
 		t.Fatalf("Go queue did not release while PyPI still updated: %+v %+v %v", p.Runs[0], stats, err)
 	}
 }
+
+func TestOSVQueuePreservesMultipleSelectionAndIgnoresOtherEcosystems(t *testing.T) {
+	s, e := controlEngine(t)
+	if err := s.Update(func(st *model.State) error {
+		st.Settings.OSVEcosystems = []string{"Go", "PyPI"}
+		st.Settings.OSVUpdateSchedule = "off"
+		st.Projects[0].Assets = []model.Asset{{ID: "go", Name: "demo", Version: "1.0.0", Ecosystem: "Go"}, {ID: "go-second", Name: "demo", Version: "1.0.0", Ecosystem: "Go"}, {ID: "python", Name: "demo", Version: "1.0.0", Ecosystem: "PyPI"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-10 * 24 * time.Hour).Format(time.RFC3339Nano)
+	raw := func(eco string) json.RawMessage {
+		return json.RawMessage(fmt.Sprintf(`{"id":"TEST-%s","modified":%q,"summary":"Issue","affected":[{"package":{"name":"demo","ecosystem":%q},"versions":["1.0.0"]}]}`, eco, old, eco))
+	}
+	goData := testutil.NewOSVTransport(t, "Go", []json.RawMessage{raw("Go")})
+	goStarted, pythonStarted, releaseGo := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	goSignal, pythonSignal := sync.OnceFunc(func() { close(goStarted) }), sync.OnceFunc(func() { close(pythonStarted) })
+	unblock := sync.OnceFunc(func() { close(releaseGo) })
+	defer unblock()
+	e.OSV.HTTP.Transport = controlTransport(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "/PyPI/") {
+			pythonSignal()
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}
+		goSignal()
+		select {
+		case <-releaseGo:
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+		return goData.RoundTrip(r)
+	})
+	if err := e.UpdateOSVDatabase(); err != nil {
+		t.Fatal(err)
+	}
+	signalControl(t, goStarted)
+	if err := e.StartSelected("p", "manual", []string{"go", "go-second"}, nil, "auto", ""); err != nil {
+		t.Fatal(err)
+	}
+	p := waitControlStatus(t, s, "queued")
+	if len(p.Runs[0].DatabaseWaits) != 1 || p.Runs[0].DatabaseWaits[0].Source != "osv:Go" {
+		t.Fatal("selected component waited for unrelated ecosystem")
+	}
+	nextRun := p.NextRun
+	unblock()
+	signalControl(t, pythonStarted)
+	p = awaitRun(t, s)
+	stats, err := e.OSV.Stats()
+	if err != nil || !stats.Running || p.Runs[0].Status != "complete" || p.Runs[0].Count != 2 || len(p.Runs[0].Selection.Assets) != 2 {
+		t.Fatalf("Go queue did not release while PyPI still updated: %+v %+v %v", p.Runs[0], stats, err)
+	}
+	if !p.NextRun.Equal(nextRun) {
+		t.Fatal("queued multiple selection changed the full-project schedule")
+	}
+}

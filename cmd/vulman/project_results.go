@@ -103,6 +103,10 @@ func removeProjectResults(project *model.Project, next model.Project) {
 }
 
 func runUsesRemovedComponent(run model.Run, removed map[string]bool) bool {
+	if run.Selection != nil {
+		return slices.ContainsFunc(run.Selection.Assets, func(item model.AssessmentItem) bool { return removed[item.ID] })
+	}
+
 	if run.AssetID != "" {
 		return removed[run.AssetID]
 	}
@@ -122,6 +126,12 @@ func runUsesRemovedComponent(run model.Run, removed map[string]bool) bool {
 }
 
 func runUsesRemovedLocation(run model.Run, removed, labels map[string]bool, allLocationsRemoved bool) bool {
+	if run.Selection != nil {
+		return slices.ContainsFunc(run.Selection.Repositories, func(item model.AssessmentItem) bool {
+			return allLocationsRemoved || removed[item.ID]
+		})
+	}
+
 	if run.ScanTarget != "" {
 		return allLocationsRemoved || removed[run.ScanTarget]
 	}

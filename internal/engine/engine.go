@@ -190,8 +190,25 @@ func (e *Engine) StartFiltered(id, trigger, assetID, mode, severity string) erro
 	return e.StartScoped(id, trigger, assetID, "", mode, severity)
 }
 
-// StartScoped assesses inventory, or scans one registered repository in isolation.
+// StartScoped preserves the single-item API for component cards and older callers.
 func (e *Engine) StartScoped(id, trigger, assetID, scanTarget, mode, severity string) error {
+	if assetID != "" && scanTarget != "" {
+		return apperror.New("assessment_selection_conflict", "Use either the single-item fields or the multiple-selection fields.")
+	}
+
+	var assets, repositories []string
+	if assetID != "" {
+		assets = []string{assetID}
+	}
+	if scanTarget != "" {
+		repositories = []string{scanTarget}
+	}
+
+	return e.StartSelected(id, trigger, assets, repositories, mode, severity)
+}
+
+// Nil selection lists assess Everything. Explicitly empty lists are rejected.
+func (e *Engine) StartSelected(id, trigger string, assetIDs, scanTargets []string, mode, severity string) error {
 	severity = strings.ToUpper(strings.TrimSpace(severity))
 	if severity == "ALL" {
 		severity = ""
@@ -206,27 +223,31 @@ func (e *Engine) StartScoped(id, trigger, assetID, scanTarget, mode, severity st
 	if mode == "" {
 		mode = "auto"
 	}
-
 	if mode != "auto" && mode != "local" && mode != "refresh" {
 		return ErrInvalidMode
 	}
 
-	if scanTarget != "" {
-		if assetID != "" || mode != "auto" {
-			return apperror.New("repository_scan_scope_invalid", "Select either a component or a repository. Repository scans use normal assessment mode.")
+	scope, err := newAssessmentScope(assetIDs, scanTargets)
+	if err != nil {
+		return err
+	}
+	if len(scope.repositories) > 0 {
+		if mode != "auto" {
+			return apperror.New("repository_scan_mode_invalid", "Repository selections require normal assessment mode.")
 		}
-
-		mode = codeScanMode
+		if len(scope.assets) == 0 {
+			mode = codeScanMode
+		}
 	}
 
-	return e.startRun(id, trigger, assetID, scanTarget, mode, severity)
+	return e.startRun(id, trigger, scope, mode, severity)
 }
 
 func (e *Engine) StartCodeScan(id string) error {
-	return e.startRun(id, "manual", "", "", codeScanMode, "")
+	return e.startRun(id, "manual", assessmentScope{all: true}, codeScanMode, "")
 }
 
-func (e *Engine) startRun(id, trigger, assetID, scanTarget, mode, severity string) error {
+func (e *Engine) startRun(id, trigger string, scope assessmentScope, mode, severity string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -249,44 +270,39 @@ func (e *Engine) startRun(id, trigger, assetID, scanTarget, mode, severity strin
 				return apperror.New("project_is_already_syncing", "an assessment is already running for this project")
 			}
 
-			scanProject, ok := projectForScanTarget(*p, scanTarget)
-			if !ok {
-				return apperror.New("scan_repository_not_registered", "The selected repository is no longer registered in this project.")
+			if err := scope.validate(*p); err != nil {
+				return err
 			}
+			selected := scope.project(*p)
 
 			settings = st.Settings
-			if mode == codeScanMode {
+			if mode == codeScanMode || len(scope.repositories) > 0 {
 				if !p.ScanCode || (p.LocalPath == "" && len(p.Repositories()) == 0) {
 					return apperror.New("enable_code_scanning_and_set_a_repository_in_edit_project", "enable code scanning and set a repository in Edit project")
 				}
 				if len(scanner.EnabledTools(settings.Scanners)) == 0 {
 					return apperror.New("enable_a_code_scanner_in_configuration", "enable a code scanner in Configuration")
 				}
-				settings.Sources = nil
 			}
-
-			assetName := ""
-			if assetID != "" {
-				for _, a := range p.Assets {
-					if a.ID == assetID {
-						assetName = a.Name + " " + a.Version
-						break
-					}
-				}
-				if assetName == "" {
-					return ErrAssetNotFound
-				}
+			if mode == codeScanMode {
+				settings.Sources = nil
 			}
 
 			p.Syncing = true
 			now := time.Now()
-			run := model.Run{ID: runID, StartedAt: now, Status: "running", Trigger: trigger, AssetID: assetID, AssetName: assetName, Mode: mode, Severity: severity, Warnings: []string{}, Steps: planSteps(*p, settings, assetID)}
-			run.ScanTarget = scanTarget
-			if scanTarget != "" && scanTarget != "local" {
-				run.ScanRepository = scanner.RepositoryLabel(scanProject.Repositories()[0])
+			run := model.Run{ID: runID, StartedAt: now, Status: "running", Trigger: trigger, Mode: mode, Severity: severity, Warnings: []string{}, Steps: planSteps(selected, settings, ""), Selection: scope.selection(*p)}
+			if run.Selection != nil {
+				if len(run.Selection.Assets) == 1 && len(run.Selection.Repositories) == 0 {
+					run.AssetID = run.Selection.Assets[0].ID
+					run.AssetName = run.Selection.Assets[0].Label
+				}
+				if len(run.Selection.Repositories) == 1 && len(run.Selection.Assets) == 0 {
+					run.ScanTarget = run.Selection.Repositories[0].ID
+					run.ScanRepository = run.Selection.Repositories[0].Label
+				}
 			}
 
-			waits, err := e.databaseDependenciesForAsset(*p, settings, mode, assetID)
+			waits, err := e.databaseDependencies(selected, settings, mode)
 			if err != nil {
 				return err
 			}
@@ -298,7 +314,7 @@ func (e *Engine) startRun(id, trigger, assetID, scanTarget, mode, severity strin
 				run.DatabaseWaits = waits
 				addLog(&run, "", "sync_queued", "")
 			} else {
-				addLog(&run, "", "run_started", assetName)
+				addLog(&run, "", "run_started", run.AssetName)
 			}
 
 			p.Runs = append([]model.Run{run}, p.Runs...)
@@ -306,7 +322,7 @@ func (e *Engine) startRun(id, trigger, assetID, scanTarget, mode, severity strin
 				p.Runs = p.Runs[:30]
 			}
 
-			if d := model.Interval(p.Schedule); d > 0 && assetID == "" && mode != "local" && mode != codeScanMode && severity == "" {
+			if d := model.Interval(p.Schedule); d > 0 && scope.all && mode != "local" && mode != codeScanMode && severity == "" {
 				p.NextRun = now.Add(d)
 			}
 
@@ -339,16 +355,18 @@ func (e *Engine) startRun(id, trigger, assetID, scanTarget, mode, severity strin
 			}
 		}
 
-		e.assess(snapshot, settings, runID, assetID, scanTarget, mode, severity, control)
+		e.assess(snapshot, settings, runID, scope, mode, severity, control)
 	}()
 
 	return nil
 }
 
-func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, scanTarget, mode, severity string, control *workflow.Control) {
+func (e *Engine) assess(p model.Project, s model.Settings, runID string, scope assessmentScope, mode, severity string, control *workflow.Control) {
 	tracker := newTracker(e.Store, p.ID, runID)
 	s = model.EffectiveSettings(s)
 	ctx := sources.WithMode(control.Context(), mode)
+	selected := scope.project(p)
+	previous, preservedFindings := scope.findings(p, mode)
 	all := []model.Finding{}
 	warnings := []string{}
 	warningMessages := []apperror.Message{}
@@ -372,13 +390,9 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, scanT
 		addWarning(apperror.New("assessment_no_components", "No components registered. Add inventory before assessing this project."))
 	}
 
-	for _, a := range p.Assets {
+	for _, a := range selected.Assets {
 		if ctx.Err() != nil {
 			break
-		}
-
-		if assetID != "" && a.ID != assetID {
-			continue
 		}
 
 		if s.Sources["nvd"] {
@@ -418,7 +432,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, scanT
 	}
 
 	all = sources.Merge(all)
-	all = severityCandidates(all, p.Findings, assetID, severity)
+	all = severityCandidates(all, previous, "", severity)
 	if s.Sources["cve"] && ctx.Err() == nil {
 		_ = workflow.Wait(ctx)
 	}
@@ -491,7 +505,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, scanT
 
 	scannerSkipReason := ""
 	switch {
-	case assetID != "":
+	case !scope.all && len(scope.repositories) == 0:
 		scannerSkipReason = "scanner_skipped_component"
 	case !p.ScanCode:
 		scannerSkipReason = "scanner_skipped_disabled"
@@ -502,14 +516,12 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, scanT
 		scannerSkipReason = "scanner_skipped_ended"
 	}
 
-	// The target was validated against this immutable snapshot before starting.
-	scanProject, _ := projectForScanTarget(p, scanTarget)
-	tracker.scannerSetup(scanProject, scanner.EnabledTools(s.Scanners), scannerSkipReason)
+	tracker.scannerSetup(selected, scanner.EnabledTools(s.Scanners), scannerSkipReason)
 
 	if scannerSkipReason == "" {
 		tracker.start("scanner")
 		scannersCompleted := 0
-		items, warns := scanner.ScanDetailed(ctx, scanProject, s, filepath.Dir(e.Store.Paths().Database), func(event scanner.ScanEvent) {
+		items, warns := scanner.ScanDetailed(ctx, selected, s, filepath.Dir(e.Store.Paths().Database), func(event scanner.ScanEvent) {
 			if event.Phase == "scanner_completed" {
 				scannersCompleted++
 			}
@@ -548,33 +560,20 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, scanT
 	defer e.mu.Unlock()
 	defer delete(e.active, p.ID)
 	status := "complete"
-	previous := p.Findings
-	var preservedFindings []model.Finding
 
-	if mode == codeScanMode {
-		previous = nil
-		for _, finding := range p.Findings {
-			if finding.Match == "scanner" && (scanTarget == "" || findingInScanTarget(finding, p, scanTarget)) {
-				previous = append(previous, finding)
-			} else {
-				preservedFindings = append(preservedFindings, finding)
-			}
-		}
-	}
-
-	all = severityCandidates(sources.Merge(all), previous, assetID, severity)
+	all = severityCandidates(sources.Merge(all), previous, "", severity)
 	if len(warnings) > 0 {
 		status = "partial"
 		if successes == 0 && !usedData {
 			status = "failed"
 		}
-		all = appendPrior(all, previous, assetID, severity)
+		all = appendPrior(all, previous, "", severity)
 	}
 
 	if ctx.Err() != nil {
 		addWarning(apperror.New("assessment_interrupted", "Assessment timed out or application stopped."))
 		status = "interrupted"
-		all = appendPrior(all, previous, assetID, severity)
+		all = appendPrior(all, previous, "", severity)
 	}
 
 	all = sources.Merge(all)
@@ -584,7 +583,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, scanT
 		runSeverityCounts = findingSeverityCounts(all)
 	}
 
-	all = retainOutsideScope(all, previous, assetID, severity)
+	all = retainOutsideScope(all, previous, "", severity)
 	if len(preservedFindings) > 0 {
 		all = sources.Merge(append(all, preservedFindings...))
 	}
@@ -599,7 +598,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, scanT
 		addWarning(apperror.New("assessment_stopped", "Assessment stopped by user. Unsaved assessment results were discarded; previous findings were kept."))
 	}
 
-	fullAssessmentComplete := status == "complete" && assetID == "" && severity == "" && mode != codeScanMode
+	fullAssessmentComplete := status == "complete" && scope.all && severity == "" && mode != codeScanMode
 	tracker.start("save")
 	err := e.Store.Update(func(st *model.State) error {
 		for i := range st.Projects {
@@ -612,7 +611,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID, assetID, scanT
 			current.Findings = all
 			if status == "complete" && severity == "" && mode != codeScanMode && current.Revision == p.Revision && (s.Sources["nvd"] || s.Sources["osv"]) {
 				for k := range current.Assets {
-					if assetID == "" || current.Assets[k].ID == assetID {
+					if scope.hasAsset(current.Assets[k].ID) {
 						current.Assets[k].NeedsAssessment = false
 					}
 				}

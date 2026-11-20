@@ -819,6 +819,23 @@
     "anyTechStackRepository": "すべての技術スタック・リポジトリ",
     "repositoryScanHint": "設定済みのコードスキャナーで、選択した登録済みリポジトリのみをスキャンします。他のリポジトリや技術スタックの検出結果は保持されます。プロジェクトのコードスキャンを有効にする必要があります。リポジトリのスキャンには通常の評価モードを使用します。",
     "error_repository_scan_scope_invalid": "コンポーネントまたはリポジトリのいずれかを選択してください。リポジトリのスキャンには通常の評価モードを使用します。",
-    "error_scan_repository_not_registered": "選択したリポジトリは、このプロジェクトに登録されていません。"
+    "error_scan_repository_not_registered": "選択したリポジトリは、このプロジェクトに登録されていません。",
+    "assessmentChooseItems": "項目を1つ以上選択してください",
+    "assessmentSelectedCount": "{count}件を選択中",
+    "assessmentRepositories": "リポジトリ",
+    "assessmentSelectionHint": "コンポーネントとリポジトリを自由に組み合わせて選択できます。「すべて」はプロジェクト全体を対象にします。",
+    "assessmentSelectionChanged": "選択した項目の一部は登録されていません。開始する前に選択内容を確認してください。",
+    "selectedAssessmentHint": "選択した技術スタックを評価し、選択したリポジトリをスキャンします。他の検出結果は保持されます。リポジトリを選択する場合は、プロジェクトのコードスキャンと設定済みスキャナーを有効にする必要があります。通常の評価モードを使用します。",
+    "error_assessment_selection_empty": "技術スタックまたはリポジトリを1つ以上選択するか、「すべて」を選択してください。",
+    "error_assessment_selection_conflict": "単一項目の指定と複数項目の指定は同時に使用できません。",
+    "error_repository_scan_mode_invalid": "リポジトリを選択する場合は通常の評価モードを使用してください。",
+    "selectedComponentsHint": "選択した技術スタックのみを有効な脆弱性データベースと照合します。コンポーネントのみを選択した場合、リポジトリのコードスキャナーは実行しません。",
+    "filterNoItems": "未選択",
+    "filterSelectedCount": "{count}件を選択中",
+    "filterMultipleHint": "選択したコンポーネントまたはリポジトリに該当する検出結果を表示します。「すべて」を選ぶと選択を解除します。",
+    "scopeChoices": "コンポーネントとリポジトリ",
+    "scopeSearch": "コンポーネント・リポジトリを検索…",
+    "scopeSearchClear": "ドロップダウン内の検索をクリア",
+    "scopeSearchEmpty": "検索条件に一致するコンポーネントやリポジトリはありません。"
   }
 }
