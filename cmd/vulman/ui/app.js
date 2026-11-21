@@ -15,6 +15,7 @@ const icons = {
   clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
   check:'<path d="m5 12 4 4L19 6"/>',
+  info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/>',
   stack:'<path d="m12 3 10 5-10 5L2 8Zm-9 10 9 5 9-5M3 18l9 5 9-5"/>',
   leaf:'<path d="M20 3C6 1 2 8 5 15s16 6 15-12Z"/><path d="M4 22 15 9M9 17V9"/>',
   eye:'<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/>',
@@ -367,7 +368,7 @@ function workflowBody(project,run,dismissible=false){
   const codeScan = run.mode === 'code';
   const scope = [runSelectionLabel(run), syncSeverityLabel(run.severity), codeScan ? '' : t('mode_' + (run.mode || 'auto'))].filter(Boolean).join(' · ');
   const progress=t('stepsFinished').replace('{done}',done).replace('{total}',steps.length);
-  return `<div class="workflow-heading"><div><h3>${t(codeScan ? 'codeScanWorkflow' : 'workflow')} · ${esc(project.name)}</h3><p>${esc(scope)} · ${t('elapsed')} ${workflowElapsed(run)}</p>${validDate(run.data_checked_at)?`<p title="${t('sourceDataHint')}">${t('sourceDataChecked')}: ${fmtDate(run.data_checked_at)}</p>`:''}</div><div class="workflow-actions">${pill(t(run.status),run.status)}${workflowControls(project,run)}<button type="button" class="button secondary small" data-toggle-workflow="${esc(run.id)}" aria-expanded="${expanded}" aria-controls="${esc(detailsID)}">${t(expanded?'showLess':'showMore')}</button>${dismissible&&canDismissWorkflow(run)?`<button type="button" class="icon-button workflow-close" data-dismiss-workflow="${esc(run.id)}" data-project-id="${esc(project.id)}" aria-label="${t('closeWorkflow')}" title="${t('closeWorkflow')}">×</button>`:''}</div></div><div class="workflow-progress"><progress max="${Math.max(1,steps.length)}" value="${done}" aria-label="${esc(progress)}"></progress><span>${esc(progress)}</span></div><div class="workflow-current" role="status">${summary?esc(summary):current?`${esc(stepLabel(current))}<span>${esc(stepProgress(current)||t('phase_queued'))}</span>`:esc(t(run.status==='running'?'finishing':run.status))}</div>${databaseWaitNotice(run)}${scannerRunSummary(run)}${codeScanSeverityBreakdown(project, run)}<div class="workflow-details" id="${esc(detailsID)}" ${expanded?'':'hidden'}>${expanded?`<ol class="workflow-stepper">${steps.map(step=>`<li class="workflow-step ${esc(step.status)}"><span class="workflow-step-marker" aria-hidden="true">${{complete:'✓',running:'↻',failed:'!',interrupted:'!',stopped:'■',skipped:'–',pending:'·'}[step.status]||'·'}</span><div><strong>${esc(stepLabel(step))}</strong><p>${esc(stepProgress(step))}</p></div>${pill(t(step.status),step.status)}</li>`).join('')}</ol>${run.scanner_jobs?.length ? `<h3>${t('scannerRunPlan')}</h3>${scannerJobHTML(run.scanner_jobs)}` : ''}<div class="workflow-log-heading"><h3>${t('workflowLogs')}</h3><small>${t('workflowLogsHint')}</small></div><ol class="workflow-logs" tabindex="0" aria-label="${esc(t('workflowLogs'))}">${workflowLogs(run, steps)}</ol>`:''}</div>`;
+  return `<div class="workflow-heading"><div><h3>${t(codeScan ? 'codeScanWorkflow' : 'workflow')} · ${esc(project.name)}</h3><p>${esc(scope)} · ${t('elapsed')} ${workflowElapsed(run)}</p>${validDate(run.data_checked_at)?`<p title="${t('sourceDataHint')}">${t('sourceDataChecked')}: ${fmtDate(run.data_checked_at)}</p>`:''}</div><div class="workflow-actions">${pill(t(run.status),run.status)}${workflowControls(project,run)}<button type="button" class="button secondary small" data-toggle-workflow="${esc(run.id)}" aria-expanded="${expanded}" aria-controls="${esc(detailsID)}">${t(expanded?'showLess':'showMore')}</button>${dismissible&&canDismissWorkflow(run)?`<button type="button" class="icon-button workflow-close" data-dismiss-workflow="${esc(run.id)}" data-project-id="${esc(project.id)}" aria-label="${t('closeWorkflow')}" title="${t('closeWorkflow')}">×</button>`:''}</div></div><div class="workflow-progress"><progress max="${Math.max(1,steps.length)}" value="${done}" aria-label="${esc(progress)}"></progress><span>${esc(progress)}</span></div><div class="workflow-current" role="status">${summary?esc(summary):current?`${esc(stepLabel(current))}<span>${esc(stepProgress(current)||t('phase_queued'))}</span>`:esc(t(run.status==='running'?'finishing':run.status))}</div>${databaseWaitNotice(run)}${scannerRunSummary(run)}${codeScanSeverityBreakdown(project, run)}<div class="workflow-details" id="${esc(detailsID)}" ${expanded?'':'hidden'}>${expanded?`<ol class="workflow-stepper">${steps.map(step=>`<li class="workflow-step ${esc(step.status)}"><span class="workflow-step-marker" aria-hidden="true">${{complete:'✓',running:'↻',failed:'!',interrupted:'!',stopped:'■',skipped:'–',pending:'·'}[step.status]||'·'}</span><div><strong>${esc(stepLabel(step))}</strong><p>${esc(stepProgress(step))}</p></div>${pill(t(step.status),step.status)}</li>`).join('')}</ol>${run.scanner_jobs?.length ? `<div class="workflow-log-heading"><h3>${t('scannerRunPlan')}</h3><small>${t('scannerJobsOrderHint')}</small></div>${scannerJobHTML(run.scanner_jobs, run.logs)}` : ''}<div class="workflow-log-heading"><h3>${t('workflowLogs')}</h3><small>${t('workflowLogsHint')}</small></div><ol class="workflow-logs" tabindex="0" aria-label="${esc(t('workflowLogs'))}">${workflowLogs(run, steps)}</ol>`:''}</div>`;
 }
 function workflowRun(project,run,dismissible=false){if(dismissible&&canDismissWorkflow(run)&&dismissedRuns.has(run.id))return '';return run?.steps?.length?`<section class="sync-workflow ${esc(run.status)}" data-sync-project-id="${esc(project.id)}" data-sync-run="${esc(run.id)}" data-sync-scope="${scopedAssessment(run) ? 'scoped' : 'full'}" data-workflow-dismissible="${dismissible}">${workflowBody(project,run,dismissible)}</section>`:'';}
 function mountActiveSyncs(){if(['project','settings','activity'].includes(route()[0]))return;const html=state.projects.filter(p=>p.syncing).map(p=>workflowRun(p,p.runs?.[0])).join('');$('.page-heading')?.insertAdjacentHTML('afterend','<div id="active-syncs">'+html+'</div>');}
@@ -867,21 +868,87 @@ function renderProject(id){const p=state.projects.find(p=>p.id===id);if(!p){loca
   }
   $('#main').innerHTML=heading(p.name,p.description||t('projectPanelSub'),`<button class="button secondary" data-action="edit-project" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('edit')}${t('editProject')}</button><button type="button" class="button secondary" data-action="scan-code" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${icon('scanCode')}${t('runCodeScan')}</button>${syncControls(p)}`)+`<div class="project-meta">${statusBadge}${pill(t(p.schedule))}${validDate(p.last_sync)?pill(t('lastSync')+' · '+fmtDate(p.last_sync)):''}${validDate(p.data_checked_at)?pill(t('sourceDataChecked')+' · '+fmtDate(p.data_checked_at)):''}${validDate(p.next_run)?pill(t('nextRun')+' · '+fmtDate(p.next_run)):''}${projectRepositoryLinks(p)}</div>${scannerCoverageNotice(p)}${workflow}<div class="tabs">${['vulnerabilities','techStack','activity'].map(tab=>`<button class="tab ${projectTab===tab?'active':''}" data-tab="${tab}">${t(tab)}${tab==='vulnerabilities'?' ('+(p.findings?.length||0)+')':''}</button>`).join('')}</div>${fullRun&&['partial','failed','interrupted','stopped'].includes(fullRun.status)?`<div class="notice">${t('incomplete')}</div>`:''}${(latestRun&&scopedAssessment(latestRun))&&['partial','failed','interrupted','stopped'].includes(latestRun.status)?`<div class="notice">${t(latestRun.mode==='code'?'codeScanIncomplete':'scopedSyncIncomplete')}</div>`:''}${projectNeedsAssessment(p)?`<div class="notice" role="status">${t('techStackResyncHint')}</div>`:p.assessed_revision!==p.revision&&p.assessed_revision?`<div class="notice info">${t('inventoryChanged')}</div>`:''}<div id="project-tab-content"></div>`;const content=$('#project-tab-content');if(projectTab==='vulnerabilities'){content.innerHTML=filtersHTML(false,id)+`<div class="panel" id="finding-results">${findingsTable(id)}</div>`;bindFilters(id);}else if(projectTab==='techStack'){content.innerHTML=`<div class="stack-toolbar"><button type="button" class="button primary" data-action="add-component" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${t('addComponent')}</button></div>`+(p.assets.length?`<div class="stack-grid">${p.assets.map(a=>`<div class="stack-card"><div class="eyebrow">${t(a.kind)}</div><strong>${esc(a.name)}</strong><p>${esc(a.version)}${a.ecosystem?' · '+esc(a.ecosystem):''}</p>${a.cpe?`<code>${esc(a.cpe)}</code>`:''}${componentCriticalCount(p,a)}${componentSyncControls(p,a)}</div>`).join('')}</div>`:empty('noStack','noStackSub','stack'));}else content.innerHTML=`<div class="panel">${activityList(allRuns().filter(r=>r.project_id===id))}</div>`;}
 function field(name,label,value='',type='text',extra=''){return `<label><span>${t(label)}</span><input type="${type}" name="${name}" value="${esc(value)}" ${extra}></label>`;}
+function sourceSettingsHTML(settings) {
+  const sources = [
+    ['nvd', 'NIST NVD', 'discovery', 'nvdEndpoint'],
+    ['cve', 'CVE Program', 'enrichment', 'cveEndpoint'],
+    ['osv', 'OSV.dev', 'packageMatching', 'osvEndpoint'],
+  ];
+
+  return `<section class="settings-section"><h3>${t('sourceSettings')}</h3><p>${t('sourceSettingsHint')}</p>
+    <div class="source-settings-list">${sources.map(([name, label, description, endpoint]) => `<div class="source-settings-row">
+      <label class="check-row source-option"><input type="checkbox" name="source_${name}" ${settings.sources[name] ? 'checked' : ''}><span><strong>${label}</strong><small>${t(description)}</small></span></label>
+      ${field(name + '_url', endpoint, settings[name + '_url'], 'url', 'required')}
+    </div>`).join('')}</div>
+  </section>`;
+}
 function providerOptions(selected){return ['public','openai','claude'].map(v=>`<option value="${v}" ${selected===v?'selected':''}>${t(v)}</option>`).join('');}
 function cacheNumber(n){return Number(n||0).toLocaleString(formatLocale());}
 function cacheUsageHTML(stats={}){return `<span>${t('cacheEntries')}: <strong>${cacheNumber(stats.entries)}</strong></span><span>${t('cacheSize')}: <strong>${((stats.bytes||0)/1048576).toFixed(2)} MiB</strong></span>`;}
 function cacheMetricsHTML(stats={}){const hits=stats.hits||0,misses=stats.misses||0,rate=hits+misses?((hits/(hits+misses))*100).toFixed(1)+'%':'—';return `<div><span>${t('cacheHits')}</span><strong>${cacheNumber(hits)}</strong></div><div><span>${t('cacheMisses')}</span><strong>${cacheNumber(misses)}</strong></div><div><span>${t('cacheHitRate')}</span><strong>${rate}</strong></div><div><span>${t('cacheEvictions')}</span><strong>${cacheNumber(stats.evictions)}</strong></div>`;}
 function updateCacheMetrics(stats){const usage=$('#cache-usage'),metrics=$('#cache-metrics');if(usage)usage.innerHTML=cacheUsageHTML(stats);if(metrics)metrics.innerHTML=cacheMetricsHTML(stats);}
-function cveDatabaseStatusHTML(stats = {}) {
+const localDatabaseSettings = {
+  cve:{title:'cveDBTitle',hint:'cveDBHint',safety:'cveDBSafety',file:'cveDBFile',update:'cveDBUpdate',schedules:['off','hourly','daily']},
+  nvd:{title:'nvdDBTitle',hint:'nvdDBHint',safety:'nvdDBSafety',file:'nvdDBFile',update:'nvdDBUpdate',schedules:['off','two_hourly','daily']},
+  osv:{title:'osvDBTitle',hint:'osvDBHint',safety:'osvDBSafety',file:'osvDBFile',update:'osvDBUpdate',schedules:['off','hourly','daily']},
+};
+
+function localDatabaseStatusHTML(source, stats, detailed = false) {
+  return {cve:cveDatabaseStatusHTML,nvd:nvdDatabaseStatusHTML,osv:osvDatabaseStatusHTML}[source](stats, detailed);
+}
+
+function localDatabaseSettingsHTML(source, extra = '') {
+  const settings = localDatabaseSettings[source], stats = state[source + '_database'] || {};
+  const schedule = state.settings[source + '_update_schedule'] || 'daily';
+
+  return `<section class="settings-section database-settings" data-local-database="${source}">
+    <div class="database-settings-heading"><h3>${t(settings.title)}</h3><div class="local-database-actions">
+      <label class="database-schedule"><span>${t('databaseSchedule')}</span><select name="${source}_update_schedule" title="${esc(t('cveDBSchedule'))}">${settings.schedules.map(value => `<option value="${value}" ${schedule === value ? 'selected' : ''}>${t(value)}</option>`).join('')}</select></label>
+      <button type="button" class="button secondary small" data-action="update-${source}-database" aria-label="${esc(t(settings.update))}" ${stats.running ? 'disabled' : ''}>${t(settings.update)}</button>
+      <button type="button" class="button secondary small" data-action="rebuild-${source}-database" aria-label="${esc(t('cveDBRebuild') + ': ' + t(settings.title))}" ${stats.running ? 'disabled' : ''}>${t('cveDBRebuild')}</button>
+      <button type="button" class="button danger small" data-action="stop-${source}-database" ${stats.running ? '' : 'hidden'}>${t('stop')}</button>
+      <button type="button" class="button small database-more-info" data-action="database-info" data-database="${source}" aria-haspopup="dialog" aria-controls="database-info-dialog" aria-label="${esc(t(settings.title) + ': ' + t('databaseMoreInfo'))}">${icon('info')}${t('databaseMoreInfo')}</button>
+    </div></div>
+    <div class="database-settings-overview" id="${source}-database-status" role="status" aria-live="polite">${localDatabaseStatusHTML(source, stats)}</div>${extra}
+  </section>`;
+}
+
+function openDatabaseInfo(source) {
+  if (!Object.hasOwn(localDatabaseSettings, source)) return;
+  const settings = localDatabaseSettings[source], stats = state[source + '_database'] || {};
+  const dialog = $('#database-info-dialog');
+  dialog.dataset.database = source;
+  $('#database-info-title').textContent = t(settings.title);
+  $('[data-database-info-close]', dialog).setAttribute('aria-label', t('close'));
+  $('#database-info-body').innerHTML = `<p>${t(settings.hint)}</p>
+    <div id="database-info-status" role="status" aria-live="polite">${localDatabaseStatusHTML(source, stats, true)}</div>
+    <p class="database-safety">${t(settings.safety)}</p><p class="form-note">${t('cveDBSchedule')}</p>`;
+  localize(dialog);
+  dialog.showModal();
+}
+
+function updateLocalDatabaseDetails(source, stats) {
+  const path = $(`[data-catalog-path="${source}"]`);
+  const value = stats.path || '—';
+  if (path && path.textContent !== value) path.textContent = value;
+
+  const dialog = $('#database-info-dialog');
+  if (!dialog.open || dialog.dataset.database !== source) return;
+  $('#database-info-status').innerHTML = localDatabaseStatusHTML(source, stats, true);
+}
+
+function cveDatabaseStatusHTML(stats = {}, detailed = false) {
   const phase = stats.phase || (stats.initialized ? 'complete' : stats.resumable ? 'interrupted' : 'idle');
   const count = stats.initialized ? stats.records : stats.on_demand;
   const details = [
     `${t('cveDBRecords')} ${cacheNumber(count)}`,
-    `${t('cacheSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`,
+    `${t('databaseSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`,
   ];
-  if (validDate(stats.source_at)) details.push(`${t('sourceDataChecked')} ${fmtDate(stats.source_at)}`);
-  if (validDate(stats.checked_at)) details.push(`${t('cveDBLastCheck')} ${fmtDate(stats.checked_at)}`);
-  if (phase !== 'importing' && stats.resumable && stats.imported) details.push(t('cveDBImported').replace('{count}', cacheNumber(stats.imported)));
+  if (detailed) {
+    if (validDate(stats.source_at)) details.push(`${t('sourceDataChecked')} ${fmtDate(stats.source_at)}`);
+    if (validDate(stats.checked_at)) details.push(`${t('cveDBLastCheck')} ${fmtDate(stats.checked_at)}`);
+    if (phase !== 'importing' && stats.resumable && stats.imported) details.push(t('cveDBImported').replace('{count}', cacheNumber(stats.imported)));
+  }
 
   return `<div class="cve-database-summary">${pill(t('cveDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${databaseUpdateProgressHTML('cve', stats)}${stats.error_message || stats.error ? `<p class="form-error">${esc(messageText(stats.error_message || stats.error))}</p>` : ''}</div>`;
 }
@@ -895,27 +962,24 @@ function updateCVEDatabaseStatus(stats) {
   const rebuild = $('[data-action="rebuild-cve-database"]');
   if (rebuild) rebuild.disabled = Boolean(stats.running);
   if (stop) stop.hidden = !stats.running;
+  updateLocalDatabaseDetails('cve', stats);
 }
 function cveDatabaseSettingsHTML() {
-  const stats = state.cve_database || {};
-  const schedule = state.settings.cve_update_schedule || 'daily';
-  return `<section class="settings-section"><h3>${t('cveDBTitle')}</h3><p>${t('cveDBHint')}</p>
-    <div class="form-grid"><label><span>${t('cveDBSchedule')}</span><select name="cve_update_schedule">${['off', 'hourly', 'daily'].map(value => `<option value="${value}" ${schedule === value ? 'selected' : ''}>${t(value)}</option>`).join('')}</select></label>
-    <div class="cve-database-actions"><button type="button" class="button secondary" data-action="update-cve-database" ${stats.running ? 'disabled' : ''}>${t('cveDBUpdate')}</button><button type="button" class="button secondary" data-action="rebuild-cve-database" ${stats.running ? 'disabled' : ''}>${t('cveDBRebuild')}</button><button type="button" class="button secondary" data-action="stop-cve-database" ${stats.running ? '' : 'hidden'}>${t('stop')}</button></div></div>
-    <div id="cve-database-status" role="status" aria-live="polite">${cveDatabaseStatusHTML(stats)}</div>
-    <p class="form-note">${t('cveDBSafety')}</p>${stats.path ? `<dl class="storage-paths"><div><dt>${t('cveDBFile')}</dt><dd><code>${esc(stats.path)}</code></dd></div></dl>` : ''}</section>`;
+  return localDatabaseSettingsHTML('cve');
 }
-function nvdDatabaseStatusHTML(stats = {}) {
+function nvdDatabaseStatusHTML(stats = {}, detailed = false) {
   const phase = stats.phase || (stats.initialized ? 'complete' : stats.resumable ? 'interrupted' : 'idle');
   const details = [
     `${t('nvdDBRecords')} ${cacheNumber(stats.records)}`,
     `${t('nvdDBCPEs')} ${cacheNumber(stats.cpes)}`,
-    `${t('cacheSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`,
+    `${t('databaseSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`,
   ];
-  if (validDate(stats.source_at)) details.push(`${t('sourceDataChecked')} ${fmtDate(stats.source_at)}`);
-  if (validDate(stats.cpe_at)) details.push(`${t('nvdDBCPEChecked')} ${fmtDate(stats.cpe_at)}`);
-  if (validDate(stats.checked_at)) details.push(`${t('cveDBLastCheck')} ${fmtDate(stats.checked_at)}`);
-  if (phase !== 'importing' && stats.imported) details.push(t('queueImportedRecords').replace('{done}', cacheNumber(stats.imported)));
+  if (detailed) {
+    if (validDate(stats.source_at)) details.push(`${t('sourceDataChecked')} ${fmtDate(stats.source_at)}`);
+    if (validDate(stats.cpe_at)) details.push(`${t('nvdDBCPEChecked')} ${fmtDate(stats.cpe_at)}`);
+    if (validDate(stats.checked_at)) details.push(`${t('cveDBLastCheck')} ${fmtDate(stats.checked_at)}`);
+    if (phase !== 'importing' && stats.imported) details.push(t('queueImportedRecords').replace('{done}', cacheNumber(stats.imported)));
+  }
 
   return `<div class="cve-database-summary">${pill(t('nvdDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${databaseUpdateProgressHTML('nvd', stats)}${stats.error_message || stats.error ? `<p class="form-error">${esc(messageText(stats.error_message || stats.error))}</p>` : ''}</div>`;
 }
@@ -929,15 +993,10 @@ function updateNVDDatabaseStatus(stats) {
   }
   const stop = $('[data-action="stop-nvd-database"]');
   if (stop) stop.hidden = !stats.running;
+  updateLocalDatabaseDetails('nvd', stats);
 }
 function nvdDatabaseSettingsHTML() {
-  const stats = state.nvd_database || {};
-  const schedule = state.settings.nvd_update_schedule || 'daily';
-  return `<section class="settings-section"><h3>${t('nvdDBTitle')}</h3><p>${t('nvdDBHint')}</p>
-    <div class="form-grid"><label><span>${t('cveDBSchedule')}</span><select name="nvd_update_schedule">${['off', 'two_hourly', 'daily'].map(value => `<option value="${value}" ${schedule === value ? 'selected' : ''}>${t(value)}</option>`).join('')}</select></label>
-    <div class="cve-database-actions"><button type="button" class="button secondary" data-action="update-nvd-database" ${stats.running ? 'disabled' : ''}>${t('nvdDBUpdate')}</button><button type="button" class="button secondary" data-action="rebuild-nvd-database" ${stats.running ? 'disabled' : ''}>${t('cveDBRebuild')}</button><button type="button" class="button secondary" data-action="stop-nvd-database" ${stats.running ? '' : 'hidden'}>${t('stop')}</button></div></div>
-    <div id="nvd-database-status" role="status" aria-live="polite">${nvdDatabaseStatusHTML(stats)}</div><p class="form-note">${t('nvdDBSafety')}</p>
-    ${stats.path ? `<dl class="storage-paths"><div><dt>${t('nvdDBFile')}</dt><dd><code>${esc(stats.path)}</code></dd></div></dl>` : ''}</section>`;
+  return localDatabaseSettingsHTML('nvd');
 }
 function suggestedOSVEcosystems() {
   if (state.osv_suggested_ecosystems) return state.osv_suggested_ecosystems;
@@ -945,10 +1004,10 @@ function suggestedOSVEcosystems() {
   return [...new Set((state.projects || []).flatMap(project => (project.assets || []).map(asset => asset.ecosystem?.split(':')[0]).filter(Boolean)))].sort();
 }
 
-function osvDatabaseStatusHTML(stats = {}) {
+function osvDatabaseStatusHTML(stats = {}, detailed = false) {
   const phase = stats.phase || (stats.resumable ? 'interrupted' : stats.initialized ? 'complete' : 'idle');
-  const details = `${t('osvDBRecords')} ${cacheNumber(stats.records)} · ${t('cacheSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`;
-  const ecosystems = (stats.ecosystems || []).map(item => `<li><strong>${esc(item.ecosystem)}</strong> · ${cacheNumber(item.records)} · ${esc(t('osvDBPhase_' + (item.phase || 'idle')))}${validDate(item.checked_at) ? ` · ${esc(t('sourceDataChecked'))} ${esc(fmtDate(item.checked_at))}` : ''}</li>`).join('');
+  const details = `${t('osvDBRecords')} ${cacheNumber(stats.records)} · ${t('databaseSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`;
+  const ecosystems = detailed ? (stats.ecosystems || []).map(item => `<li><strong>${esc(item.ecosystem)}</strong> · ${cacheNumber(item.records)} · ${esc(t('osvDBPhase_' + (item.phase || 'idle')))}${validDate(item.checked_at) ? ` · ${esc(t('sourceDataChecked'))} ${esc(fmtDate(item.checked_at))}` : ''}</li>`).join('') : '';
 
   return `<div class="cve-database-summary">${pill(t('osvDBPhase_' + phase), stats.running ? 'running' : ['failed','interrupted'].includes(phase) ? 'partial' : '')}<p>${esc(details)}</p>${databaseUpdateProgressHTML('osv', stats)}${ecosystems ? `<ul class="osv-ecosystem-status">${ecosystems}</ul>` : ''}${stats.error_message || stats.error ? `<p class="form-error">${esc(messageText(stats.error_message || stats.error))}</p>` : ''}</div>`;
 }
@@ -965,21 +1024,23 @@ function updateOSVDatabaseStatus(stats) {
 
   const stop = $('[data-action="stop-osv-database"]');
   if (stop) stop.hidden = !stats.running;
+  updateLocalDatabaseDetails('osv', stats);
 }
 
 function osvDatabaseSettingsHTML() {
-  const stats = state.osv_database || {};
   const suggested = suggestedOSVEcosystems();
   const selected = state.settings.osv_ecosystems ?? suggested;
   const options = [...new Set([...(state.osv_ecosystem_options || []), ...suggested, ...selected])].sort();
 
-  return `<section class="settings-section"><h3>${t('osvDBTitle')}</h3><p>${t('osvDBHint')}</p>
-    <div class="form-grid"><label><span>${t('cveDBSchedule')}</span><select name="osv_update_schedule">${['off','hourly','daily'].map(value => `<option value="${value}" ${(state.settings.osv_update_schedule || 'daily') === value ? 'selected' : ''}>${t(value)}</option>`).join('')}</select></label>
-    <div class="cve-database-actions"><button type="button" class="button secondary" data-action="update-osv-database" ${stats.running ? 'disabled' : ''}>${t('osvDBUpdate')}</button><button type="button" class="button secondary" data-action="rebuild-osv-database" ${stats.running ? 'disabled' : ''}>${t('cveDBRebuild')}</button><button type="button" class="button secondary" data-action="stop-osv-database" ${stats.running ? '' : 'hidden'}>${t('stop')}</button></div></div>
-    <div class="section-heading"><h3>${t('osvDBEcosystems')}</h3><button type="button" class="button secondary small" data-action="suggest-osv-ecosystems">${t('osvDBSuggest')}</button></div>
+  return localDatabaseSettingsHTML('osv', `<details class="database-ecosystem-settings"><summary><span>${t('osvDBEcosystems')}</span><small data-osv-selection-summary>${esc(t('databaseEcosystemsSelected').replace('{count}', cacheNumber(new Set(selected).size)))}</small></summary>
+    <div class="osv-ecosystem-controls"><button type="button" class="button secondary small" data-action="suggest-osv-ecosystems">${t('osvDBSuggest')}</button><p class="form-note">${t('osvDBSaveFirst')}</p></div>
     <div class="osv-ecosystems-grid">${options.map(value => `<label class="check-row"><input type="checkbox" data-osv-ecosystem value="${esc(value)}" ${selected.includes(value) ? 'checked' : ''}><span>${esc(value)}</span></label>`).join('')}</div>
-    <p class="form-note">${t('osvDBSaveFirst')}</p><div id="osv-database-status" role="status" aria-live="polite">${osvDatabaseStatusHTML(stats)}</div><p class="form-note">${t('osvDBSafety')}</p>
-    ${stats.path ? `<dl class="storage-paths"><div><dt>${t('osvDBFile')}</dt><dd><code>${esc(stats.path)}</code></dd></div></dl>` : ''}</section>`;
+    </details>`);
+}
+
+function updateOSVEcosystemSelectionSummary() {
+  const summary = $('[data-osv-selection-summary]');
+  if (summary) summary.textContent = t('databaseEcosystemsSelected').replace('{count}', cacheNumber($$('[data-osv-ecosystem]:checked').length));
 }
 
 function cacheSettingsHTML(){
@@ -1016,7 +1077,16 @@ function revealInvalidAdvancedSetting(event) {
   if (section) section.open = true;
 }
 
-function storagePathsHTML(){const paths=state.storage_paths||{};return `<dl class="storage-paths"><div><dt>${t('databaseFile')}</dt><dd><code>${esc(paths.database||'—')}</code></dd></div><div><dt>${t('keyFile')}</dt><dd><code>${esc(paths.key||'—')}</code></dd></div></dl>`;}
+function storagePathsHTML() {
+  const paths = state.storage_paths || {};
+  const files = [
+    ['databaseFile', paths.database],
+    ...Object.entries(localDatabaseSettings).map(([source, settings]) => [settings.file, state[source + '_database']?.path, source]),
+    ['keyFile', paths.key],
+  ];
+
+  return `<dl class="storage-paths">${files.map(([label, path, source]) => `<div><dt>${esc(t(label))}</dt><dd><code${source ? ` data-catalog-path="${source}"` : ''}>${esc(path || '—')}</code></dd></div>`).join('')}</dl>`;
+}
 async function browseFolder(input, title, directory = input.value) {
   const chosen = await invoke('ChooseFolder', t(title), directory);
   if (chosen && input.isConnected) {
@@ -1113,9 +1183,10 @@ const scannerInstallations = {
   },
 };
 const scannerStatusKeys = {ready:'scannerReady',missing:'scannerMissing',permission:'scannerPermission',path:'scannerPath',failed:'scannerFailed',timeout:'scannerTimeout'};
+const scannerCheckResults = new Map();
 
 function snykSetupHTML() {
-  return `<div class="scanner-check snyk-setup">
+  return `<div class="snyk-setup">
     <p>${t('scannerSnykInstall')} <a href="${snykInstall}" target="_blank" rel="noreferrer">${t('scannerInstallGuide')} ↗</a></p>
     <p>${t('scannerSnykSetup')} <a href="${snykAuth}" target="_blank" rel="noreferrer">${t('scannerSnykTokenGuide')} ↗</a></p>
     <p>${t('scannerSnykProject')}</p>
@@ -1140,9 +1211,52 @@ function defaultScannerProfile(project, target) {
 function globalScannerEnabled(id) {
   return Boolean(state?.settings?.scanners?.[id]);
 }
-function scannerJobHTML(jobs) {
-  return `<div class="scanner-job-list" tabindex="0"><table><thead><tr><th>${t('scannerRepository')}</th><th>${t('scannerTool')}</th><th>${t('scannerProjectFolder')}</th><th>${t('scannerJobStatus')}</th><th>${t('scannerReason')}</th></tr></thead><tbody>${jobs.map(job => `<tr><td>${esc(job.repository || (job.target === 'local' ? t('scanTarget_local') : ''))}</td><td>${esc(scannerLabel(job.tool))}</td><td><code>${esc(job.path || '.')}</code></td><td>${esc(t('scannerJob_' + job.status))}</td><td>${esc(job.reason ? t('scannerReason_' + job.reason) : '')}</td></tr>`).join('')}</tbody></table></div>`;
+function scannerJobKey(tool, target, repository, path) {
+  return JSON.stringify([tool, target === 'local' ? 'local' : 'remote', repository || '', path || '']);
 }
+function newestScannerJobs(jobs, logs = []) {
+  const events = new Set(['scanning','scanner_completed','scanner_failed','scanner_interrupted','scanner_blocked','scanner_missing_token','scanner_skipped']);
+  const recorded = new Map();
+  for (const [index, entry] of (logs || []).entries()) {
+    if (entry.step_id === 'scanner' && entry.tool && events.has(entry.event)) {
+      recorded.set(scannerJobKey(entry.tool, entry.scan_target, entry.scan_repository, entry.scan_path), index + 1);
+    }
+  }
+
+  return jobs.map((job, index) => ({
+    job, index, sequence:Number.isSafeInteger(job.update_sequence) && job.update_sequence > 0 ? job.update_sequence : 0,
+    recorded:recorded.get(scannerJobKey(job.tool, job.target, job.repository, job.path)) || 0,
+  })).sort((a, b) => b.sequence - a.sequence || b.recorded - a.recorded || b.index - a.index).map(item => item.job);
+}
+function scannerJobCounts(logs, jobs = []) {
+  const seen = new Set(), ambiguous = new Set();
+  for (const job of jobs) {
+    const key = scannerJobKey(job.tool, job.target, job.repository, job.path);
+    if (seen.has(key)) ambiguous.add(key);
+    seen.add(key);
+  }
+  const counts = new Map();
+  for (const entry of logs || []) {
+    if (entry.step_id === 'scanner' && entry.event === 'scanner_completed' && entry.tool && Number.isSafeInteger(entry.findings) && entry.findings >= 0) {
+      const key = scannerJobKey(entry.tool, entry.scan_target, entry.scan_repository, entry.scan_path);
+      if (!ambiguous.has(key)) counts.set(key, entry.findings);
+    }
+  }
+  return counts;
+}
+function scannerJobFindings(job, recorded) {
+  if (job.status !== 'complete') return null;
+  if (Number.isSafeInteger(job.findings) && job.findings >= 0) return job.findings;
+  return recorded.get(scannerJobKey(job.tool, job.target, job.repository, job.path)) ?? null;
+}
+function scannerJobHTML(jobs, logs = []) {
+  const ordered = newestScannerJobs(jobs, logs), counts = scannerJobCounts(logs, jobs);
+  return `<div class="scanner-job-list" tabindex="0"><table><thead><tr><th>${t('scannerRepository')}</th><th>${t('scannerTool')}</th><th>${t('scannerProjectFolder')}</th><th>${t('scannerJobStatus')}</th><th class="scanner-job-findings" title="${esc(t('scannerJobFindingsHint'))}">${t('scannerJobFindings')}</th><th>${t('scannerReason')}</th></tr></thead><tbody>${ordered.map(job => {
+    const count = scannerJobFindings(job, counts);
+    return `<tr><td>${esc(job.repository || (job.target === 'local' ? t('scanTarget_local') : ''))}</td><td>${esc(scannerLabel(job.tool))}</td><td><code>${esc(job.path || '.')}</code></td><td>${esc(t('scannerJob_' + job.status))}</td><td class="scanner-job-findings" ${count === null ? `title="${esc(t('scannerJobFindingsUnavailable'))}"` : ''}>${count === null ? '—' : formatResultNumber(count)}</td><td>${esc(job.reason ? t('scannerReason_' + job.reason) : '')}</td></tr>`;
+  }).join('')}</tbody></table></div><p class="form-note">${t('scannerJobFindingsHint')}</p>`;
+}
+
 function githubScannerProfile(profile, registered = true) {
   if (!profile || !profile.mode || profile.mode === 'auto') {
     return {mode:registered?'disabled':'custom', tools:[], additional_tools:[], selection_required:registered};
@@ -1166,6 +1280,11 @@ function projectScannerProfileHTML(profile, local = false) {
   if (!local) profile = githubScannerProfile(profile);
   const mode = profile.mode || 'auto';
   const definitions = scannerDefinitions();
+  const enabledTools = definitions.filter(tool => globalScannerEnabled(tool.id));
+  const languageTools = enabledTools.filter(tool => tool.scope !== 'repository');
+  const repositoryTools = enabledTools.filter(tool => tool.scope === 'repository');
+  const preservedTools = (profile.tools || []).filter(id => !globalScannerEnabled(id));
+  const preservedAdditionalTools = (profile.additional_tools || []).filter(id => !globalScannerEnabled(id));
   const choice = (tool, additional) => {
     const enabled = globalScannerEnabled(tool.id);
     const checked = (additional ? profile.additional_tools || [] : profile.tools || []).includes(tool.id);
@@ -1176,16 +1295,27 @@ function projectScannerProfileHTML(profile, local = false) {
   return `<div class="repository-scanner-profile" data-repository-profile data-scanner-location="${local?'local':'github'}">
     <div class="scanner-profile-header"><strong>${t('repositoryScannerProfile')}</strong><label class="scanner-profile-mode"><span>${t('scannerMode')}</span><select data-project-scanner-mode>${modes.map(value => `<option value="${value}" ${mode === value?'selected':''}>${t('scannerMode_' + value)}</option>`).join('')}</select></label></div>
     <p class="scanner-profile-hint" data-profile-mode-hint>${scannerModeHint(mode, local)}</p>
-    <div class="scanner-profile-tools" data-profile-custom ${mode === 'custom'?'':'hidden'}>${definitions.map(tool => choice(tool, false)).join('')}</div>
-    ${local ? `<details class="scanner-detection-rules" data-profile-auto ${mode === 'auto'?'':'hidden'}><summary>${t('scannerAutomaticRules')}</summary><div class="scanner-auto-tools">${definitions.filter(tool => tool.scope !== 'repository').map(tool => `<div><strong>${esc(tool.label)}</strong><small>${esc(tool.detect?.join(', ') || t('scannerAutomaticDetection'))}</small><span>${esc(globalScannerEnabled(tool.id) ? t('scannerAutomaticDetection') : t('scannerGloballyDisabled'))}</span></div>`).join('')}</div></details>
-    <div data-profile-extras ${mode === 'auto'?'':'hidden'}><h4>${t('scannerAdditionalTools')}</h4><div class="scanner-profile-tools">${definitions.filter(tool => tool.scope === 'repository').map(tool => choice(tool, true)).join('')}</div></div>` : ''}
+    <div class="scanner-profile-tools" data-profile-custom ${mode === 'custom'?'':'hidden'}>${enabledTools.length ? enabledTools.map(tool => choice(tool, false)).join('') : `<p class="form-note">${t('scannerCustomNoTools')}</p>`}</div>
+    ${preservedTools.map(id => `<input type="hidden" data-profile-preserved-tool="${esc(id)}" data-profile-additional="false">`).join('')}
+    ${preservedAdditionalTools.map(id => `<input type="hidden" data-profile-preserved-tool="${esc(id)}" data-profile-additional="true">`).join('')}
+    ${local && languageTools.length ? `<details class="scanner-detection-rules" data-profile-auto ${mode === 'auto'?'':'hidden'}><summary>${t('scannerAutomaticRules')}</summary><ul class="scanner-auto-tools">${languageTools.map(tool => {
+      const hint = tool.detect?.join(', ') || t('scannerAutomaticDetection');
+      return `<li class="scanner-auto-tool" tabindex="0" title="${esc(hint)}" aria-label="${esc(tool.label + ' · ' + hint)}">${esc(tool.label)}</li>`;
+    }).join('')}</ul></details>` : ''}
+    ${local && repositoryTools.length ? `<div data-profile-extras ${mode === 'auto'?'':'hidden'}><h4>${t('scannerAdditionalTools')}</h4><div class="scanner-profile-tools">${repositoryTools.map(tool => choice(tool, true)).join('')}</div></div>` : ''}
+    ${local && !enabledTools.length ? `<p class="form-note" data-profile-auto ${mode === 'auto'?'':'hidden'}>${t('scannerCustomNoTools')}</p>` : ''}
     ${profile.selection_required ? `<p class="scanner-profile-migration" role="status">${t('scannerGitHubAutomaticRemoved')}</p>` : ''}
     ${profile.needs_scan && mode !== 'disabled' ? `<p class="scanner-policy-notice">${t('scannerProfileNeedsScan')}</p>` : ''}
   </div>`;
 }
 function readProjectScannerProfile(card) {
-  const selected = additional => $$('[data-project-scanner-tool]:checked', card)
-    .filter(input => input.dataset.profileAdditional === String(additional)).map(input => input.dataset.projectScannerTool);
+  const selected = additional => {
+    const checked = $$('[data-project-scanner-tool]:checked', card)
+      .filter(input => input.dataset.profileAdditional === String(additional)).map(input => input.dataset.projectScannerTool);
+    const preserved = $$('[data-profile-preserved-tool]', card)
+      .filter(input => input.dataset.profilePreservedTool && input.dataset.profileAdditional === String(additional)).map(input => input.dataset.profilePreservedTool);
+    return [...new Set([...checked, ...preserved])];
+  };
   return {mode:$('[data-project-scanner-mode]', card).value, tools:selected(false), additional_tools:selected(true)};
 }
 function changeProjectScannerMode(select) {
@@ -1222,13 +1352,20 @@ function scannerRunSummary(run) {
 
 function scannerSettingsHTML(names) {
   return scannerDefinitions().map(({id:name,label}) => {
-    const checkable = true;
-    const id = 'scanner-status-' + name;
-    const row = `<label class="check-row"><input type="checkbox" name="scanner_${name}" ${names[name]?'checked':''} ${checkable?`data-scanner-check="${name}" aria-describedby="${id}"`:''}><span><strong>${label}</strong></span></label>`;
-    return checkable ? `<div class="scanner-option">${row}${name === 'snyk' ? snykSetupHTML() : ''}<div class="scanner-check" id="${id}" aria-live="polite" hidden></div></div>` : row;
+    const key = esc(name), id = 'scanner-status-' + key;
+    return `<div class="scanner-option">
+      <div class="scanner-option-heading">
+        <label class="check-row"><input type="checkbox" name="scanner_${key}" ${names[name]?'checked':''} data-scanner-check="${key}" aria-describedby="${id}"><span><strong>${esc(label)}</strong></span></label>
+        <div class="scanner-option-actions">
+          <button type="button" class="button secondary small scanner-recheck" id="scanner-recheck-${key}" data-action="check-scanner" data-scanner="${key}" ${names[name]?'':'hidden'}>${t('scannerCheckAgain')}</button>
+          <button type="button" class="button small scanner-more-info" data-action="scanner-info" data-scanner="${key}" aria-haspopup="dialog" aria-controls="scanner-info-dialog" aria-label="${esc(label + ': ' + t('scannerMoreInfo'))}">${icon('info')}${t('scannerMoreInfo')}</button>
+        </div>
+      </div>
+      <div class="scanner-check" id="${id}" aria-live="polite" hidden></div>
+    </div>`;
   }).join('');
 }
-function scannerResultHTML(name, result) {
+function scannerGuidanceHTML(name, result) {
   const {platform,status} = result;
   let guidance = '';
   if (status === 'permission') {
@@ -1241,8 +1378,37 @@ function scannerResultHTML(name, result) {
     const pathHint = {darwin:'scannerPathDarwin',windows:'scannerPathWindows'}[platform] || 'scannerPathLinux';
     guidance = `<p>${t(hint)}</p>${command?`<code class="scanner-command">${esc(command)}</code>`:''}<p>${t(pathHint)}</p><a href="${url}" target="_blank" rel="noreferrer">${t('scannerInstallGuide')} ↗</a>`;
   }
-  const statusKey = name === 'snyk' && status === 'ready' ? 'scannerSnykReady' : scannerStatusKeys[status] || 'scannerFailed';
-  return `<p class="scanner-status ${status === 'ready' ? 'ready' : 'warning'}">${t(statusKey)}</p>${result.path?`<code class="scanner-path">${esc(result.path)}</code>`:''}${result.message || result.detail?`<p>${esc(messageText(result.message || result.detail))}</p>`:''}${guidance}<button type="button" class="button secondary small scanner-recheck" data-action="check-scanner" data-scanner="${name}">${t('scannerCheckAgain')}</button>`;
+  return guidance;
+}
+function scannerResultHTML(name, result) {
+  const status = result.status;
+  const statusKey = status === 'checking' ? 'scannerChecking' : scannerStatusKeys[status] || 'scannerFailed';
+  return `<p class="scanner-status ${status === 'ready' ? 'ready' : status === 'checking' ? '' : 'warning'}">${t(statusKey)}</p>`;
+}
+function scannerInfoHTML(name, result) {
+  let details = `<p>${t('scannerCheckFirst')}</p>`;
+  if (result) {
+    details = scannerResultHTML(name, result);
+    if (name === 'snyk' && result.status === 'ready') details += `<p>${t('scannerSnykReady')}</p>`;
+    if (result.path) details += `<code class="scanner-path">${esc(result.path)}</code>`;
+    if (result.message || result.detail) details += `<p>${esc(messageText(result.message || result.detail))}</p>`;
+    if (result.status !== 'checking') details += scannerGuidanceHTML(name, result);
+  }
+  return details + (name === 'snyk' ? snykSetupHTML() : '');
+}
+function updateScannerInfo(name) {
+  const dialog = $('#scanner-info-dialog');
+  if (dialog.open && dialog.dataset.scanner === name) $('#scanner-info-body').innerHTML = scannerInfoHTML(name, scannerCheckResults.get(name));
+}
+function openScannerInfo(name) {
+  if (!scannerDefinitions().some(tool => tool.id === name)) return;
+  const dialog = $('#scanner-info-dialog');
+  dialog.dataset.scanner = name;
+  $('#scanner-info-title').textContent = t('scannerInfoTitle').replace('{tool}', scannerLabel(name));
+  $('[data-scanner-info-close]', dialog).setAttribute('aria-label', t('close'));
+  $('#scanner-info-body').innerHTML = scannerInfoHTML(name, scannerCheckResults.get(name));
+  localize(dialog);
+  dialog.showModal();
 }
 async function checkScanner(input) {
   const name = input.dataset.scannerCheck;
@@ -1251,18 +1417,30 @@ async function checkScanner(input) {
   const request = String(Number(panel.dataset.request || 0) + 1);
   panel.dataset.request = request;
   panel.hidden = !input.checked;
+  const recheck = $('#scanner-recheck-' + name);
+  recheck.hidden = !input.checked;
+  recheck.disabled = input.checked;
   if (!input.checked) {
+    scannerCheckResults.delete(name);
     panel.textContent = '';
+    updateScannerInfo(name);
     return;
   }
+  scannerCheckResults.set(name, {status:'checking'});
   panel.textContent = t('scannerChecking');
+  updateScannerInfo(name);
   let result;
   try {
     result = await invoke('CheckScanner', name);
   } catch {
     result = {status:'failed'};
   }
-  if (panel.isConnected && panel.dataset.request === request) panel.innerHTML = scannerResultHTML(name,result);
+  if (panel.isConnected && panel.dataset.request === request) {
+    scannerCheckResults.set(name, result);
+    panel.innerHTML = scannerResultHTML(name, result);
+    recheck.disabled = false;
+    updateScannerInfo(name);
+  }
 }
 const credentialLabels = {nvd:'NVD API key', openai:'OpenAI API key', claude:'Claude API key', snyk:'snykTokenLabel', github:'githubTokenLabel'};
 const credentialDots = '••••••';
@@ -1388,7 +1566,7 @@ function credentialSettingsHTML() {
   return `<section class="settings-section"><h3>${t('tokens')}</h3><p>${t('tokensHint')}</p><div class="form-grid">${fields}</div>${back}</section>`;
 }
 
-function renderSettings(){const s=state.settings;clearing=new Set();$('#main').innerHTML=heading(t('settings'),t('settingsSub'))+`<form id="settings-form" class="settings-layout panel"><section class="settings-section"><h3>${t('general')}</h3><div class="form-grid"><label><span>${t('uiLanguage')}</span><select name="language">${languageOptions()}</select></label></div></section><section class="settings-section"><h3>${t('sourceSettings')}</h3><p>${t('sourceSettingsHint')}</p>${['nvd','cve','osv'].map(n=>`<label class="check-row"><input type="checkbox" name="source_${n}" ${s.sources[n]?'checked':''}><span><strong>${{nvd:'NIST NVD',cve:'CVE Program',osv:'OSV.dev'}[n]}</strong><small>${t({nvd:'discovery',cve:'enrichment',osv:'packageMatching'}[n])}</small></span></label>`).join('')}<div class="form-grid">${field('nvd_url','nvdEndpoint',s.nvd_url,'url','required')}${field('cve_url','cveEndpoint',s.cve_url,'url','required')}${field('osv_url','osvEndpoint',s.osv_url,'url','required')}</div></section>${cveDatabaseSettingsHTML()}${nvdDatabaseSettingsHTML()}${osvDatabaseSettingsHTML()}${credentialSettingsHTML()}<section class="settings-section"><h3>${t('aiSettings')}</h3><p>${t('aiSettingsHint')}</p><div class="form-grid"><label><span>${t('defaultProvider')}</span><select name="ai_provider">${providerOptions(s.ai_provider)}</select></label><div></div>${field('openai_model','openaiModel',s.openai_model,'text','placeholder="e.g. a model ID enabled for your API account"')}${field('claude_model','claudeModel',s.claude_model,'text','placeholder="e.g. a model ID enabled for your API account"')}</div></section><section class="settings-section"><h3>${t('scannerSettings')}</h3><p>${t('scannerSettingsHint')}</p><div class="form-grid">${scannerSettingsHTML(s.scanners)}</div></section>${advancedSettingsHTML()}<section class="settings-section"><p class="storage-note">${t('storageNote')}</p>${storageDirectoryHTML()}${storagePathsHTML()}</section><div class="settings-actions"><button class="button primary" type="submit">${t('saveSettings')}</button><span class="form-error" id="settings-error"></span></div></form>`;$('#settings-form').addEventListener('submit',saveSettings);$('#settings-form').addEventListener('invalid',revealInvalidAdvancedSetting,true);$$('[data-scanner-check]:checked').forEach(checkScanner);}
+function renderSettings(){const s=state.settings;clearing=new Set();scannerCheckResults.clear();$('#main').innerHTML=heading(t('settings'),t('settingsSub'))+`<form id="settings-form" class="settings-layout panel"><section class="settings-section"><h3>${t('general')}</h3><div class="form-grid"><label><span>${t('uiLanguage')}</span><select name="language">${languageOptions()}</select></label></div></section>${sourceSettingsHTML(s)}${cveDatabaseSettingsHTML()}${nvdDatabaseSettingsHTML()}${osvDatabaseSettingsHTML()}${credentialSettingsHTML()}<section class="settings-section"><h3>${t('aiSettings')}</h3><p>${t('aiSettingsHint')}</p><div class="form-grid"><label><span>${t('defaultProvider')}</span><select name="ai_provider">${providerOptions(s.ai_provider)}</select></label><div></div>${field('openai_model','openaiModel',s.openai_model,'text','placeholder="e.g. a model ID enabled for your API account"')}${field('claude_model','claudeModel',s.claude_model,'text','placeholder="e.g. a model ID enabled for your API account"')}</div></section><section class="settings-section"><h3>${t('scannerSettings')}</h3><p>${t('scannerSettingsHint')}</p><div class="form-grid scanner-settings-grid">${scannerSettingsHTML(s.scanners)}</div></section><section class="settings-section"><h3>${esc(t('fileDatabases'))}</h3><p class="storage-note">${t('storageNote')}</p>${storageDirectoryHTML()}${storagePathsHTML()}</section>${advancedSettingsHTML()}<div class="settings-actions"><button class="button primary" type="submit">${t('saveSettings')}</button><span class="form-error" id="settings-error"></span></div></form>`;$('#settings-form').addEventListener('submit',saveSettings);$('#settings-form').addEventListener('invalid',revealInvalidAdvancedSetting,true);$$('[data-scanner-check]:checked').forEach(checkScanner);}
 function render(){if(pendingPageRender)return;renderNav();const [page,id,view]=route();if(location.hash===newProjectHash)renderProjectEditor();else if(page==='projects')$('#main').innerHTML=heading(t('projects'),t('projectsSub'),button('addProject','new-project',true,'plus'))+`<div class="panel"><div class="panel-head"><h2>${t('yourProjects')} <span class="muted">(${state.projects.length})</span></h2></div>${projectList(state.projects, true)}</div>`;else if(page==='vulnerabilities'){$('#main').innerHTML=heading(t('vulnerabilities'),t('vulnsSub'),state.projects.length?syncAllControls(true):'')+filtersHTML(true)+`<div class="panel" id="finding-results">${findingsTable()}</div>`;bindFilters();}else if(page==='activity')$('#main').innerHTML=heading(t('activity'),t('activitySub'))+`<div class="panel">${activityList()}</div>`;else if(page==='settings')renderSettings();else if(page==='project'){if(view==='edit')renderProjectEditor(id);else if(view==='delete')renderProjectDeletion(id);else renderProject(id);}else renderOverview();mountActiveSyncs();}
 function componentFields(a={},removable=true){const el=document.createElement('div');el.className='asset-field';el.dataset.id=a.id||'';el.innerHTML=`<div class="asset-top"><label><span>${t('category')}</span><select data-field="kind">${['language','database','container','docker','webserver','ai','library','other'].map(k=>`<option value="${k}" ${(a.kind||'library')===k?'selected':''}>${t(k)}</option>`).join('')}</select></label><label><span>${t('name')}</span><input data-field="name" value="${esc(a.name)}" required placeholder="org.apache.logging.log4j:log4j-core" maxlength="300"></label><label><span>${t('version')}</span><input data-field="version" value="${esc(a.version)}" required placeholder="2.14.1" maxlength="100"></label>${removable?`<button type="button" class="icon-button asset-remove" aria-label="${t('removeComponent')}">×</button>`:''}</div><div class="asset-bottom"><label><span>${t('ecosystem')}</span><select data-field="ecosystem"><option value="">—</option>${['Go','npm','PyPI','Maven','Packagist','crates.io','RubyGems','NuGet','Hex','Pub','Debian','Alpine','GIT'].map(e=>`<option ${a.ecosystem===e?'selected':''}>${e}</option>`).join('')}</select></label><label><span>${t('cpeLabel')}</span><input data-field="cpe" value="${esc(a.cpe)}" placeholder="cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"></label></div>`;return el;}
 function openComponent(id){const p=state.projects.find(p=>p.id===id);if(!p||p.syncing)return false;componentDraft={...p,assets:p.assets.map(a=>({...a}))};$('#component-form').reset();$('#component-error').textContent='';$('#component-project').textContent=t('componentProject').replace('{project}',p.name);const fields=$('#component-fields');fields.innerHTML='';const el=componentFields({},false);fields.append(el);localize($('#component-dialog'));$('#component-dialog').showModal();el.querySelector('[data-field="name"]').focus();return true;}
@@ -1712,8 +1890,13 @@ case'remove-repository': {
   break;
 }
 case'configure-github-token':configureGitHubToken(target.closest('form'));break;
+case'scanner-info':openScannerInfo(target.dataset.scanner);break;
+case'database-info':openDatabaseInfo(target.dataset.database);break;
 case'focus-snyk-token': {
-  const token = $('#credential-snyk', target.closest('form'));
+  const token = $('#credential-snyk');
+  if (!token) break;
+  const dialog = $('#scanner-info-dialog');
+  if (dialog.open) dialog.close();
   token.scrollIntoView({block:'center'});
   token.focus({preventScroll:true});
   break;
@@ -1723,6 +1906,7 @@ case'toggle-credential':await toggleCredential(target);break;
 case'suggest-osv-ecosystems': {
     const selected = suggestedOSVEcosystems();
     $$('[data-osv-ecosystem]').forEach(input => {input.checked = selected.includes(input.value);});
+    updateOSVEcosystemSelectionSummary();
     break;
   }
 case'clear-api-response-cache':await clearAPIResponseCache(target);break;
@@ -1764,7 +1948,7 @@ case'update-cve-database':case'stop-cve-database':case'rebuild-cve-database':{
   break;
 }
 case'browse-local-repository':await browseFolder(target.closest('form').elements.local_path,'chooseRepositoryFolder');break;case'use-data-directory':{const input=$('#data-directory');if(!input.value.trim()){input.focus();return;}await changeDataDirectory(input.value);break;}case'reset-data-directory':await changeDataDirectory('');break;case'check-scanner':{const input=$('[data-scanner-check="'+target.dataset.scanner+'"]');if(input)await checkScanner(input);break;}case'advice':await getAdvice($('#advice-provider').value);break;}}catch(err){toast(formatError(err),true);target.disabled=false;}});
-document.addEventListener('change',e=>{if(e.target.matches('[data-project-scanner-mode]'))changeProjectScannerMode(e.target);if(e.target.matches('[data-scanner-check]'))checkScanner(e.target);if(e.target.matches('[data-sync-project]')){changeAssessmentSelection(e.target);}if(e.target.matches('[data-sync-mode-project]')){syncModeSelection[e.target.dataset.syncModeProject]=e.target.value;updateAssessmentAction(e.target.dataset.syncModeProject);}if(e.target.matches('[data-sync-severity-project]'))syncSeveritySelection[e.target.dataset.syncSeverityProject]=e.target.value;if(e.target.matches('[data-sync-all-severity]'))syncAllSeverity=e.target.value;if(e.target.matches('[data-sync-component-severity]'))componentSyncSeveritySelection.set(stackKey(e.target.dataset.projectId,e.target.dataset.assetId),e.target.value);});
+document.addEventListener('change',e=>{if(e.target.matches('[data-osv-ecosystem]'))updateOSVEcosystemSelectionSummary();if(e.target.matches('[data-project-scanner-mode]'))changeProjectScannerMode(e.target);if(e.target.matches('[data-scanner-check]'))checkScanner(e.target);if(e.target.matches('[data-sync-project]')){changeAssessmentSelection(e.target);}if(e.target.matches('[data-sync-mode-project]')){syncModeSelection[e.target.dataset.syncModeProject]=e.target.value;updateAssessmentAction(e.target.dataset.syncModeProject);}if(e.target.matches('[data-sync-severity-project]'))syncSeveritySelection[e.target.dataset.syncSeverityProject]=e.target.value;if(e.target.matches('[data-sync-all-severity]'))syncAllSeverity=e.target.value;if(e.target.matches('[data-sync-component-severity]'))componentSyncSeveritySelection.set(stackKey(e.target.dataset.projectId,e.target.dataset.assetId),e.target.value);});
 document.addEventListener('input', e => {
   const input = e.target;
   if (input.matches('[data-repository-url]') || input.name === 'local_path') updateRepositoryProfileVisibility(input);
@@ -1852,6 +2036,10 @@ function showPageError(err) {
 
 history.scrollRestoration = 'manual';
 window.addEventListener('hashchange', () => {
+  const scannerInfo = $('#scanner-info-dialog');
+  if (scannerInfo.open) scannerInfo.close();
+  const databaseInfo = $('#database-info-dialog');
+  if (databaseInfo.open) databaseInfo.close();
   expandedRuns.clear();
   filter = {search:'', severity:'', project:'', match:'', stack:''};
   const [page, id, view] = route();

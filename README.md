@@ -157,6 +157,8 @@ Metrics start at zero on upgrade and accumulate across clean restarts. Hit/miss 
 
 ### Local CVE catalogue
 
+The local database sections in Configuration keep status, record counts, update schedules, update/rebuild/stop controls, and live progress or errors visible. Select **More info** for setup guidance, import safety notes, detailed timestamps, and OSV per-ecosystem results. Database file paths are grouped in **Configuration → File & Databases**. Expand **Downloaded ecosystems** to edit OSV selections, then select **Save configuration** to apply them.
+
 In **Configuration → Local CVE database**, select **Update CVE database** to initialize `vulman-cve.db` from the official [CVE List V5 release archives](https://github.com/CVEProject/cvelistV5#releases). The first full download can be several hundred MiB and needs additional temporary disk space. Vulman stores the titles, references, modification dates, and publication/rejection states used for enrichment. Project inventory, findings, and credentials remain in `vulman.db`.
 
 Choose **Manual only**, **Hourly**, or **Daily** automatic updates. The default is **Daily**. The initial bulk download starts when you explicitly select the update button. After initialization, updates run while Vulman is open and overdue updates run after restart. An interrupted initial import also resumes automatically when its update schedule is enabled. **Update CVE database** resumes it immediately. **Stop** cancels download/import work and leaves the last committed checkpoint available.
@@ -238,8 +240,8 @@ Enable a tool in Configuration, install it on PATH, and explicitly enable **Run 
 Under **Configuration → Code scanners**, enable the tools Vulman is allowed to use. Open **Edit project → Code scanning** to choose the scanner profile directly below each GitHub repository URL and local folder. The same controls are available when adding a project. Select a mode:
 
 - **GitHub repository URLs:** **Custom selection** or **Disabled**. New URL rows start with Custom selection and no tools preselected; select at least one tool or choose Disabled before saving. Tool selection is explicit before cloning. Vulman still checks required inputs and finds the selected tools’ working folders after cloning.
-- **Local repository folders:** **Automatic** (default), **Custom selection**, or **Disabled**. Automatic discovers manifests in the root and subfolders and uses applicable globally enabled language tools; Trivy and Snyk remain optional additions.
-- **Custom selection:** choose one or more tools for the target. A PHP/JavaScript GitHub repository can select Composer and npm. Global tool permissions still apply.
+- **Local repository folders:** **Automatic** (default), **Custom selection**, or **Disabled**. Automatic discovers manifests in the root and subfolders and uses applicable globally enabled language tools. Only enabled tools appear in its detection rules and optional additions. Selections for temporarily disabled additions are preserved.
+- **Custom selection:** choose one or more tools for the target. Only tools enabled in **Configuration → Code scanners** are shown. A PHP/JavaScript GitHub repository can select Composer and npm. Saved choices for temporarily disabled tools are preserved and remain inactive until those tools are enabled again.
 - **Disabled:** skip the target, including cloning for GitHub URLs. Existing findings remain available.
 
 Existing GitHub profiles that used Automatic, including legacy projects without an explicit profile, are treated as Disabled until tools are explicitly selected. The editor shows a notice for these profiles. Previous findings are preserved; local Automatic profiles continue to work.
@@ -255,7 +257,7 @@ Use **Save project** to save repository URLs, the local folder, and their scanne
 
 Discovery excludes `.git`, `node_modules`, `vendor`, `.venv`, `venv`, and `__pycache__`, and does not follow symlinks. Discovery and job counts are bounded. Vulman does not generate lockfiles or install dependencies to make a scanner applicable.
 
-The expanded workflow shows each scanner job, repository, relative project folder, status, and skip/block reason. Files and tool permissions are checked again during each scan. Editing profiles does not clone repositories or inspect code. Scanner settings and workflow messages support English and Japanese.
+The expanded workflow shows each scanner job, repository, relative project folder, status, and skip/block reason, with the most recently updated jobs first. Running, completed, and failed jobs move to the top as their status changes. Older saved runs use available workflow log order, then reverse plan order when no update history remains. The Findings column records each completed job’s raw report count, including zero, before deduplication and severity filtering. Unfinished or skipped jobs show —. Older completed jobs recover their counts from available run logs; missing historical counts also show —. Files and tool permissions are checked again during each scan. Editing profiles does not clone repositories or inspect code. Scanner settings and workflow messages support English and Japanese.
 
 Successful scans replace only the findings covered by that scanner and project folder. Skipped, disabled, blocked, failed, or otherwise unassessed tools retain their previous findings and provenance. Unknown legacy provenance is retained conservatively. The workflow separates fresh results from retained results; a run with no completed scanner is explicitly identified and does not display a clean zero-result severity summary. Duplicate reports from multiple tools are merged within the same repository and project folder.
 
@@ -265,7 +267,7 @@ Vulman puts shallow clones, scan temporary files, and supported scanner caches i
 
 For a private repository, enter a **GitHub personal access token** under **Configuration → API credentials** and save. A fine-grained token can be scoped to the repositories you want to scan with **Contents → Read-only** permission. Add the HTTPS repository URL to your project as usual. Vulman tries the clone anonymously first and retries with the token if needed. Git must support `--config-env` for authenticated clones. [GitHub personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) · [Git command options](https://git-scm.com/docs/git#Documentation/git.txt---config-envltnamegtltenvvargt)
 
-Selecting a tool in **Configuration → Code scanners** runs a short local help or version command using Vulman’s PATH and account permissions. The result shows whether Vulman could start the tool and provides installation or permission guidance for the running OS. Use **Check again** after fixing an installation or permission issue. Repository access and scan prerequisites are checked during the assessment.
+Selecting a tool in **Configuration → Code scanners** runs a short local help or version command using Vulman’s PATH and account permissions. Each compact scanner card shows whether Vulman could start the tool. Select the amber **More info** button to open installation and permission guidance for the running OS, executable paths, and detailed errors. The Snyk pop-up also explains token setup and links to its credential field. Use **Check again** after fixing an installation or permission issue. Repository access and scan prerequisites are checked during the assessment.
 
 On macOS, Vulman also searches the standard Homebrew and Go installation folders when opened from Finder. It searches the inherited `PATH` first and adds `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/local/go/bin`, and `~/go/bin` for scanner commands and their runtimes. For a custom installation, launch Vulman’s executable from a terminal whose `PATH` includes that tool.
 
@@ -321,7 +323,7 @@ The embedded OSS database is [bbolt](https://github.com/etcd-io/bbolt), linked i
 - `vulman-osv.db`: encrypted ecosystem-scoped OSV advisories, package indexes, pending changes, and resumable import metadata.
 - `vulman.key`: the encryption key. **Back up the workspace database and key together while Vulman is stopped.** Losing the key makes the database unreadable.
 
-**Configuration** displays the active data directory and the absolute paths to both files beneath the local-storage note.
+**Configuration → File & Databases** displays the active data directory and the absolute paths to the workspace database, encryption key, and CVE, NVD, and OSV catalog databases.
 
 Normal quit, `kill` (SIGTERM), and Ctrl+C stop active assessments and wait for their final writes before closing bbolt. Force Quit and `kill -9` can end the process immediately. bbolt's synchronized transactions protect committed data, and Vulman marks unfinished assessments as interrupted on the next launch.
 

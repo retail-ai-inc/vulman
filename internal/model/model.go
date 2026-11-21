@@ -62,6 +62,7 @@ type Run struct {
 	ScanRepository          string               `json:"scan_repository,omitempty"`
 	Selection               *AssessmentSelection `json:"selection,omitempty"`
 	ScannerJobs             []ScannerJob         `json:"scanner_jobs,omitempty"`
+	ScannerJobSequence      uint64               `json:"scanner_job_sequence,omitempty"`
 	ScannersCompleted       int                  `json:"scanners_completed,omitempty"`
 	RetainedScannerFindings int                  `json:"retained_scanner_findings,omitempty"`
 	DataCheckedAt           time.Time            `json:"data_checked_at"`
@@ -88,12 +89,14 @@ type ScannerProfile struct {
 }
 
 type ScannerJob struct {
-	Target     string `json:"target"`
-	Repository string `json:"repository,omitempty"`
-	Tool       string `json:"tool"`
-	Path       string `json:"path,omitempty"`
-	Status     string `json:"status"`
-	Reason     string `json:"reason,omitempty"`
+	UpdateSequence uint64 `json:"update_sequence,omitempty"`
+	Findings       *int   `json:"findings,omitempty"`
+	Target         string `json:"target"`
+	Repository     string `json:"repository,omitempty"`
+	Tool           string `json:"tool"`
+	Path           string `json:"path,omitempty"`
+	Status         string `json:"status"`
+	Reason         string `json:"reason,omitempty"`
 }
 
 type DatabaseWait struct {

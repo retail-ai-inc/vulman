@@ -339,6 +339,72 @@ test('OSV Configuration selection and progress polling preserve drafts and local
   assert.match(run('osvDatabaseSettingsHTML()'), /ローカルOSVデータベース/);
 });
 
+test('compact database sections keep controls and counts visible while details stay in More info', () => {
+  const run = app();
+  run(`
+    state = {settings:{},projects:[],cve_database:{initialized:true,records:1200,path:'/example/cve.db'},nvd_database:{initialized:true,records:2300,cpes:5000,path:'/example/nvd.db'},osv_database:{initialized:true,records:3400,path:'/example/osv.db',ecosystems:[{ecosystem:'Go',records:3000,phase:'complete'}]}};
+    localize = () => {};
+    Object.assign($('#database-info-dialog'), {dataset:{},querySelector:selector=>document.querySelector(selector),showModal(){this.open=true;}});
+  `);
+  for (const source of ['cve','nvd','osv']) {
+    const html = run(`localDatabaseSettingsHTML('${source}')`);
+    assert.match(html, new RegExp(`data-action="database-info" data-database="${source}"`));
+    assert.match(html, new RegExp(`data-action="update-${source}-database"`));
+    assert.match(html, new RegExp(`data-action="rebuild-${source}-database"`));
+    assert.match(html, new RegExp(`name="${source}_update_schedule"`));
+    assert.doesNotMatch(html, /\/example\/|small transactions|checksum-verified|additional disk space/);
+    run(`openDatabaseInfo('${source}')`);
+    assert.equal(run("$('#database-info-dialog').open"), true);
+    assert.doesNotMatch(run("$('#database-info-body').innerHTML"), /storage-paths|\/example\//);
+    assert.match(run('storagePathsHTML()'), new RegExp(`/example/${source}\\.db`));
+    assert.match(run("$('#database-info-body').innerHTML"), /atomically/);
+  }
+  assert.doesNotMatch(run('osvDatabaseStatusHTML(state.osv_database)'), /osv-ecosystem-status/);
+  assert.match(run("$('#database-info-body').innerHTML"), /osv-ecosystem-status[^]*Go[^]*3,000/);
+  run("lang='ja';openDatabaseInfo('nvd')");
+  assert.match(run("$('#database-info-title').textContent"), /ローカル NVD データベースと CPE 辞書/);
+});
+
+test('database detail progress refreshes independently without replacing notes or settings drafts', () => {
+  const run = app();
+  run(`
+    state={settings:{},nvd_database:{initialized:true,records:10,source_at:'2026-11-21T01:00:00Z',path:'/example/<nvd>.db'}};
+    localize=()=>{};
+    Object.assign($('#database-info-dialog'),{dataset:{},querySelector:selector=>document.querySelector(selector),showModal(){this.open=true;}});
+    openDatabaseInfo('nvd');
+    var originalNotes=$('#database-info-body').innerHTML;
+    $('#settings-form').draft='unsaved';
+    updateNVDDatabaseStatus({running:true,phase:'importing',imported:512,import_total:1024,feed:'2026',records:20,path:'/example/<nvd>.db'});
+  `);
+  assert.match(run('originalNotes'), /Source data checked/);
+  assert.doesNotMatch(run('originalNotes'), /storage-paths|nvd&gt;\.db/);
+  assert.match(run('storagePathsHTML()'), /&lt;nvd&gt;\.db/);
+  assert.equal(run("$('[data-catalog-path=\"nvd\"]').textContent"), '/example/<nvd>.db');
+  assert.equal(run("$('#database-info-body').innerHTML"), run('originalNotes'));
+  assert.match(run("$('#database-info-status').innerHTML"), /max="1024" value="512"/);
+  assert.equal(run("$('#settings-form').draft"), 'unsaved');
+  const nvdStatus = run("$('#database-info-status').innerHTML");
+  run("updateCVEDatabaseStatus({running:true,phase:'downloading'})");
+  assert.equal(run("$('#database-info-status').innerHTML"), nvdStatus);
+  run("updateNVDDatabaseStatus({phase:'failed',message:{code:'permission_denied'},error:'<error>'})");
+  assert.match(run("$('#database-info-status').innerHTML"), /&lt;error&gt;/);
+});
+
+test('collapsed OSV choices retain checked inputs and report the current selection count', () => {
+  const run = app();
+  run(`state={settings:{osv_ecosystems:['Go','PyPI']},osv_ecosystem_options:['Go','npm','PyPI'],projects:[]}`);
+  const html = run('osvDatabaseSettingsHTML()');
+  assert.match(html, /<details class="database-ecosystem-settings"><summary>/);
+  assert.match(html, /data-osv-selection-summary>2 selected/);
+  assert.match(html, /data-osv-ecosystem value="Go" checked/);
+  assert.match(html, /data-osv-ecosystem value="PyPI" checked/);
+  run(`
+    document.querySelectorAll=()=>[{checked:true},{checked:true},{checked:true}];
+    updateOSVEcosystemSelectionSummary();
+  `);
+  assert.equal(run("$('[data-osv-selection-summary]').textContent"), '3 selected');
+});
+
 test('OSV queue cards use only their ecosystem progress and refresh without page rendering', () => {
   const run = app();
   workflowFixture(run);
@@ -460,19 +526,24 @@ test('project folder browsing fills the path and keeps it when the dialog is can
 
 test('scanner results use the reported OS and distinguish unavailable and denied tools', () => {
   const run = app();
-  const win = run(`scannerResultHTML('composer',{platform:'windows',status:'missing'})`);
+  const summary = run(`scannerResultHTML('composer',{platform:'windows',status:'missing'})`);
+  assert.match(summary, /not found on Vulman’s PATH/);
+  assert.doesNotMatch(summary, /Composer-Setup|Installation guide|scanner-command/);
+  const win = run(`scannerInfoHTML('composer',{platform:'windows',status:'missing'})`);
   assert.match(win,/Composer-Setup\.exe/);
   assert.doesNotMatch(win,/brew install|sudo apt/);
-  const debian = run(`scannerResultHTML('trivy',{platform:'debian',status:'missing'})`);
+  const debian = run(`scannerInfoHTML('trivy',{platform:'debian',status:'missing'})`);
   assert.match(debian,/signed package repository/);
   assert.match(debian,/apt-get install trivy/);
   assert.doesNotMatch(debian,/brew install|trivy\.exe/);
   const pip = run(`scannerSettingsHTML({'pip-audit':true})`);
   assert.match(pip,/name="scanner_pip-audit" checked data-scanner-check="pip-audit"/);
-  assert.match(run(`scannerResultHTML('pip-audit',{platform:'darwin',status:'missing'})`),/brew install pip-audit/);
-  assert.match(run(`lang='ja'; scannerResultHTML('pip-audit',{platform:'windows',status:'missing'})`),/pipx install pip-audit/);
+  assert.match(pip, /data-action="scanner-info" data-scanner="pip-audit" aria-haspopup="dialog"/);
+  assert.match(pip, /id="scanner-recheck-pip-audit"[^>]*>Check again/);
+  assert.match(run(`scannerInfoHTML('pip-audit',{platform:'darwin',status:'missing'})`),/brew install pip-audit/);
+  assert.match(run(`lang='ja'; scannerInfoHTML('pip-audit',{platform:'windows',status:'missing'})`),/pipx install pip-audit/);
   run(`lang='en'`);
-  const denied = run(`scannerResultHTML('npm',{platform:'darwin',status:'permission',path:'/tmp/<bin>/npm'})`);
+  const denied = run(`scannerInfoHTML('npm',{platform:'darwin',status:'permission',path:'/tmp/<bin>/npm'})`);
   assert.match(denied,/denied permission/);
   assert.match(denied,/Privacy & Security/);
   assert.match(denied,/\/tmp\/&lt;bin&gt;\/npm/);
@@ -495,35 +566,44 @@ test('selecting a scanner probes it and unchecking clears the result', async () 
   await run('checking');
   assert.deepEqual(calls,[['main.Desktop.CheckScanner','trivy']]);
   assert.match(run('panel.innerHTML'), /Vulman can run this tool/);
+  assert.doesNotMatch(run('panel.innerHTML'), /\/usr\/local\/bin/);
+  assert.match(run("scannerInfoHTML('trivy',scannerCheckResults.get('trivy'))"), /\/usr\/local\/bin\/trivy/);
+  assert.equal(run("$('#scanner-recheck-trivy').disabled"), false);
   run('scanner.checked = false; checkScanner(scanner)');
   assert.equal(run('panel.hidden'), true);
   assert.equal(run('panel.textContent'), '');
+  assert.equal(run("$('#scanner-recheck-trivy').hidden"), true);
+  assert.equal(run("scannerCheckResults.has('trivy')"), false);
 });
 
-test('Snyk setup is visible before enabling the scanner and links to its credential without leaving Configuration', async () => {
+test('Snyk setup is available in More info before enabling and links to its credential without leaving Configuration', async () => {
   const run = app();
-  const setup = run('scannerSettingsHTML({})');
-  assert.match(setup, /name="scanner_snyk"\s+data-scanner-check="snyk"/);
+  const cards = run('scannerSettingsHTML({})');
+  assert.match(cards, /name="scanner_snyk"\s+data-scanner-check="snyk"/);
+  assert.match(cards, /data-action="scanner-info" data-scanner="snyk"/);
+  assert.doesNotMatch(cards, /API credentials → Snyk token|authenticate-to-use-the-cli/);
+  const setup = run("scannerInfoHTML('snyk')");
   assert.match(setup, /API credentials → Snyk token/);
   assert.match(setup, /Run configured code scanners.*Scan code/);
   assert.match(setup, /authenticate-to-use-the-cli/);
-  assert.match(run(`scannerResultHTML('snyk',{platform:'darwin',status:'missing'})`), /brew install snyk\/tap\/snyk/);
-  assert.match(run(`scannerResultHTML('snyk',{platform:'windows',status:'missing'})`), /snyk\.exe/);
-  assert.match(run(`scannerResultHTML('snyk',{platform:'debian',status:'missing'})`), /standalone Linux CLI/);
-  assert.match(run(`scannerResultHTML('snyk',{status:'ready'})`), /checks the token during a scan/);
+  assert.match(run(`scannerInfoHTML('snyk',{platform:'darwin',status:'missing'})`), /brew install snyk\/tap\/snyk/);
+  assert.match(run(`scannerInfoHTML('snyk',{platform:'windows',status:'missing'})`), /snyk\.exe/);
+  assert.match(run(`scannerInfoHTML('snyk',{platform:'debian',status:'missing'})`), /standalone Linux CLI/);
+  assert.match(run(`scannerInfoHTML('snyk',{status:'ready'})`), /checks the token during a scan/);
   run(`lang='ja'; state={token_status:{}}; location.hash='#settings';`);
-  assert.match(run('scannerSettingsHTML({})'), /Snyk トークン欄へ移動/);
+  assert.match(run("scannerInfoHTML('snyk')"), /Snyk トークン欄へ移動/);
   const credentials = run('credentialSettingsHTML()');
   assert.match(credentials, /id="credential-snyk"[^>]*aria-describedby="credential-snyk-hint"/);
   assert.match(credentials, /SNYK_TOKEN として Snyk CLI に渡します/);
   await run(`
     var calls = [];
-    const input = {value:'draft', scrollIntoView(){ calls.push('scroll'); }, focus(){ calls.push('focus'); }};
-    const form = {querySelector(selector){ return selector === '#credential-snyk' ? input : null; }};
-    const snykButton = {dataset:{action:'focus-snyk-token'}, closest(selector){ return selector === 'form' ? form : null; }};
+    const input = $('#credential-snyk');
+    Object.assign(input, {value:'draft', scrollIntoView(){ calls.push('scroll'); }, focus(){ calls.push('focus'); }});
+    Object.assign($('#scanner-info-dialog'), {open:true,close(){this.open=false;calls.push('close');}});
+    const snykButton = {dataset:{action:'focus-snyk-token'}};
     document.listeners.click({target:{closest:selector => selector === '[data-action]' ? snykButton : null}});
   `);
-  assert.equal(run("calls.join(',')"), 'scroll,focus');
+  assert.equal(run("calls.join(',')"), 'close,scroll,focus');
   assert.equal(run('location.hash'), '#settings');
   assert.equal(run('input.value'), 'draft');
 });
@@ -1671,12 +1751,17 @@ test('dismissed project panel stays closed on redraw and a new run displays norm
   assert.doesNotMatch(run(`document.querySelector('#main').innerHTML`),/data-dismiss-workflow/);
 });
 
-test('Configuration shows runtime database and key paths beneath the storage note',()=>{
+test('Configuration groups workspace, key and catalog database paths under File & Databases',()=>{
   const run=app();
-  run(`state={settings:{language:'en',sources:{},scanners:{}},token_status:{github:true,snyk:true},saved_token_status:{github:true},storage_paths:{database:'/custom data/vulman.db',key:'/custom data/vulman.key'}};renderSettings()`);
+  run(`state={settings:{language:'en',sources:{},scanners:{}},token_status:{github:true,snyk:true},saved_token_status:{github:true},storage_paths:{database:'/custom data/vulman.db',key:'/custom data/vulman.key'},cve_database:{path:'/custom data/vulman-cve.db'},nvd_database:{path:'/custom data/vulman-nvd.db'},osv_database:{path:'/custom data/vulman-osv.db'}};renderSettings()`);
   const html=run(`document.querySelector('#main').innerHTML`);
   assert.match(html,/<code>\/custom data\/vulman.db<\/code>/);
   assert.match(html,/<code>\/custom data\/vulman.key<\/code>/);
+  for (const source of ['cve','nvd','osv']) {
+    assert.match(html, new RegExp(`<dt>${source.toUpperCase()} catalog database</dt><dd><code data-catalog-path="${source}">/custom data/vulman-${source}\\.db</code>`));
+    assert.ok(html.indexOf('File &amp; Databases') < html.indexOf(`data-catalog-path="${source}"`));
+    assert.ok(html.indexOf(`data-catalog-path="${source}"`) < html.indexOf('id="advanced-settings"'));
+  }
   assert.match(html,/GitHub personal access token[^]*?type="password" name="token_github"/);
   assert.match(html, /<input[^>]+name="token_github"[^>]*placeholder="••••••"/);
   assert.match(html, /<input[^>]+name="token_snyk"[^>]*placeholder=""/);
@@ -1684,6 +1769,9 @@ test('Configuration shows runtime database and key paths beneath the storage not
   assert.ok(html.indexOf('Local storage uses AES-GCM')<html.indexOf('class="storage-paths"'));
   run(`lang='ja'`);
   assert.match(run('storagePathsHTML()'),/暗号化キーファイル/);
+  assert.match(run('storagePathsHTML()'),/CVE カタログデータベース/);
+  assert.match(run('storagePathsHTML()'),/NVD カタログデータベース/);
+  assert.match(run('storagePathsHTML()'),/OSVカタログデータベース/);
   const windowsPath=String.raw`C:\Users\Example\Vulman\vulman.db`;
   run(`state.storage_paths.database=${JSON.stringify(windowsPath)}`);
   assert.ok(run('storagePathsHTML()').includes(windowsPath));
@@ -2773,7 +2861,7 @@ test('database failures, queued errors, and scanner status details use structure
     assert.match(run(`${render}(failure)`), /接続先からHTTP 403/);
     assert.doesNotMatch(run(`${render}(failure)`), /English failure/);
   }
-  assert.match(run(`scannerResultHTML('trivy',{status:'failed',platform:'darwin',detail:'English failure',message:{code:'permission_denied'}})`), /権限がありません/);
+  assert.match(run(`scannerInfoHTML('trivy',{status:'failed',platform:'darwin',detail:'English failure',message:{code:'permission_denied'}})`), /権限がありません/);
 });
 
 test('clearing API responses requires confirmation and refreshes metrics without saving drafts', async () => {
@@ -2856,7 +2944,7 @@ test('project scanner profiles map saved choices to each URL and local folder', 
   `);
   const html = run("projectScannerProfileHTML(repositoryProfileFor(project, 'https://github.com/org/php-web'))");
   assert.match(html, /value="custom" selected/);
-  assert.match(html, /data-project-scanner-tool="govulncheck"[^>]*disabled/);
+  assert.doesNotMatch(html, /data-project-scanner-tool="govulncheck"/);
   assert.match(html, /data-project-scanner-tool="npm"[^>]*checked/);
   assert.match(html, /data-project-scanner-tool="composer"[^>]*checked/);
   assert.match(run('projectScannerProfileHTML(localRepositoryProfileFor(project),true)'), /value="disabled" selected/);
@@ -2907,7 +2995,7 @@ test('new scanner definitions populate global tools and repository profiles', ()
   `);
   assert.match(run("scannerSettingsHTML(state.settings.scanners)"), /name="scanner_new-tool"[^>]*data-scanner-check="new-tool"/);
   assert.match(run("projectScannerProfileHTML({mode:'auto'},true)"), /Future language audit[^]*future.lock/);
-  assert.match(run("scannerResultHTML('new-tool', {platform:'darwin',status:'missing'})"), /https:\/\/example.com\/install/);
+  assert.match(run("scannerInfoHTML('new-tool', {platform:'darwin',status:'missing'})"), /https:\/\/example.com\/install/);
 });
 
 test('saved Automatic profiles keep optional repository scanners turned off', () => {
@@ -2997,4 +3085,194 @@ test('legacy GitHub Automatic profiles become Disabled with a notice and no tool
   assert.doesNotMatch(html, /type="checkbox"[^>]*checked/);
   run("lang='ja'");
   assert.match(run("projectScannerProfileHTML(repositoryProfileFor(project,'https://github.com/org/legacy'))"), /以前は自動モードでした/);
+});
+
+test('Custom selection displays only globally enabled tools for GitHub and local profiles', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{npm:true,composer:true,trivy:false}}};`);
+  for (const local of [false,true]) {
+    const html = run(`projectScannerProfileHTML({mode:'custom',tools:['npm']},${local})`);
+    const custom = html.match(/data-profile-custom[^>]*>([^]*?)<\/div>/)[1];
+    assert.deepEqual([...custom.matchAll(/data-project-scanner-tool="([^"]+)"/g)].map(match => match[1]), ['npm','composer']);
+    assert.doesNotMatch(custom, /govulncheck|pip-audit|Trivy|Snyk/);
+    assert.match(custom, /data-project-scanner-tool="npm"[^>]*checked/);
+  }
+});
+
+test('disabled saved tools are hidden, preserved on save, and restored when enabled again', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{npm:true,govulncheck:false}}};`);
+  let html = run("projectScannerProfileHTML({mode:'custom',tools:['govulncheck','npm']})");
+  assert.doesNotMatch(html, /data-project-scanner-tool="govulncheck"/);
+  assert.match(html, /type="hidden" data-profile-preserved-tool="govulncheck"/);
+  run(`
+    const card = {
+      querySelector:() => ({value:'custom'}),
+      querySelectorAll:selector => selector === '[data-project-scanner-tool]:checked'
+        ? [{dataset:{projectScannerTool:'npm',profileAdditional:'false'}}]
+        : [{dataset:{profilePreservedTool:'govulncheck',profileAdditional:'false'}}],
+    };
+    const savedProfile = readProjectScannerProfile(card);
+  `);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(savedProfile.tools)')), ['npm','govulncheck']);
+  run('state.settings.scanners.govulncheck=true');
+  html = run('projectScannerProfileHTML(savedProfile)');
+  assert.match(html, /data-project-scanner-tool="govulncheck"[^>]*checked/);
+  assert.doesNotMatch(html, /data-profile-preserved-tool="govulncheck"/);
+});
+
+test('Custom selection explains how to enable tools when none are enabled', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{}}};`);
+  let html = run("projectScannerProfileHTML({mode:'custom',tools:[]})");
+  assert.doesNotMatch(html, /data-project-scanner-tool=/);
+  assert.match(html, /No scanner tools are enabled\. Enable tools in Configuration → Code scanners\./);
+  run("lang='ja'");
+  html = run("projectScannerProfileHTML({mode:'custom',tools:[]},true)");
+  assert.match(html, /有効なスキャナがありません/);
+});
+
+test('local Automatic lists only enabled language rules and additional scanners', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{npm:true,trivy:true,govulncheck:false,snyk:false}}};`);
+  const html = run("projectScannerProfileHTML({mode:'auto',tools:[],additional_tools:['trivy']},true)");
+  const automatic = html.match(/class="scanner-auto-tools">([^]*?)<\/details>/)[1];
+  assert.match(automatic,/npm audit/);
+  assert.doesNotMatch(automatic,/govulncheck|pip-audit|composer audit|Snyk/);
+  const extras = html.match(/<div data-profile-extras[^>]*>([^]*?)<\/div><\/div>/)[1];
+  assert.match(extras,/data-project-scanner-tool="trivy"[^>]*checked/);
+  assert.doesNotMatch(extras,/data-project-scanner-tool="snyk"|Snyk/);
+});
+
+test('local Automatic omits empty groups and explains when all scanners are disabled', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{npm:true}}};`);
+  let html = run("projectScannerProfileHTML({mode:'auto'},true)");
+  assert.match(html,/data-profile-auto/);
+  assert.doesNotMatch(html,/data-profile-extras/);
+  run('state.settings.scanners={trivy:true}');
+  html = run("projectScannerProfileHTML({mode:'auto'},true)");
+  assert.doesNotMatch(html,/data-profile-auto|scanner-detection-rules/);
+  assert.match(html,/data-profile-extras/);
+  run('state.settings.scanners={}');
+  html = run("projectScannerProfileHTML({mode:'auto'},true)");
+  assert.doesNotMatch(html,/scanner-detection-rules|data-profile-extras|data-project-scanner-tool=/);
+  assert.match(html,/<p class="form-note" data-profile-auto >No scanner tools are enabled/);
+  run("lang='ja'");
+  assert.match(run("projectScannerProfileHTML({mode:'auto'},true)"),/有効なスキャナがありません/);
+});
+
+test('disabled Automatic additions survive save and are selected again after re-enabling', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{snyk:true,trivy:false}}};`);
+  let html = run("projectScannerProfileHTML({mode:'auto',additional_tools:['trivy','snyk']},true)");
+  assert.doesNotMatch(html,/data-project-scanner-tool="trivy"/);
+  assert.match(html,/type="hidden" data-profile-preserved-tool="trivy" data-profile-additional="true"/);
+  run(`
+    const autoCard = {
+      querySelector:() => ({value:'auto'}),
+      querySelectorAll:selector => selector === '[data-project-scanner-tool]:checked'
+        ? [{dataset:{projectScannerTool:'snyk',profileAdditional:'true'}}]
+        : [{dataset:{profilePreservedTool:'trivy',profileAdditional:'true'}}],
+    };
+    const savedAuto = readProjectScannerProfile(autoCard);
+  `);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(savedAuto.additional_tools)')),['snyk','trivy']);
+  run('state.settings.scanners.trivy=true');
+  html = run('projectScannerProfileHTML(savedAuto,true)');
+  assert.match(html,/data-project-scanner-tool="trivy"[^>]*data-profile-additional="true"[^>]*checked/);
+  assert.doesNotMatch(html,/data-profile-preserved-tool="trivy"/);
+});
+
+test('scanner jobs display the latest status update first without mutating stored plan order', () => {
+  const run = app();
+  run(`
+    state = {settings:{},projects:[]};
+    const jobs = [
+      {target:'local',tool:'npm',status:'complete',update_sequence:4},
+      {target:'local',tool:'composer',status:'complete',update_sequence:2},
+      {target:'local',tool:'pip-audit',status:'planned',update_sequence:1},
+    ];
+  `);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(newestScannerJobs(jobs).map(job=>job.tool))')),['npm','composer','pip-audit']);
+  run("jobs[1]={...jobs[1],status:'running',update_sequence:5}");
+  assert.deepEqual(JSON.parse(run('JSON.stringify(newestScannerJobs(jobs).map(job=>job.tool))')),['composer','npm','pip-audit']);
+  assert.equal(run('jobs[0].tool'),'npm');
+  const html = run('scannerJobHTML(jobs)');
+  assert.ok(html.indexOf('composer audit') < html.indexOf('npm audit'));
+});
+
+test('older scanner jobs use matching workflow events and reverse plan order as a fallback', () => {
+  const run = app();
+  run(`
+    const repository='github.com/org/project';
+    const jobs=[
+      {target:'remote:one',repository,tool:'govulncheck',path:'',status:'complete'},
+      {target:'remote:one',repository,tool:'govulncheck',path:'nested',status:'complete'},
+      {target:'remote:one',repository,tool:'trivy',status:'complete'},
+      {target:'remote:one',repository,tool:'snyk',status:'skipped'},
+    ];
+    const logs=[
+      {step_id:'scanner',event:'scanner_skipped',tool:'snyk',scan_target:'remote',scan_repository:repository},
+      {step_id:'scanner',event:'scanner_completed',tool:'govulncheck',scan_target:'remote',scan_repository:repository},
+      {step_id:'scanner',event:'scanner_completed',tool:'trivy',scan_target:'remote',scan_repository:repository},
+      {step_id:'scanner',event:'scanner_completed',tool:'govulncheck',scan_target:'remote',scan_repository:repository,scan_path:'nested'},
+    ];
+  `);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(newestScannerJobs(jobs,logs).map(job=>[job.tool,job.path||""]))')), [['govulncheck','nested'],['trivy',''],['govulncheck',''],['snyk','']]);
+  assert.equal(run('newestScannerJobs(jobs)[0].tool'),'snyk');
+  run("jobs[0]={...jobs[0],status:'interrupted',update_sequence:1}");
+  assert.equal(run('newestScannerJobs(jobs,logs)[0].path'),'');
+  assert.equal(run('logs[0].event'),'scanner_skipped');
+});
+
+test('scanner jobs show reported counts, including zero, and distinguish unavailable results', () => {
+  const run = app();
+  run(`
+    state={settings:{},projects:[]};
+    const countJobs=[
+      {target:'local',tool:'npm',status:'complete',findings:12345,update_sequence:4},
+      {target:'local',tool:'composer',status:'complete',findings:0,update_sequence:3},
+      {target:'local',tool:'trivy',status:'running',findings:0,update_sequence:2},
+      {target:'local',tool:'snyk',status:'skipped',update_sequence:1},
+    ];
+  `);
+  const html = run('scannerJobHTML(countJobs)');
+  assert.match(html, /<th class="scanner-job-findings"[^>]*>Findings<\/th>/);
+  assert.deepEqual([...html.matchAll(/<td class="scanner-job-findings"[^>]*>([^<]*)<\/td>/g)].map(match=>match[1]),['12,345','0','—','—']);
+  assert.match(html,/before deduplication and severity filtering/);
+  run("lang='ja'");
+  assert.match(run('scannerJobHTML(countJobs)'), /検出件数/);
+});
+
+test('historical job counts use matching completion logs without mixing folders or repositories', () => {
+  const run = app();
+  run(`
+    const countLogs=[
+      {step_id:'scanner',event:'scanner_completed',tool:'govulncheck',scan_target:'local',scan_path:'nested',findings:3},
+      {step_id:'scanner',event:'scanner_completed',tool:'govulncheck',scan_target:'remote',scan_repository:'github.com/org/repo',findings:8},
+      {step_id:'scanner',event:'scanner_completed',tool:'trivy',scan_target:'local',findings:0},
+    ];
+    const recordedCounts=scannerJobCounts(countLogs);
+  `);
+  assert.equal(run("scannerJobFindings({target:'local',tool:'govulncheck',path:'nested',status:'complete'},recordedCounts)"),3);
+  assert.equal(run("scannerJobFindings({target:'local',tool:'govulncheck',path:'',status:'complete'},recordedCounts)"),null);
+  assert.equal(run("scannerJobFindings({target:'remote:one',repository:'github.com/org/repo',tool:'govulncheck',status:'complete'},recordedCounts)"),8);
+  assert.equal(run("scannerJobFindings({target:'local',tool:'trivy',status:'complete'},recordedCounts)"),0);
+  assert.equal(run("scannerJobFindings({target:'local',tool:'trivy',status:'complete',findings:2},recordedCounts)"),2);
+  assert.equal(run("scannerJobFindings({target:'local',tool:'trivy',status:'failed'},recordedCounts)"),null);
+});
+
+test('ambiguous legacy repository labels never borrow another target’s findings count', () => {
+  const run = app();
+  run(`
+    const duplicateJobs=[
+      {target:'remote:one',repository:'github.com/org/repo',tool:'trivy',status:'complete'},
+      {target:'remote:two',repository:'github.com/org/repo',tool:'trivy',status:'complete'},
+    ];
+    const duplicateLogs=[{step_id:'scanner',event:'scanner_completed',scan_target:'remote',scan_repository:'github.com/org/repo',tool:'trivy',findings:7}];
+    const ambiguousCounts=scannerJobCounts(duplicateLogs,duplicateJobs);
+  `);
+  assert.equal(run('scannerJobFindings(duplicateJobs[0],ambiguousCounts)'),null);
+  assert.equal(run('scannerJobFindings({...duplicateJobs[1],findings:0},ambiguousCounts)'),0);
 });

@@ -248,7 +248,9 @@ func (t *runTracker) scannerEvent(event scanner.ScanEvent) {
 
 	t.update(func(r *model.Run) {
 		if len(event.Plan) > 0 {
+			r.ScannerJobSequence++
 			for _, job := range event.Plan {
+				job.UpdateSequence = r.ScannerJobSequence
 				if len(r.ScannerJobs) < model.MaxScannerJobs {
 					r.ScannerJobs = append(r.ScannerJobs, job)
 				}
@@ -274,17 +276,24 @@ func (t *runTracker) scannerEvent(event scanner.ScanEvent) {
 		entry.ScanRepository = event.Repository
 		entry.ScanPath = event.Path
 		if event.Job != nil {
+			r.ScannerJobSequence++
+			updated := *event.Job
+			updated.UpdateSequence = r.ScannerJobSequence
+			if event.Phase == "scanner_completed" {
+				count := event.Found
+				updated.Findings = &count
+			}
 			entry.ScanReason = event.Job.Reason
 			found := false
 			for i, job := range r.ScannerJobs {
 				if job.Target == event.Job.Target && job.Tool == event.Job.Tool && job.Path == event.Job.Path {
-					r.ScannerJobs[i] = *event.Job
+					r.ScannerJobs[i] = updated
 					found = true
 					break
 				}
 			}
 			if !found && len(r.ScannerJobs) < model.MaxScannerJobs {
-				r.ScannerJobs = append(r.ScannerJobs, *event.Job)
+				r.ScannerJobs = append(r.ScannerJobs, updated)
 			}
 		}
 
@@ -352,11 +361,14 @@ func (t *runTracker) finish(id string, found int, err error) {
 }
 
 func interruptScannerJobs(r *model.Run) {
+	sequence := r.ScannerJobSequence + 1
 	for i := range r.ScannerJobs {
 		job := &r.ScannerJobs[i]
 		if job.Status == "running" || job.Status == "planned" {
 			job.Status = "interrupted"
 			job.Reason = "interrupted"
+			job.UpdateSequence = sequence
+			r.ScannerJobSequence = sequence
 		}
 	}
 }

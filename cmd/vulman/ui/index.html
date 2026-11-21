@@ -75,6 +75,16 @@
   <dialog id="component-dialog"><form id="component-form"><div class="dialog-header"><div><h2 data-t="addComponentTitle"></h2><p class="subtitle" id="component-project"></p></div><button type="button" class="icon-button close-dialog" aria-label="Close">×</button></div><div class="dialog-body"><div id="component-fields"></div><p class="form-note" data-t="matchingHint"></p><p id="component-error" class="form-error" role="alert"></p></div><div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="cancel"></button><button type="submit" class="button primary" id="save-component" data-t="saveComponent"></button></div></form></dialog>
   <dialog id="detail-dialog"><div class="dialog-header"><span class="eyebrow" data-t="advisoryDetail"></span><button class="icon-button close-dialog" aria-label="Close">×</button></div><div class="dialog-body" id="detail-body"></div></dialog>
   <dialog id="confirm-dialog" aria-labelledby="confirm-message"><div class="dialog-body"><p id="confirm-message"></p></div><div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="cancel" autofocus></button><button type="button" class="button danger" id="confirm-action" data-t="confirmAction"></button></div></dialog>
+  <dialog id="scanner-info-dialog" aria-labelledby="scanner-info-title">
+    <div class="dialog-header"><h2 id="scanner-info-title"></h2><button type="button" class="icon-button close-dialog" data-scanner-info-close aria-label="Close" autofocus>×</button></div>
+    <div class="dialog-body" id="scanner-info-body" tabindex="0"></div>
+    <div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="close"></button></div>
+  </dialog>
+  <dialog id="database-info-dialog" aria-labelledby="database-info-title">
+    <div class="dialog-header"><h2 id="database-info-title"></h2><button type="button" class="icon-button close-dialog" data-database-info-close aria-label="Close" autofocus>×</button></div>
+    <div class="dialog-body" id="database-info-body" tabindex="0"></div>
+    <div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="close"></button></div>
+  </dialog>
   <dialog id="about-dialog">
     <div class="dialog-header"><h2>Vulman</h2><button class="icon-button close-dialog" aria-label="Close">×</button></div>
     <div class="dialog-body">

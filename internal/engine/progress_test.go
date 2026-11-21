@@ -510,3 +510,95 @@ func TestWorkflowLogLimitKeepsRecentEvents(t *testing.T) {
 		t.Fatal("workflow logs were not bounded correctly")
 	}
 }
+
+func TestScannerJobUpdateSequenceFollowsStatusChanges(t *testing.T) {
+	s := testStore(t)
+	if err := s.Update(func(st *model.State) error {
+		st.Projects = []model.Project{{ID: "p", Runs: []model.Run{{ID: "run", Steps: []model.SyncStep{{ID: "scanner", Kind: "scanner"}}}}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := newTracker(s, "p", "run")
+	jobs := []model.ScannerJob{
+		{Target: "local", Tool: "npm", Status: "planned"},
+		{Target: "local", Tool: "composer", Status: "planned"},
+	}
+	tracker.scannerEvent(scanner.ScanEvent{Phase: "scanner_planned", Target: "local", Plan: jobs})
+	npm := jobs[0]
+	npm.Status = "running"
+	tracker.scannerEvent(scanner.ScanEvent{Phase: "scanning", Tool: npm.Tool, Target: "local", Job: &npm})
+	npm.Status = "complete"
+	tracker.scannerEvent(scanner.ScanEvent{Phase: "scanner_completed", Tool: npm.Tool, Target: "local", Job: &npm})
+
+	state, err := s.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := state.Projects[0].Runs[0]
+	if run.ScannerJobSequence != 3 || run.ScannerJobs[0].UpdateSequence != 3 || run.ScannerJobs[1].UpdateSequence != 1 {
+		t.Fatalf("status changes did not persist their update order: %+v", run)
+	}
+	if jobs[0].UpdateSequence != 0 || npm.UpdateSequence != 0 {
+		t.Fatal("progress persistence mutated scanner input")
+	}
+
+	interruptScannerJobs(&run)
+	if run.ScannerJobSequence != 4 || run.ScannerJobs[1].UpdateSequence != 4 || run.ScannerJobs[1].Status != "interrupted" || run.ScannerJobs[0].UpdateSequence != 3 {
+		t.Fatalf("interruption did not update only unfinished jobs: %+v", run.ScannerJobs)
+	}
+	interruptScannerJobs(&run)
+	if run.ScannerJobSequence != 4 {
+		t.Fatal("unchanged jobs received a new update sequence")
+	}
+}
+
+func TestScannerJobFindingCountsPersistIncludingZeroAfterLogsExpire(t *testing.T) {
+	s := testStore(t)
+	if err := s.Update(func(st *model.State) error {
+		st.Projects = []model.Project{{ID: "p", Runs: []model.Run{{ID: "run"}}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := newTracker(s, "p", "run")
+	jobs := []model.ScannerJob{
+		{Target: "local", Tool: "govulncheck", Status: "planned"},
+		{Target: "local", Tool: "govulncheck", Path: "nested", Status: "planned"},
+		{Target: "local", Tool: "trivy", Status: "skipped"},
+	}
+	tracker.scannerEvent(scanner.ScanEvent{Phase: "scanner_planned", Target: "local", Plan: jobs})
+	for i, count := range []int{0, 4} {
+		job := jobs[i]
+		job.Status = "complete"
+		tracker.scannerEvent(scanner.ScanEvent{Phase: "scanner_completed", Target: "local", Tool: job.Tool, Path: job.Path, Found: count, Job: &job})
+	}
+	if err := s.Update(func(st *model.State) error {
+		run := &st.Projects[0].Runs[0]
+		for range model.MaxSyncLogs {
+			addLog(run, "save", "completed", "")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := s.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := state.Projects[0].Runs[0]
+	if run.ScannerJobs[0].Findings == nil || *run.ScannerJobs[0].Findings != 0 || run.ScannerJobs[1].Findings == nil || *run.ScannerJobs[1].Findings != 4 {
+		t.Fatalf("per-folder counts did not survive persistence and log eviction: %+v", run.ScannerJobs)
+	}
+	if run.ScannerJobs[2].Findings != nil {
+		t.Fatal("skipped scanner was recorded as a clean scan")
+	}
+	for _, job := range jobs {
+		if job.Findings != nil {
+			t.Fatal("persistence mutated scanner inputs")
+		}
+	}
+}
