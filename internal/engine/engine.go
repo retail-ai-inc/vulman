@@ -518,15 +518,17 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID string, scope a
 
 	tracker.scannerSetup(selected, scanner.EnabledTools(s.Scanners), scannerSkipReason)
 
+	var scannerReport scanner.Report
 	if scannerSkipReason == "" {
 		tracker.start("scanner")
 		scannersCompleted := 0
-		items, warns := scanner.ScanDetailed(ctx, selected, s, filepath.Dir(e.Store.Paths().Database), func(event scanner.ScanEvent) {
+		scannerReport = scanner.ScanWithReport(ctx, selected, s, filepath.Dir(e.Store.Paths().Database), func(event scanner.ScanEvent) {
 			if event.Phase == "scanner_completed" {
 				scannersCompleted++
 			}
 			tracker.scannerEvent(event)
 		})
+		items, warns := scannerReport.Findings, scannerReport.Problems
 		var scanErr error
 
 		if len(warns) > 0 {
@@ -583,6 +585,9 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID string, scope a
 		runSeverityCounts = findingSeverityCounts(all)
 	}
 
+	retainedScannerFindings := scannerReport.Unassessed(previous, p)
+
+	preservedFindings = append(preservedFindings, retainedScannerFindings...)
 	all = retainOutsideScope(all, previous, "", severity)
 	if len(preservedFindings) > 0 {
 		all = sources.Merge(append(all, preservedFindings...))
@@ -609,6 +614,14 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID string, scope a
 
 			current.Syncing = false
 			current.Findings = all
+			if status == "complete" && severity == "" {
+				for _, target := range scannerReport.CompletedTargets {
+					if profile, ok := current.ScannerProfiles[target]; ok {
+						profile.NeedsScan = false
+						current.ScannerProfiles[target] = profile
+					}
+				}
+			}
 			if status == "complete" && severity == "" && mode != codeScanMode && current.Revision == p.Revision && (s.Sources["nvd"] || s.Sources["osv"]) {
 				for k := range current.Assets {
 					if scope.hasAsset(current.Assets[k].ID) {
@@ -632,6 +645,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID string, scope a
 					r.WarningMessages = warningMessages
 					r.Count = runCount
 					r.SeverityCounts = runSeverityCounts
+					r.RetainedScannerFindings = len(sources.Merge(retainedScannerFindings))
 					if fullAssessmentComplete {
 						current.DataCheckedAt = r.DataCheckedAt
 					}

@@ -1497,7 +1497,7 @@ test('workflow logs distinguish configured scanners, findings, errors, and skipp
   assert.match(html,/Scanner completed · npm audit · 0 findings reported/);
   assert.match(html,/Scanner completed · govulncheck · 1 finding reported/);
   assert.match(html,/class="workflow-log-error"[^]*?Scanner failed · composer audit · &lt;failed&gt;/);
-  assert.match(html,/Code scanners · Snyk skipped because its token is missing\./);
+  assert.match(html,/Code scanners · Scanner requires an API token\.[^]*?Snyk/);
   run(`lang='ja'`);
   assert.match(run('workflowBody(project,workflow)'),/スキャナーが完了 · npm audit · 検出結果 0 件/);
 });
@@ -2846,4 +2846,155 @@ test('a finished cache clear cannot overwrite metrics from another workspace', a
   assert.equal(await run('clearAPIResponseCache(clearButton)'),true);
   assert.equal(run('state.cache_stats.entries'),8);
   assert.equal(run('notices'),0);
+});
+
+test('project scanner profiles map saved choices to each URL and local folder', () => {
+  const run = app();
+  run(`
+    state = {settings:{scanners:{npm:true,composer:true,trivy:true}},scan_repositories:{p:[{url:'https://github.com/org/php-web',key:'remote:one'}]}};
+    const project = {id:'p',scanner_profiles:{'remote:one':{mode:'custom',tools:['composer','npm']},local:{mode:'disabled'}}};
+  `);
+  const html = run("projectScannerProfileHTML(repositoryProfileFor(project, 'https://github.com/org/php-web'))");
+  assert.match(html, /value="custom" selected/);
+  assert.match(html, /data-project-scanner-tool="govulncheck"[^>]*disabled/);
+  assert.match(html, /data-project-scanner-tool="npm"[^>]*checked/);
+  assert.match(html, /data-project-scanner-tool="composer"[^>]*checked/);
+  assert.match(run('projectScannerProfileHTML(localRepositoryProfileFor(project),true)'), /value="disabled" selected/);
+  const fresh = run("projectScannerProfileHTML(repositoryProfileFor(project, 'https://github.com/org/new'))");
+  assert.match(fresh, /value="custom" selected/);
+  assert.doesNotMatch(fresh, /value="auto"|data-profile-auto|data-profile-extras/);
+  assert.doesNotMatch(fresh, /type="checkbox"[^>]*checked/);
+  assert.doesNotMatch(run("renderSettings.toString()"), /repositoryScannerSettingsHTML|initializeScannerProfiles/);
+});
+
+test('project scanner modes toggle in place without replacing form contents', () => {
+  const run = app();
+  run(`
+    const controls = {'[data-profile-custom]':{},'[data-profile-auto]':{},'[data-profile-extras]':{},'[data-profile-mode-hint]':{}};
+    const card = {dataset:{scannerLocation:'local'},querySelector: selector => controls[selector]};
+    const mode = {value:'disabled',closest:() => card};
+    changeProjectScannerMode(mode);
+  `);
+  assert.equal(run("controls['[data-profile-custom]'].hidden"), true);
+  assert.equal(run("controls['[data-profile-auto]'].hidden"), true);
+  assert.equal(run("controls['[data-profile-extras]'].hidden"), true);
+  run("mode.value='custom';changeProjectScannerMode(mode)");
+  assert.equal(run("controls['[data-profile-custom]'].hidden"), false);
+  assert.match(run("controls['[data-profile-mode-hint]'].textContent"), /selected tools/);
+  run("mode.value='auto';changeProjectScannerMode(mode)");
+  assert.equal(run("controls['[data-profile-auto]'].hidden"), false);
+  assert.equal(run("controls['[data-profile-extras]'].hidden"), false);
+});
+
+test('scanner workflow shows tool paths, skip reasons and retained coverage', () => {
+  const run = app();
+  run(`state = {settings:{},projects:[]};`);
+  const html = run(`scannerJobHTML([{target:'local',tool:'npm',path:'web',status:'blocked',reason:'missing_input'},{target:'remote:one',repository:'github.com/org/app',tool:'govulncheck',path:'',status:'skipped',reason:'not_applicable'}])`);
+  assert.match(html, /web/);
+  assert.match(html, /Required manifest or lockfile missing/);
+  assert.match(html, /github.com\/org\/app/);
+  assert.match(html, /No supported project files found/);
+  assert.match(run(`scannerRunSummary({status:'complete',scanner_jobs:[{}],scanners_completed:0,retained_scanner_findings:4})`), /No scanner completed[^]*4 previous scanner findings retained/);
+  assert.equal(run(`codeScanSeverityBreakdown({}, {mode:'code',status:'complete',count:0,scanner_jobs:[{}],scanners_completed:0})`), '');
+  run("lang = 'ja'");
+  assert.match(run(`scannerJobHTML([{tool:'pip-audit',status:'skipped',reason:'not_applicable'}])`), /対応するプロジェクトファイルがありません/);
+});
+
+test('new scanner definitions populate global tools and repository profiles', () => {
+  const run = app();
+  run(`
+    state = {scanner_definitions:[{id:'new-tool',label:'Future language audit',scope:'manifest',detect:['future.lock'],docs_url:'https://example.com/install'}],settings:{scanners:{'new-tool':true}},projects:[{id:'p',name:'Future project',local_path:'/project',scan_code:true}]};
+  `);
+  assert.match(run("scannerSettingsHTML(state.settings.scanners)"), /name="scanner_new-tool"[^>]*data-scanner-check="new-tool"/);
+  assert.match(run("projectScannerProfileHTML({mode:'auto'},true)"), /Future language audit[^]*future.lock/);
+  assert.match(run("scannerResultHTML('new-tool', {platform:'darwin',status:'missing'})"), /https:\/\/example.com\/install/);
+});
+
+test('saved Automatic profiles keep optional repository scanners turned off', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{trivy:true,snyk:true}},projects:[],scan_repositories:{}};`);
+  assert.equal(run(`defaultScannerProfile({scanner_profiles:{local:{mode:'auto'}}}, 'local').additional_tools.length`), 0);
+  assert.equal(run(`defaultScannerProfile({}, 'local').additional_tools.length`), 2);
+});
+
+test('Save project sends each repository profile with its URL and the local-folder profile in one request', async () => {
+  const run = app();
+  run(`
+    state = {projects:[],settings:{scanners:{npm:true,composer:true,'pip-audit':true}}};
+    const profileCard = (mode,tools,extras=[]) => ({
+      querySelector: () => ({value:mode}),
+      querySelectorAll: () => [
+        ...tools.map(id => ({dataset:{projectScannerTool:id,profileAdditional:'false'}})),
+        ...extras.map(id => ({dataset:{projectScannerTool:id,profileAdditional:'true'}})),
+      ],
+    });
+    const input = (url,profile) => ({value:url,closest:() => ({querySelector:() => profile})});
+    const repositoryInputs = [input(' https://github.com/org/php-web ',profileCard('custom',['composer','npm'])),input('https://github.com/org/worker',profileCard('disabled',[]))];
+    const local = {querySelector:() => profileCard('custom',['pip-audit'])};
+    const submit = {}, error = {}, requests = [];
+    const form = {
+      dataset:{projectId:'p',revision:'7',scannerProfiles:'true'},isConnected:true,
+      elements:{name:{value:'Mixed'},description:{value:''},local_path:{value:'/python'},schedule:{value:'off'},scan_code:{checked:true}},
+      querySelector:selector => ({'button[type="submit"]':submit,'[data-project-error]':error,'[data-local-scanner-profile]':local})[selector],
+      querySelectorAll:selector => selector === '[data-repository-url]' ? repositoryInputs : [],
+    };
+    invoke=async(...args)=>{requests.push(args);return {id:'p'};};refresh=async()=>{};toast=()=>{};
+  `);
+  await run('saveProject({preventDefault(){},target:form})');
+  const calls = JSON.parse(run('JSON.stringify(requests)'));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'UpdateProject');
+  assert.equal(calls[0][1], 'p');
+  assert.equal(calls[0][2].revision, 7);
+  assert.deepEqual(calls[0][2].repository_scanners, [
+    {repository:'https://github.com/org/php-web',profile:{mode:'custom',tools:['composer','npm'],additional_tools:[]}},
+    {repository:'https://github.com/org/worker',profile:{mode:'disabled',tools:[],additional_tools:[]}},
+    {local:true,profile:{mode:'custom',tools:['pip-audit'],additional_tools:[]}},
+  ]);
+  run('repositoryInputs.splice(1,1);form.elements.local_path.value="";');
+  assert.equal(run('projectFormValues(form,true).repository_scanners.length'),1);
+});
+
+test('repository profile drafts survive temporary navigation and no longer live in Configuration', () => {
+  const run = app();
+  run(`
+    state = {settings:{scanners:{trivy:true}},scan_repositories:{}};
+    const draft = {repository_scanners:[{repository:'https://github.com/org/new',profile:{mode:'disabled',tools:[],additional_tools:[]}},{local:true,profile:{mode:'custom',tools:['pip-audit'],additional_tools:[]}}]};
+  `);
+  assert.equal(run("repositoryProfileFor(draft,'https://github.com/org/new').mode"), 'disabled');
+  assert.equal(run('localRepositoryProfileFor(draft).tools[0]'), 'pip-audit');
+  assert.doesNotMatch(run('renderSettings.toString()'), /repository-scanner|repositoryScanner|initializeScannerProfiles/);
+  assert.doesNotMatch(run('saveSettings.toString()'), /repository_scanners/);
+  const html = fs.readFileSync(path.join(__dirname,'../cmd/vulman/ui/index.html'),'utf8');
+  assert.match(html, /project-form-template[^]*data-t="repositoryScannerTitle"[^]*data-local-scanner-profile/);
+});
+
+test('GitHub profiles expose two compact modes and local profiles keep all three', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{npm:true,trivy:true}}};`);
+  const github = run("projectScannerProfileHTML({mode:'custom',tools:['npm']})");
+  assert.equal((github.match(/<option /g) || []).length,2);
+  assert.doesNotMatch(github, /value="auto"|data-profile-auto|data-profile-extras|scanner-auto-tools/);
+  assert.match(github, /data-scanner-location="github"/);
+  assert.doesNotMatch(github, /<small>/);
+  const local = run("projectScannerProfileHTML({mode:'auto',tools:[],additional_tools:['trivy']},true)");
+  assert.equal((local.match(/<option /g) || []).length,3);
+  assert.match(local, /value="auto" selected/);
+  assert.match(local, /data-profile-auto/);
+  assert.match(local, /data-profile-extras/);
+});
+
+test('legacy GitHub Automatic profiles become Disabled with a notice and no tools preselected', () => {
+  const run = app();
+  run(`
+    state = {settings:{scanners:{npm:true,trivy:true}}, scan_repositories:{p:[{key:'remote:one',url:'https://github.com/org/legacy'}]}};
+    const project = {id:'p',scanner_profiles:{'remote:one':{mode:'auto',additional_tools:['trivy']}}};
+  `);
+  const html = run("projectScannerProfileHTML(repositoryProfileFor(project,'https://github.com/org/legacy'))");
+  assert.match(html, /value="disabled" selected/);
+  assert.match(html, /Previously Automatic/);
+  assert.match(html, /Previous findings are kept/);
+  assert.doesNotMatch(html, /type="checkbox"[^>]*checked/);
+  run("lang='ja'");
+  assert.match(run("projectScannerProfileHTML(repositoryProfileFor(project,'https://github.com/org/legacy'))"), /以前は自動モードでした/);
 });

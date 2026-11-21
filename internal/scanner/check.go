@@ -71,22 +71,11 @@ func Check(ctx context.Context, name string) (CheckResult, error) {
 }
 
 func newScannerProbe(ctx context.Context, name string) (*exec.Cmd, error) {
-	switch name {
-	case "govulncheck":
-		return exec.CommandContext(ctx, "govulncheck", "-help"), nil
-	case "npm":
-		return newNPMCommand(ctx, "--version")
-	case "composer":
-		return newComposerCommand(ctx, "--no-plugins", "--no-scripts", "--no-interaction", "--version")
-	case "pip-audit":
-		return exec.CommandContext(ctx, "pip-audit", "--version"), nil
-	case "trivy":
-		return exec.CommandContext(ctx, "trivy", "--version"), nil
-	case "snyk":
-		return exec.CommandContext(ctx, "snyk", "--version"), nil
-	default:
+	item, ok := definition(name)
+	if !ok {
 		return nil, apperror.Newf("scanner_check_unsupported", "scanner availability check is unsupported for %q", name)
 	}
+	return item.probe(ctx)
 }
 
 func checkFailure(result CheckResult, err error) CheckResult {

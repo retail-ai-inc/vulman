@@ -48,6 +48,7 @@ func addLog(r *model.Run, stepID, event, detail string) *model.SyncLog {
 }
 
 func interruptSteps(r *model.Run) {
+	interruptScannerJobs(r)
 	for i := range r.Steps {
 		step := &r.Steps[i]
 		switch step.Status {
@@ -239,7 +240,25 @@ func (t *runTracker) scannerSetup(p model.Project, tools []string, skipReason st
 }
 
 func (t *runTracker) scannerEvent(event scanner.ScanEvent) {
+	// The complete plan and skipped-job reasons are saved in one transaction.
+	// Tool execution still records live starts, results, failures, and cleanup.
+	if event.Phase == "scanner_skipped" && event.Job != nil {
+		return
+	}
+
 	t.update(func(r *model.Run) {
+		if len(event.Plan) > 0 {
+			for _, job := range event.Plan {
+				if len(r.ScannerJobs) < model.MaxScannerJobs {
+					r.ScannerJobs = append(r.ScannerJobs, job)
+				}
+				if job.Status == "skipped" {
+					entry := addLog(r, "scanner", "scanner_skipped", job.Tool)
+					entry.Tool, entry.ScanPath, entry.ScanReason = job.Tool, job.Path, job.Reason
+					entry.ScanTarget, entry.ScanRepository = event.Target, event.Repository
+				}
+			}
+		}
 		detail := event.Tool
 		if event.Err != nil {
 			if detail != "" {
@@ -253,9 +272,25 @@ func (t *runTracker) scannerEvent(event scanner.ScanEvent) {
 		entry.Tool = event.Tool
 		entry.ScanTarget = event.Target
 		entry.ScanRepository = event.Repository
+		entry.ScanPath = event.Path
+		if event.Job != nil {
+			entry.ScanReason = event.Job.Reason
+			found := false
+			for i, job := range r.ScannerJobs {
+				if job.Target == event.Job.Target && job.Tool == event.Job.Tool && job.Path == event.Job.Path {
+					r.ScannerJobs[i] = *event.Job
+					found = true
+					break
+				}
+			}
+			if !found && len(r.ScannerJobs) < model.MaxScannerJobs {
+				r.ScannerJobs = append(r.ScannerJobs, *event.Job)
+			}
+		}
 
 		if event.Phase == "scanner_completed" {
 			entry.Findings = &event.Found
+			r.ScannersCompleted++
 		}
 
 		for i := range r.Steps {
@@ -314,4 +349,14 @@ func (t *runTracker) finish(id string, found int, err error) {
 			return
 		}
 	})
+}
+
+func interruptScannerJobs(r *model.Run) {
+	for i := range r.ScannerJobs {
+		job := &r.ScannerJobs[i]
+		if job.Status == "running" || job.Status == "planned" {
+			job.Status = "interrupted"
+			job.Reason = "interrupted"
+		}
+	}
 }

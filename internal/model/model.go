@@ -27,6 +27,7 @@ type Finding struct {
 	AssetID        string   `json:"asset_id"`
 	ScanTarget     string   `json:"scan_target,omitempty"`
 	ScanRepository string   `json:"scan_repository,omitempty"`
+	ScanPath       string   `json:"scan_path,omitempty"`
 	Component      string   `json:"component"`
 	Version        string   `json:"version"`
 	Title          string   `json:"title"`
@@ -41,29 +42,32 @@ type Finding struct {
 }
 
 type Run struct {
-	ID              string               `json:"id"`
-	StartedAt       time.Time            `json:"started_at"`
-	FinishedAt      time.Time            `json:"finished_at"`
-	Status          string               `json:"status"`
-	Trigger         string               `json:"trigger"`
-	AssetID         string               `json:"asset_id,omitempty"`
-	AssetName       string               `json:"asset_name,omitempty"`
-	Count           int                  `json:"count"`
-	SeverityCounts  map[string]int       `json:"severity_counts,omitempty"`
-	Warnings        []string             `json:"warnings"`
-	WarningMessages []apperror.Message   `json:"warning_messages,omitempty"`
-	Steps           []SyncStep           `json:"steps,omitempty"`
-	Logs            []SyncLog            `json:"logs,omitempty"`
-	Mode            string               `json:"mode,omitempty"`
-	Severity        string               `json:"severity,omitempty"`
-	ScanTargets     []string             `json:"scan_targets,omitempty"`
-	ScanTarget      string               `json:"scan_target,omitempty"`
-	ScanRepository  string               `json:"scan_repository,omitempty"`
-	Selection       *AssessmentSelection `json:"selection,omitempty"`
-	DataCheckedAt   time.Time            `json:"data_checked_at"`
-	PausedAt        time.Time            `json:"paused_at"`
-	PausedSeconds   float64              `json:"paused_seconds,omitempty"`
-	DatabaseWaits   []DatabaseWait       `json:"database_waits,omitempty"`
+	ID                      string               `json:"id"`
+	StartedAt               time.Time            `json:"started_at"`
+	FinishedAt              time.Time            `json:"finished_at"`
+	Status                  string               `json:"status"`
+	Trigger                 string               `json:"trigger"`
+	AssetID                 string               `json:"asset_id,omitempty"`
+	AssetName               string               `json:"asset_name,omitempty"`
+	Count                   int                  `json:"count"`
+	SeverityCounts          map[string]int       `json:"severity_counts,omitempty"`
+	Warnings                []string             `json:"warnings"`
+	WarningMessages         []apperror.Message   `json:"warning_messages,omitempty"`
+	Steps                   []SyncStep           `json:"steps,omitempty"`
+	Logs                    []SyncLog            `json:"logs,omitempty"`
+	Mode                    string               `json:"mode,omitempty"`
+	Severity                string               `json:"severity,omitempty"`
+	ScanTargets             []string             `json:"scan_targets,omitempty"`
+	ScanTarget              string               `json:"scan_target,omitempty"`
+	ScanRepository          string               `json:"scan_repository,omitempty"`
+	Selection               *AssessmentSelection `json:"selection,omitempty"`
+	ScannerJobs             []ScannerJob         `json:"scanner_jobs,omitempty"`
+	ScannersCompleted       int                  `json:"scanners_completed,omitempty"`
+	RetainedScannerFindings int                  `json:"retained_scanner_findings,omitempty"`
+	DataCheckedAt           time.Time            `json:"data_checked_at"`
+	PausedAt                time.Time            `json:"paused_at"`
+	PausedSeconds           float64              `json:"paused_seconds,omitempty"`
+	DatabaseWaits           []DatabaseWait       `json:"database_waits,omitempty"`
 }
 
 type AssessmentSelection struct {
@@ -74,6 +78,22 @@ type AssessmentSelection struct {
 type AssessmentItem struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
+}
+
+type ScannerProfile struct {
+	Mode            string   `json:"mode"`
+	Tools           []string `json:"tools,omitempty"`
+	AdditionalTools []string `json:"additional_tools,omitempty"`
+	NeedsScan       bool     `json:"needs_scan,omitempty"`
+}
+
+type ScannerJob struct {
+	Target     string `json:"target"`
+	Repository string `json:"repository,omitempty"`
+	Tool       string `json:"tool"`
+	Path       string `json:"path,omitempty"`
+	Status     string `json:"status"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 type DatabaseWait struct {
@@ -118,30 +138,34 @@ type SyncLog struct {
 	Findings       *int              `json:"findings,omitempty"`
 	ScanTarget     string            `json:"scan_target,omitempty"`
 	ScanRepository string            `json:"scan_repository,omitempty"`
+	ScanPath       string            `json:"scan_path,omitempty"`
+	ScanReason     string            `json:"scan_reason,omitempty"`
 }
 
 const MaxSyncLogs = 200
+const MaxScannerJobs = 1200
 
 type Project struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	Description      string    `json:"description"`
-	Repository       string    `json:"repository"`
-	RepositoryURLs   []string  `json:"repository_urls,omitempty"`
-	LocalPath        string    `json:"local_path"`
-	ScanCode         bool      `json:"scan_code"`
-	Assets           []Asset   `json:"assets"`
-	Schedule         string    `json:"schedule"`
-	NextRun          time.Time `json:"next_run"`
-	LastSync         time.Time `json:"last_sync"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
-	Revision         int       `json:"revision"`
-	AssessedRevision int       `json:"assessed_revision"`
-	DataCheckedAt    time.Time `json:"data_checked_at"`
-	Findings         []Finding `json:"findings"`
-	Runs             []Run     `json:"runs"`
-	Syncing          bool      `json:"syncing"`
+	ID               string                    `json:"id"`
+	Name             string                    `json:"name"`
+	Description      string                    `json:"description"`
+	Repository       string                    `json:"repository"`
+	RepositoryURLs   []string                  `json:"repository_urls,omitempty"`
+	LocalPath        string                    `json:"local_path"`
+	ScanCode         bool                      `json:"scan_code"`
+	ScannerProfiles  map[string]ScannerProfile `json:"scanner_profiles,omitempty"`
+	Assets           []Asset                   `json:"assets"`
+	Schedule         string                    `json:"schedule"`
+	NextRun          time.Time                 `json:"next_run"`
+	LastSync         time.Time                 `json:"last_sync"`
+	CreatedAt        time.Time                 `json:"created_at"`
+	UpdatedAt        time.Time                 `json:"updated_at"`
+	Revision         int                       `json:"revision"`
+	AssessedRevision int                       `json:"assessed_revision"`
+	DataCheckedAt    time.Time                 `json:"data_checked_at"`
+	Findings         []Finding                 `json:"findings"`
+	Runs             []Run                     `json:"runs"`
+	Syncing          bool                      `json:"syncing"`
 }
 
 // MarkOutdatedComponents recognizes results saved before component freshness
@@ -166,23 +190,24 @@ func (p *Project) MarkOutdatedComponents() {
 }
 
 type Settings struct {
-	OSVUpdateSchedule string            `json:"osv_update_schedule"`
-	OSVEcosystems     []string          `json:"osv_ecosystems"`
-	NVDUpdateSchedule string            `json:"nvd_update_schedule"`
-	CVEUpdateSchedule string            `json:"cve_update_schedule"`
-	CacheHours        int               `json:"cache_hours"`
-	CacheMaxEntries   int               `json:"cache_max_entries"`
-	CacheMaxMiB       int               `json:"cache_max_mib"`
-	Language          string            `json:"language"`
-	Sources           map[string]bool   `json:"sources"`
-	NVDURL            string            `json:"nvd_url"`
-	CVEURL            string            `json:"cve_url"`
-	OSVURL            string            `json:"osv_url"`
-	AIProvider        string            `json:"ai_provider"`
-	OpenAIModel       string            `json:"openai_model"`
-	ClaudeModel       string            `json:"claude_model"`
-	Scanners          map[string]bool   `json:"scanners"`
-	Tokens            map[string]string `json:"tokens,omitempty"`
+	OSVUpdateSchedule     string            `json:"osv_update_schedule"`
+	OSVEcosystems         []string          `json:"osv_ecosystems"`
+	NVDUpdateSchedule     string            `json:"nvd_update_schedule"`
+	CVEUpdateSchedule     string            `json:"cve_update_schedule"`
+	CacheHours            int               `json:"cache_hours"`
+	CacheMaxEntries       int               `json:"cache_max_entries"`
+	CacheMaxMiB           int               `json:"cache_max_mib"`
+	Language              string            `json:"language"`
+	Sources               map[string]bool   `json:"sources"`
+	NVDURL                string            `json:"nvd_url"`
+	CVEURL                string            `json:"cve_url"`
+	OSVURL                string            `json:"osv_url"`
+	AIProvider            string            `json:"ai_provider"`
+	OpenAIModel           string            `json:"openai_model"`
+	ClaudeModel           string            `json:"claude_model"`
+	Scanners              map[string]bool   `json:"scanners"`
+	ScannerConfigRevision string            `json:"scanner_config_revision,omitempty"`
+	Tokens                map[string]string `json:"tokens,omitempty"`
 }
 
 type State struct {

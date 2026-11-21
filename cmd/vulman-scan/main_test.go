@@ -103,7 +103,7 @@ exit 1`)
 				t.Fatal(err)
 			}
 			if code == 2 {
-				if report.Status != "failed" || len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0], "pinned requirements.txt") {
+				if report.Status != "failed" || len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0], "requirements.txt") {
 					t.Fatalf("expected a manifest warning: %+v", report)
 				}
 				return

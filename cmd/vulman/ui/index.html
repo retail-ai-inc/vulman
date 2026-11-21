@@ -37,6 +37,7 @@
           </div>
           <p class="notice project-removal-warning" data-project-removal-warning data-t="repositoryRemovalWarning" hidden></p>
           <div class="project-scan-fields">
+            <div class="repository-profile-intro"><h4 data-t="repositoryScannerTitle"></h4><p class="form-note" data-t="repositoryScannerHint"></p><p class="form-note" data-t="scannerProfileGlobalHint"></p></div>
             <fieldset class="project-repositories">
               <legend data-t="repositoryURLs"></legend>
               <div class="project-repository-list" data-project-repositories></div>
@@ -49,6 +50,8 @@
               <label><span data-t="localPath"></span><input name="local_path" placeholder="/path/to/project or C:\projects\app"></label>
               <button type="button" class="button secondary" data-action="browse-local-repository" data-t="browseFolder"></button>
             </div>
+            <div data-local-scanner-profile></div>
+            <p class="form-note" data-t="scannerProfileSaveHint"></p>
             <label class="check-row scan-consent"><input type="checkbox" name="scan_code"><span><strong data-t="scanCode"></strong><small data-t="scanConsent"></small></span></label>
           </div>
         </section>

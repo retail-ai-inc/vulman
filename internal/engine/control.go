@@ -111,6 +111,7 @@ func (e *Engine) Control(projectID, runID, action string) error {
 }
 
 func stopSteps(r *model.Run) {
+	interruptScannerJobs(r)
 	for i := range r.Steps {
 		s := &r.Steps[i]
 		switch s.Status {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -35,16 +36,18 @@ type Desktop struct {
 }
 
 type ScanRepository struct {
+	URL   string `json:"url"`
 	Key   string `json:"key"`
 	Label string `json:"label"`
 }
 
 type State struct {
-	OSVDatabase            *osvdb.Stats `json:"osv_database,omitempty"`
-	OSVEcosystemOptions    []string     `json:"osv_ecosystem_options,omitempty"`
-	OSVSuggestedEcosystems []string     `json:"osv_suggested_ecosystems,omitempty"`
-	NVDDatabase            *nvddb.Stats `json:"nvd_database,omitempty"`
-	CVEDatabase            *cvedb.Stats `json:"cve_database,omitempty"`
+	ScannerDefinitions     []scanner.Definition `json:"scanner_definitions"`
+	OSVDatabase            *osvdb.Stats         `json:"osv_database,omitempty"`
+	OSVEcosystemOptions    []string             `json:"osv_ecosystem_options,omitempty"`
+	OSVSuggestedEcosystems []string             `json:"osv_suggested_ecosystems,omitempty"`
+	NVDDatabase            *nvddb.Stats         `json:"nvd_database,omitempty"`
+	CVEDatabase            *cvedb.Stats         `json:"cve_database,omitempty"`
 	*model.State
 	Version              string                      `json:"version"`
 	TokenStatus          map[string]bool             `json:"token_status"`
@@ -92,7 +95,7 @@ func (d *Desktop) StateSince(since string) (_ State, resultErr error) {
 		return State{}, apperror.New("could_not_read_cache_information", "could not read cache information")
 	}
 
-	result := State{State: st, Version: prefix + version, CacheStats: cacheStats}
+	result := State{State: st, Version: prefix + version, CacheStats: cacheStats, ScannerDefinitions: scanner.Definitions()}
 	if d.engine != nil {
 		stats, err := d.engine.CVE.Stats()
 		if err != nil {
@@ -138,7 +141,7 @@ func (d *Desktop) StateSince(since string) (_ State, resultErr error) {
 				label := scanner.RepositoryLabel(repository)
 				if label != "" {
 					result.ScanRepositories[project.ID] = append(result.ScanRepositories[project.ID], ScanRepository{
-						Key: scanner.RemoteTargetKey(repository), Label: label,
+						Key: scanner.RemoteTargetKey(repository), Label: label, URL: repository,
 					})
 				}
 			}
@@ -153,16 +156,23 @@ func (d *Desktop) StateSince(since string) (_ State, resultErr error) {
 	return result, nil
 }
 
+type RepositoryScannerInput struct {
+	Repository string               `json:"repository,omitempty"`
+	Local      bool                 `json:"local,omitempty"`
+	Profile    model.ScannerProfile `json:"profile"`
+}
+
 type ProjectInput struct {
-	Name           string        `json:"name"`
-	Description    string        `json:"description"`
-	Repository     string        `json:"repository"`
-	RepositoryURLs []string      `json:"repository_urls"`
-	LocalPath      string        `json:"local_path"`
-	ScanCode       bool          `json:"scan_code"`
-	Assets         []model.Asset `json:"assets"`
-	Schedule       string        `json:"schedule"`
-	Revision       int           `json:"revision"`
+	Name               string                   `json:"name"`
+	Description        string                   `json:"description"`
+	Repository         string                   `json:"repository"`
+	RepositoryURLs     []string                 `json:"repository_urls"`
+	LocalPath          string                   `json:"local_path"`
+	ScanCode           bool                     `json:"scan_code"`
+	Assets             []model.Asset            `json:"assets"`
+	Schedule           string                   `json:"schedule"`
+	Revision           int                      `json:"revision"`
+	RepositoryScanners []RepositoryScannerInput `json:"repository_scanners,omitempty"`
 }
 
 func (in ProjectInput) project() model.Project {
@@ -195,6 +205,10 @@ func (d *Desktop) CreateProject(in ProjectInput) (_ model.Project, resultErr err
 	err := d.store.Update(func(st *model.State) error {
 		if len(st.Projects) >= 500 {
 			return apperror.New("project_limit_reached", "project limit reached")
+		}
+
+		if err := saveProjectScannerProfiles(model.Project{}, &p, st.Settings, in.RepositoryScanners); err != nil {
+			return err
 		}
 
 		st.Projects = append(st.Projects, p)
@@ -240,6 +254,10 @@ func (d *Desktop) UpdateProject(id string, in ProjectInput) (_ model.Project, re
 				return err
 			}
 
+			if err := saveProjectScannerProfiles(*old, &p, st.Settings, in.RepositoryScanners); err != nil {
+				return err
+			}
+
 			markChangedComponents(*old, &p)
 			removeProjectResults(old, p)
 			old.Name = p.Name
@@ -249,6 +267,7 @@ func (d *Desktop) UpdateProject(id string, in ProjectInput) (_ model.Project, re
 			old.LocalPath = p.LocalPath
 			old.ScanCode = p.ScanCode
 			old.Assets = p.Assets
+			old.ScannerProfiles = p.ScannerProfiles
 			old.Revision++
 			old.UpdatedAt = time.Now()
 
@@ -677,6 +696,10 @@ func (d *Desktop) SaveSettings(in SettingsInput) (resultErr error) {
 	}
 
 	err := d.store.Update(func(st *model.State) error {
+		if err := saveGlobalScannerSettings(st, &cfg); err != nil {
+			return err
+		}
+
 		if cfg.OSVUpdateSchedule == "" {
 			cfg.OSVUpdateSchedule = st.Settings.OSVUpdateSchedule
 			if cfg.OSVUpdateSchedule == "" {
@@ -729,6 +752,10 @@ func (d *Desktop) SaveSettings(in SettingsInput) (resultErr error) {
 	})
 
 	if err != nil {
+		var public *apperror.Error
+		if errors.As(err, &public) {
+			return err
+		}
 		return apperror.New("could_not_save_settings", "could not save settings")
 	}
 	if d.engine != nil && (!cfg.Sources["cve"] || strings.TrimRight(cfg.CVEURL, "/") != model.DefaultCVEURL) {

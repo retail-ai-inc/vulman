@@ -89,8 +89,8 @@ func TestProjectRepositoryURLsPersistThroughDesktopUpdate(t *testing.T) {
 		t.Fatalf("unexpected saved repository URLs: %+v", stored.Repositories())
 	}
 	want := []ScanRepository{
-		{Key: scanner.RemoteTargetKey(urls[0]), Label: "github.com/owner/first.git"},
-		{Key: scanner.RemoteTargetKey(urls[1]), Label: "github.com/owner/second.git"},
+		{Key: scanner.RemoteTargetKey(urls[0]), Label: "github.com/owner/first.git", URL: urls[0]},
+		{Key: scanner.RemoteTargetKey(urls[1]), Label: "github.com/owner/second.git", URL: urls[1]},
 	}
 	if got := state.ScanRepositories[project.ID]; !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected scan repository identifiers in the workspace: %+v", got)

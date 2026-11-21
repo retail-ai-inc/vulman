@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/scanner"
 	"vulman/internal/sources"
@@ -22,6 +23,8 @@ import (
 
 type toolResult struct {
 	Name     string `json:"name"`
+	Path     string `json:"path,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 	Status   string `json:"status"`
 	Findings *int   `json:"findings,omitempty"`
 	Error    string `json:"error,omitempty"`
@@ -47,7 +50,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	dir := flags.String("dir", "", "local repository folder (defaults to the current folder)")
 	repo := flags.String("repo", "", "HTTPS GitHub repository URL")
-	list := flags.String("scanners", "", "comma-separated tools: govulncheck,npm,composer,pip-audit,trivy,snyk (required)")
+	list := flags.String("scanners", "", "comma-separated tools: "+strings.Join(scanner.Names(), ",")+" (required)")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -109,38 +112,55 @@ func selectedTools(list string) (map[string]bool, error) {
 func scan(ctx context.Context, project model.Project, settings model.Settings) scanReport {
 	report := scanReport{Status: "complete", Warnings: []string{}}
 	positions := map[string]int{}
-	for _, name := range scanner.EnabledTools(settings.Scanners) {
-		positions[name] = len(report.Scanners)
-		report.Scanners = append(report.Scanners, toolResult{Name: name, Status: "skipped"})
+	project.ScannerProfiles = map[string]model.ScannerProfile{}
+	for _, target := range scanner.TargetKeys(project) {
+		project.ScannerProfiles[target] = model.ScannerProfile{Mode: "custom", Tools: scanner.EnabledTools(settings.Scanners)}
 	}
 	completed := 0
 	findings, warnings := scanner.Scan(ctx, project, settings, "", func(event scanner.ScanEvent) {
-		position, found := positions[event.Tool]
-		if !found {
+		for _, job := range event.Plan {
+			if !settings.Scanners[job.Tool] {
+				continue
+			}
+			key := job.Tool + ":" + job.Path
+			positions[key] = len(report.Scanners)
+			report.Scanners = append(report.Scanners, toolResult{Name: job.Tool, Path: job.Path, Status: job.Status, Reason: job.Reason})
+		}
+		if !settings.Scanners[event.Tool] {
 			return
 		}
+		key := event.Tool + ":" + event.Path
+		position, found := positions[key]
+		if !found {
+			positions[key] = len(report.Scanners)
+			position = len(report.Scanners)
+			report.Scanners = append(report.Scanners, toolResult{Name: event.Tool, Path: event.Path, Status: "planned"})
+		}
 		result := &report.Scanners[position]
+		if event.Job != nil {
+			result.Status, result.Reason = event.Job.Status, event.Job.Reason
+		}
 		switch event.Phase {
 		case "scanner_completed":
 			completed++
 			result.Status, result.Findings = "complete", &event.Found
 		case "scanner_failed":
-			result.Status, result.Error = "failed", event.Err.Error()
+			result.Status, result.Error = "failed", apperror.Public(event.Err).English()
 		case "scanner_interrupted":
-			result.Status, result.Error = "interrupted", event.Err.Error()
-		case "scanner_missing_token":
-			result.Error = "SNYK_TOKEN is required"
+			result.Status, result.Error = "interrupted", apperror.Public(event.Err).English()
+		case "scanner_missing_token", "scanner_blocked":
+			result.Error = apperror.Public(event.Err).English()
 		}
 	})
 	// The CLI accepts one target, so its component IDs remain stable.
 	for i := range findings {
-		findings[i].AssetID = "code:" + findings[i].Component
+		findings[i].AssetID = scanner.FindingAssetID("", findings[i].ScanPath, findings[i].Component)
 	}
 	report.Findings = sources.Merge(findings)
 	report.Warnings = append(report.Warnings, warnings...)
 	if ctx.Err() != nil {
 		report.Status = "interrupted"
-	} else if len(warnings) > 0 {
+	} else if len(warnings) > 0 || completed == 0 {
 		report.Status = "failed"
 		if completed > 0 {
 			report.Status = "partial"

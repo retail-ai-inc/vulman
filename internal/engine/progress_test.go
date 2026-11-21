@@ -151,6 +151,11 @@ func TestScannerWorkflowLogsIndividualResults(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("demo==1.0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{"go.mod", "composer.json", "composer.lock"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv("PATH", dir)
 	t.Setenv("SNYK_TOKEN", "")
 	for name, script := range map[string]string{
@@ -234,7 +239,7 @@ fi`)
 			Assets: []model.Asset{{ID: "a", Name: "demo", Version: "1", Ecosystem: "npm"}},
 			Findings: []model.Finding{
 				{ID: "CVE-inventory", AssetID: "a", Match: "cpe", Severity: "CRITICAL"},
-				{ID: "CVE-scanner-old", AssetID: "code:demo", Match: "scanner", Severity: "HIGH"},
+				{ID: "CVE-scanner-old", AssetID: "code:demo", Match: "scanner", Sources: []string{"Trivy"}, Severity: "HIGH"},
 			},
 		}}
 		return nil
@@ -345,7 +350,9 @@ printf '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CV
 	t.Setenv("TMPDIR", cloneRoot)
 	if err := s.Update(func(st *model.State) error {
 		st.Settings.Scanners = map[string]bool{"trivy": true}
-		st.Projects = []model.Project{{ID: "p", ScanCode: true, LocalPath: dir, Repository: "https://github.com/owner/project.git"}}
+		st.Projects = []model.Project{{ID: "p", ScanCode: true, LocalPath: dir, Repository: "https://github.com/owner/project.git",
+			ScannerProfiles: map[string]model.ScannerProfile{scanner.RemoteTargetKey("https://github.com/owner/project.git"): {Mode: "custom", Tools: []string{"trivy"}}},
+		}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -398,6 +405,9 @@ printf '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CV
 			"https://github.com/owner/missing.git",
 			"https://github.com/owner/second.git?value=hidden",
 			"https://github.com/owner/project.git",
+		}
+		for _, repository := range st.Projects[0].Repositories() {
+			st.Projects[0].ScannerProfiles[scanner.RemoteTargetKey(repository)] = model.ScannerProfile{Mode: "custom", Tools: []string{"trivy"}}
 		}
 		return nil
 	}); err != nil {

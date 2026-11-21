@@ -54,6 +54,10 @@ echo '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CVE-
 		p := &st.Projects[0]
 		p.ScanCode, p.LocalPath = true, dir
 		p.RepositoryURLs = []string{first, second, third}
+		p.ScannerProfiles = map[string]model.ScannerProfile{}
+		for _, repository := range p.Repositories() {
+			p.ScannerProfiles[scanner.RemoteTargetKey(repository)] = model.ScannerProfile{Mode: "custom", Tools: []string{"trivy"}}
+		}
 		p.Assets = []model.Asset{
 			{ID: "a", Name: "first", Version: "1", Ecosystem: "npm", NeedsAssessment: true},
 			{ID: "b", Name: "second", Version: "2", Ecosystem: "npm", NeedsAssessment: true},
@@ -63,9 +67,9 @@ echo '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CVE-
 			{ID: "old-a", AssetID: "a", Severity: "HIGH"},
 			{ID: "old-b", AssetID: "b", Severity: "HIGH"},
 			{ID: "keep-c", AssetID: "c", Severity: "CRITICAL"},
-			{ID: "keep-local", AssetID: "code:local:dependency", Match: "scanner", Severity: "LOW"},
-			{ID: "keep-repository", AssetID: "code:" + scanner.RemoteTargetKey(third) + ":dependency", Match: "scanner", Severity: "CRITICAL"},
-			{ID: "resolved-repository", AssetID: "code:" + scanner.RemoteTargetKey(first) + ":dependency", Match: "scanner", Severity: "HIGH"},
+			{ID: "keep-local", AssetID: "code:local:dependency", Match: "scanner", Sources: []string{"Trivy"}, Severity: "LOW"},
+			{ID: "keep-repository", AssetID: "code:" + scanner.RemoteTargetKey(third) + ":dependency", Match: "scanner", Sources: []string{"Trivy"}, Severity: "CRITICAL"},
+			{ID: "resolved-repository", AssetID: "code:" + scanner.RemoteTargetKey(first) + ":dependency", Match: "scanner", Sources: []string{"Trivy"}, Severity: "HIGH"},
 		}
 		p.LastSync, p.DataCheckedAt, p.NextRun = lastSync, lastSync, nextRun
 		original = *p

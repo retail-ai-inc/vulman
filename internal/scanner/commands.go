@@ -12,27 +12,20 @@ import (
 	"vulman/internal/model"
 )
 
-var scannerNames = [...]string{"govulncheck", "npm", "composer", "pip-audit", "trivy", "snyk"}
+var scannerNames = Names()
 
 func Supported(name string) bool {
-	return slices.Contains(scannerNames[:], name)
+	_, ok := definition(name)
+	return ok
 }
 
 func newScannerCommand(ctx context.Context, name string) (*exec.Cmd, error) {
-	switch name {
-	case "govulncheck":
-		return exec.CommandContext(ctx, "govulncheck", "-json", "./..."), nil
-	case "npm":
-		return newNPMCommand(ctx, "audit", "--json", "--ignore-scripts")
-	case "composer":
-		return newComposerCommand(ctx, "--no-plugins", "--no-scripts", "--no-interaction", "audit", "--locked", "--format=json")
-	case "trivy":
-		return exec.CommandContext(ctx, "trivy", "fs", "--format", "json", "--scanners", "vuln", "--quiet", "."), nil
-	case "snyk":
-		return exec.CommandContext(ctx, "snyk", "test", "--json"), nil
-	default:
+	item, ok := definition(name)
+	if !ok || name == "pip-audit" {
 		return nil, apperror.Newf("scanner_unsupported", "unsupported scanner %q", name)
 	}
+	cmd, _, err := item.build(ctx, "", nil)
+	return cmd, err
 }
 
 const githubAuthHeaderEnv = "VULMAN_GITHUB_AUTH_HEADER"

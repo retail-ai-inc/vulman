@@ -50,13 +50,13 @@ fi`)
 			nextRun := time.Now().Add(time.Hour)
 			prior := []model.Finding{
 				{ID: "CVE-inventory", AssetID: "a", Match: "cpe", Severity: "CRITICAL"},
-				{ID: "CVE-other", AssetID: "code:" + scanner.RemoteTargetKey(other) + ":demo", Match: "scanner", Severity: "HIGH"},
-				{ID: "CVE-resolved", AssetID: "code:" + target + ":demo", Match: "scanner", Severity: "HIGH"},
-				{ID: "CVE-downgraded", AssetID: "code:" + target + ":demo", Match: "scanner", Severity: "HIGH"},
-				{ID: "CVE-low-kept", AssetID: "code:" + target + ":demo", Match: "scanner", Severity: "LOW"},
+				{ID: "CVE-other", AssetID: "code:" + scanner.RemoteTargetKey(other) + ":demo", Match: "scanner", Sources: []string{"Trivy"}, Severity: "HIGH"},
+				{ID: "CVE-resolved", AssetID: "code:" + target + ":demo", Match: "scanner", Sources: []string{"Trivy"}, Severity: "HIGH"},
+				{ID: "CVE-downgraded", AssetID: "code:" + target + ":demo", Match: "scanner", Sources: []string{"Trivy"}, Severity: "HIGH"},
+				{ID: "CVE-low-kept", AssetID: "code:" + target + ":demo", Match: "scanner", Sources: []string{"Trivy"}, Severity: "LOW"},
 			}
 			if target != "local" {
-				prior = append(prior, model.Finding{ID: "CVE-local", AssetID: "code:local:demo", Match: "scanner", Severity: "HIGH"})
+				prior = append(prior, model.Finding{ID: "CVE-local", AssetID: "code:local:demo", Match: "scanner", Sources: []string{"Trivy"}, Severity: "HIGH"})
 			}
 
 			if err := s.Update(func(st *model.State) error {
@@ -64,8 +64,9 @@ fi`)
 				st.Settings.Scanners = map[string]bool{"trivy": true}
 				st.Projects = []model.Project{{
 					ID: "p", ScanCode: true, LocalPath: dir, RepositoryURLs: []string{repository, other},
-					Assets:   []model.Asset{{ID: "a", Name: "demo", Version: "1", NeedsAssessment: true}},
-					Findings: prior, Schedule: "daily", NextRun: nextRun, LastSync: lastSync,
+					ScannerProfiles: map[string]model.ScannerProfile{scanner.RemoteTargetKey(repository): {Mode: "custom", Tools: []string{"trivy"}}},
+					Assets:          []model.Asset{{ID: "a", Name: "demo", Version: "1", NeedsAssessment: true}},
+					Findings:        prior, Schedule: "daily", NextRun: nextRun, LastSync: lastSync,
 					DataCheckedAt: lastSync, Revision: 3, AssessedRevision: 1,
 				}}
 				return nil

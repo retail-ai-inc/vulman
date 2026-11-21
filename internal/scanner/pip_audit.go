@@ -44,7 +44,7 @@ func newPipAuditCommand(ctx context.Context, repository string, scratch *scanScr
 		mode = []string{"--disable-pip", "--no-deps", "--requirement", "requirements.txt"}
 	}
 
-	stage := filepath.Join(scratch.name, "python")
+	stage := filepath.Join(scratch.name, "python-"+model.NewID())
 	if err := scratch.root.Mkdir(stage, 0o700); err != nil {
 		return nil, "", err
 	}

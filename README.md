@@ -233,6 +233,34 @@ The OpenAI/Codex integration uses the OpenAI **Responses API**, not desktop Code
 
 Enable a tool in Configuration, install it on PATH, and explicitly enable **Run configured code scanners** for a trusted project. In **Edit project**, use **Add repository URL** to set one or more HTTPS GitHub.com repository URLs, such as `https://github.com/owner/repository.git`. You can also set a local folder. Vulman scans each configured location separately. Workflow logs and findings identify the repository, and duplicate findings from different tools are merged within each location. If a location fails, Vulman continues with the remaining locations and retains previous findings. Git must be installed. Submodules are not fetched.
 
+### Per-repository scanner profiles
+
+Under **Configuration → Code scanners**, enable the tools Vulman is allowed to use. Open **Edit project → Code scanning** to choose the scanner profile directly below each GitHub repository URL and local folder. The same controls are available when adding a project. Select a mode:
+
+- **GitHub repository URLs:** **Custom selection** or **Disabled**. New URL rows start with Custom selection and no tools preselected; select at least one tool or choose Disabled before saving. Tool selection is explicit before cloning. Vulman still checks required inputs and finds the selected tools’ working folders after cloning.
+- **Local repository folders:** **Automatic** (default), **Custom selection**, or **Disabled**. Automatic discovers manifests in the root and subfolders and uses applicable globally enabled language tools; Trivy and Snyk remain optional additions.
+- **Custom selection:** choose one or more tools for the target. A PHP/JavaScript GitHub repository can select Composer and npm. Global tool permissions still apply.
+- **Disabled:** skip the target, including cloning for GitHub URLs. Existing findings remain available.
+
+Existing GitHub profiles that used Automatic, including legacy projects without an explicit profile, are treated as Disabled until tools are explicitly selected. The editor shows a notice for these profiles. Previous findings are preserved; local Automatic profiles continue to work.
+
+Use **Save project** to save repository URLs, the local folder, and their scanner profiles together in one transaction. Removed repositories also lose their saved profiles. Global tool permissions are saved separately with **Save configuration**. Changing scanner permissions or a repository profile marks its scanner coverage as needing a new code scan. Active assessments must finish before their scanner policy can change. Profile changes do not alter the full-project assessment timestamp.
+
+| Language tool | Detected files | Required inputs per project folder |
+| --- | --- | --- |
+| govulncheck | `go.mod` | `go.mod` and a working Go toolchain |
+| npm audit | `package.json`, npm/yarn/pnpm lockfiles | `package.json` and `package-lock.json` or `npm-shrinkwrap.json`; yarn/pnpm lockfiles alone cannot be audited with npm |
+| composer audit | `composer.json`, `composer.lock` | Both files |
+| pip-audit | `requirements.txt`, `pyproject.toml`, `pylock.toml`, `pylock.*.toml` | Supported Python lockfiles or pinned `requirements.txt`; `pyproject.toml` alone is insufficient |
+
+Discovery excludes `.git`, `node_modules`, `vendor`, `.venv`, `venv`, and `__pycache__`, and does not follow symlinks. Discovery and job counts are bounded. Vulman does not generate lockfiles or install dependencies to make a scanner applicable.
+
+The expanded workflow shows each scanner job, repository, relative project folder, status, and skip/block reason. Files and tool permissions are checked again during each scan. Editing profiles does not clone repositories or inspect code. Scanner settings and workflow messages support English and Japanese.
+
+Successful scans replace only the findings covered by that scanner and project folder. Skipped, disabled, blocked, failed, or otherwise unassessed tools retain their previous findings and provenance. Unknown legacy provenance is retained conservatively. The workflow separates fresh results from retained results; a run with no completed scanner is explicitly identified and does not display a clean zero-result severity summary. Duplicate reports from multiple tools are merged within the same repository and project folder.
+
+Scanner definitions in `internal/scanner/registry.go` provide tool IDs, labels, manifest rules, required inputs, command builders, probes, and parsers. Configuration and CLI validation consume this catalogue, so new integrations can use the same profile and planning UI.
+
 Vulman puts shallow clones, scan temporary files, and supported scanner caches in private system temporary storage outside the active Vulman data directory. It removes that workspace when the scan finishes, fails, or is cancelled. After a force quit, Vulman removes abandoned scan files on the next desktop launch or code scan. The database retains vulnerability findings and run metadata. Scanner caches may be downloaded again on later scans.
 
 For a private repository, enter a **GitHub personal access token** under **Configuration → API credentials** and save. A fine-grained token can be scoped to the repositories you want to scan with **Contents → Read-only** permission. Add the HTTPS repository URL to your project as usual. Vulman tries the clone anonymously first and retries with the token if needed. Git must support `--config-env` for authenticated clones. [GitHub personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) · [Git command options](https://git-scm.com/docs/git#Documentation/git.txt---config-envltnamegtltenvvargt)
@@ -248,11 +276,11 @@ On macOS, Vulman also searches the standard Homebrew and Go installation folders
 | Composer | `composer --no-plugins --no-scripts --no-interaction audit --locked --format=json` | PHP dependency advisories from the lockfile. |
 | pip-audit | `pip-audit --format json --locked .` or `pip-audit --format json --disable-pip --no-deps -r requirements.txt` | Python dependency advisories from repository manifests. |
 | Trivy | `trivy fs --format json --scanners vuln --quiet .` | Filesystem dependency vulnerability scan. |
-| Snyk CLI | `snyk test --json` | Supported dependency manifests; requires a Snyk token and CLI. |
+| Snyk CLI | `snyk test --all-projects --fail-fast --json` | Supported dependency manifests; requires a Snyk token and CLI. |
 
 On Windows, Vulman runs the installed `npm-cli.js` through `node.exe` and `composer.phar` through `php.exe` when npm or Composer uses a standard batch launcher. Keep those files in the standard layout beside their launchers. Native `.exe` launchers on PATH also work.
 
-For Python, install a current [pip-audit release](https://github.com/pypa/pip-audit#installation). Vulman looks at the repository root and uses `pylock.toml` and any `pylock.*.toml` files when present. Otherwise, it uses a standalone `requirements.txt` with exact versions for all dependencies you want audited. pip-audit queries PyPI for advisories without installing dependencies. Findings without severity information appear as **Unrated**.
+For Python, install a current [pip-audit release](https://github.com/pypa/pip-audit#installation). Vulman checks each detected Python project folder and uses `pylock.toml` and any `pylock.*.toml` files when present. Otherwise, it uses a standalone `requirements.txt` with exact versions for all dependencies you want audited. pip-audit queries PyPI for advisories without installing dependencies. Findings without severity information appear as **Unrated**.
 
 The built-in scanner integrations cover dependency and reachability vulnerabilities. Vulman runs a fixed set of scanner commands.
 
@@ -269,7 +297,7 @@ Scanners use their own network services, caches, and local toolchains. Snyk and 
 
 ### Run code scanners on their own
 
-On the project page, select **Scan code** after enabling **Run configured code scanners** and setting a repository in **Edit project**. The run uses the configured tools, covers all severities, and appears in the project's workflow panel and Activity. It refreshes scanner findings independently of the CVE, NVD, and OSV assessment. Incomplete scans retain previous scanner findings. The project's assessment date and schedule continue to reflect full-project assessments.
+On the project page, select **Scan code** after enabling **Run configured code scanners** and setting a repository in **Edit project**. The run uses each repository’s saved scanner profile and globally allowed tools, covers all severities, and appears in the project's workflow panel and Activity. It refreshes scanner findings independently of the CVE, NVD, and OSV assessment. Incomplete scans retain previous scanner findings. The project's assessment date and schedule continue to reflect full-project assessments.
 
 For terminal or CI use, build the standalone CLI with `make build-scan`. The command uses the tools on your shell's `PATH`, takes the Snyk token from `SNYK_TOKEN`, and uses `GITHUB_TOKEN` for private GitHub repositories. It runs independently of the desktop workspace and writes a JSON report to stdout.
 
@@ -278,6 +306,8 @@ For terminal or CI use, build the standalone CLI with `make build-scan`. The com
 ./dist/vulman-scan --scanners npm --repo https://github.com/your-org/project.git
 ./dist/vulman-scan --scanners pip-audit --dir /path/to/python-project
 ```
+
+`--scanners` is an explicit tool selection for the CLI target. Manifest-based tools run in detected project folders and report missing inputs. Each scanner job includes its relative `path` and any skip/block `reason` in JSON; the desktop uses the saved per-repository profiles instead.
 
 Use `--dir` for a local folder or `--repo` for an HTTPS GitHub.com repository URL. With neither option, Vulman scans the current directory. The exit code is **0** for a completed scan with zero findings, **1** for a completed scan with findings, or **2** for invalid arguments or an incomplete scan. The report includes per-tool outcomes, finding counts, findings, and warnings.
 
