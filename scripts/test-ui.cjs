@@ -11,6 +11,23 @@ const bundledLocalizations = Object.fromEntries(
   ]),
 );
 
+// Check rendered test output; this is not an HTML sanitizer.
+const unexpectedHTMLTag = /<\/?(?:script|img)\b/i;
+const htmlEscapingCases = [
+  {
+    script:'<script>unsafe</script>', escapedScript:'&lt;script&gt;unsafe&lt;/script&gt;',
+    image:'"<img>', escapedImage:'&quot;&lt;img&gt;',
+  },
+  {
+    script:'<SCRIPT SRC="data:,test">unsafe</SCRIPT>', escapedScript:'&lt;SCRIPT SRC=&quot;data:,test&quot;&gt;unsafe&lt;/SCRIPT&gt;',
+    image:'"<IMG SRC="data:,test">', escapedImage:'&quot;&lt;IMG SRC=&quot;data:,test&quot;&gt;',
+  },
+  {
+    script:'<ScRiPt data-test="mixed">unsafe</ScRiPt>', escapedScript:'&lt;ScRiPt data-test=&quot;mixed&quot;&gt;unsafe&lt;/ScRiPt&gt;',
+    image:'"<ImG data-test="mixed">', escapedImage:'&quot;&lt;ImG data-test=&quot;mixed&quot;&gt;',
+  },
+];
+
 function app(byName) {
   const elements = new Map();
   const document = {
@@ -648,11 +665,13 @@ test('assessment action wording follows component and local-data selections with
 
 test('sync selection is localized and component names are escaped', () => {
   const run=app();
-  const html=run(`lang='ja';syncControls({id:'p',assets:[{id:'a',kind:'library',name:'<script>',version:'1'}]})`);
-  assert.match(html,/照合する技術スタック/);
-  assert.match(html,/すべて/);
-  assert.match(html,/&lt;script&gt;/);
-  assert.doesNotMatch(html,/<script>/);
+  for (const {script, escapedScript} of htmlEscapingCases) {
+    const html=run(`lang='ja';syncControls({id:'p',assets:[{id:'a',kind:'library',name:${JSON.stringify(script)},version:'1'}]})`);
+    assert.match(html,/照合する技術スタック/);
+    assert.match(html,/すべて/);
+    assert.ok(html.includes(escapedScript));
+    assert.doesNotMatch(html,unexpectedHTMLTag);
+  }
 });
 
 test('sync requests distinguish everything from one component',async()=>{
@@ -1346,13 +1365,15 @@ test('multiple stack filters retain pagination and severity ordering for 30000 f
 
 test('stack filters localize labels and escape component and project names',()=>{
   const run=app();inventory(run);
-  run(`lang='ja';state.projects[0].name='<script>';state.projects[0].assets[0].name='"<img>'`);
-  const html=run('techStackFilterHTML()');
-  assert.match(html,/すべての技術スタック/);
-  assert.match(html,/aria-label="すべての技術スタック"/);
-  assert.match(html,/&lt;script&gt;/);
-  assert.match(html,/&quot;&lt;img&gt;/);
-  assert.doesNotMatch(html,/<script>|<img>/);
+  for (const {script, escapedScript, image, escapedImage} of htmlEscapingCases) {
+    run(`lang='ja';state.projects[0].name=${JSON.stringify(script)};state.projects[0].assets[0].name=${JSON.stringify(image)}`);
+    const html=run('techStackFilterHTML()');
+    assert.match(html,/すべての技術スタック/);
+    assert.match(html,/aria-label="すべての技術スタック"/);
+    assert.ok(html.includes(escapedScript));
+    assert.ok(html.includes(escapedImage));
+    assert.doesNotMatch(html,unexpectedHTMLTag);
+  }
 });
 
 test('result counts use project totals in its tab and all-project totals in the global view',()=>{
@@ -1685,13 +1706,15 @@ test('interrupted workflow summaries report the recorded step or explicitly say 
 
 test('workflow localizes interface and escapes external error details',()=>{
   const run=app();workflowFixture(run);
-  run(`lang='ja';expandedRuns.add('run-1');workflow.logs.push({at:new Date().toISOString(),event:'failed',detail:'<script>unsafe</script>'})`);
-  const html=run('workflowBody(project,workflow)');
-  assert.match(html,/評価ワークフロー/);
-  assert.match(html,/詳細を閉じる/);
-  assert.match(html,/実行ログ/);
-  assert.match(html,/&lt;script&gt;unsafe&lt;\/script&gt;/);
-  assert.doesNotMatch(html,/<script>/);
+  for (const {script, escapedScript} of htmlEscapingCases) {
+    run(`lang='ja';expandedRuns.add('run-1');workflow.logs.push({at:new Date().toISOString(),event:'failed',detail:${JSON.stringify(script)}})`);
+    const html=run('workflowBody(project,workflow)');
+    assert.match(html,/評価ワークフロー/);
+    assert.match(html,/詳細を閉じる/);
+    assert.match(html,/実行ログ/);
+    assert.ok(html.includes(escapedScript));
+    assert.doesNotMatch(html,unexpectedHTMLTag);
+  }
 });
 
 test('polling progress updates panels without resetting active filters or rebuilding the page',()=>{
@@ -2562,15 +2585,15 @@ test('queued workflows name required databases and expose recovery only after an
   assert.match(run('projectStatus(project)'), />Queued<\/span>/);
   assert.equal(run('canDismissWorkflow(workflow)'), false);
 
-  run(`
-    workflow.status = 'waiting_databases';
-    workflow.database_waits[0] = {source:'nvd',status:'failed',detail:'HTTP 403 <script>alert(1)</script>'};
-  `);
-  html = run('workflowBody(project, workflow)');
-  assert.match(html, /Retry database updates/);
-  assert.match(html, /data-control="use-available"/);
-  assert.match(html, /HTTP 403 &lt;script&gt;/);
-  assert.doesNotMatch(html, /<script>/);
+  run(`workflow.status = 'waiting_databases'`);
+  for (const {script, escapedScript} of htmlEscapingCases) {
+    run(`workflow.database_waits[0] = {source:'nvd',status:'failed',detail:${JSON.stringify('HTTP 403 ' + script)}}`);
+    html = run('workflowBody(project, workflow)');
+    assert.match(html, /Retry database updates/);
+    assert.match(html, /data-control="use-available"/);
+    assert.ok(html.includes('HTTP 403 ' + escapedScript));
+    assert.doesNotMatch(html, unexpectedHTMLTag);
+  }
   run(`lang = 'ja'`);
   html = run('workflowBody(project, workflow)');
   assert.match(html, /NVDデータベースとCPE辞書/);
@@ -2631,11 +2654,14 @@ test('queued database progress handles unknown totals, verification, completion,
   assert.match(html, /NVD update complete/);
   assert.doesNotMatch(html, /<progress/);
 
-  run(`state.nvd_database={running:true,phase:'downloading',feed:'<script>bad()</script>',downloaded:NaN,download_total:-1}`);
-  html = run(`databaseWaitProgress({source:'nvd',status:'updating'})`);
-  assert.match(html, /Downloaded 0\.0 MiB/);
-  assert.match(html, /&lt;script&gt;/);
-  assert.doesNotMatch(html, /<script>|NaN|value="-/);
+  for (const {script, escapedScript} of htmlEscapingCases) {
+    run(`state.nvd_database={running:true,phase:'downloading',feed:${JSON.stringify(script)},downloaded:NaN,download_total:-1}`);
+    html = run(`databaseWaitProgress({source:'nvd',status:'updating'})`);
+    assert.match(html, /Downloaded 0\.0 MiB/);
+    assert.ok(html.includes(escapedScript));
+    assert.doesNotMatch(html, unexpectedHTMLTag);
+    assert.doesNotMatch(html, /NaN|value="-/);
+  }
 });
 
 test('database-only polling refreshes queued panels without rendering the page or replacing the request', () => {
@@ -2953,6 +2979,37 @@ test('project scanner profiles map saved choices to each URL and local folder', 
   assert.doesNotMatch(fresh, /value="auto"|data-profile-auto|data-profile-extras/);
   assert.doesNotMatch(fresh, /type="checkbox"[^>]*checked/);
   assert.doesNotMatch(run("renderSettings.toString()"), /repositoryScannerSettingsHTML|initializeScannerProfiles/);
+});
+
+test('scanner profile drafts cannot reinterpret an unsupported mode as HTML', () => {
+  const run = app();
+  run(`
+    state = {settings:{scanners:{npm:true,trivy:true}},scan_repositories:{}};
+    const unsafeMode = '</p><img src="data:,invalid" onerror="globalThis.profileMarkupExecuted=true">';
+    const card = {
+      querySelector:() => ({value:unsafeMode}),
+      querySelectorAll:() => [],
+    };
+    const unsafeProfile = readProjectScannerProfile(card);
+    const draft = {repository_scanners:[{local:true,profile:unsafeProfile}]};
+  `);
+  for (const local of [true, false]) {
+    const html = run(`projectScannerProfileHTML(localRepositoryProfileFor(draft), ${local})`);
+    assert.match(html, /<option value="disabled" selected>/);
+    assert.doesNotMatch(html, unexpectedHTMLTag);
+    assert.doesNotMatch(html, /onerror=|scannerModeHint_/i);
+  }
+});
+
+test('scanner profile hints encode text before it is inserted into markup', () => {
+  const run = app();
+  run(`
+    localizations = {en:{...bundledLocalizations.en,messages:{...bundledLocalizations.en.messages,scannerModeHint_custom:'Literal <profile> & "text"'}}};
+    state = {settings:{scanners:{}}};
+  `);
+  const html = run("projectScannerProfileHTML({mode:'custom',tools:[]},true)");
+  assert.match(html, /Literal &lt;profile&gt; &amp; &quot;text&quot;/);
+  assert.doesNotMatch(html, /Literal <profile>/);
 });
 
 test('project scanner modes toggle in place without replacing form contents', () => {

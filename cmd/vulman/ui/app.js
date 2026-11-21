@@ -1278,7 +1278,11 @@ function scannerModeHint(mode, local) {
 }
 function projectScannerProfileHTML(profile, local = false) {
   if (!local) profile = githubScannerProfile(profile);
-  const mode = profile.mode || 'auto';
+  const modes = local ? ['auto','custom','disabled'] : ['custom','disabled'];
+  // Draft modes can come from DOM values, so only known modes may select hint keys.
+  const requestedMode = profile.mode ?? 'auto';
+  const mode = modes.includes(requestedMode) ? requestedMode : 'disabled';
+
   const definitions = scannerDefinitions();
   const enabledTools = definitions.filter(tool => globalScannerEnabled(tool.id));
   const languageTools = enabledTools.filter(tool => tool.scope !== 'repository');
@@ -1291,10 +1295,9 @@ function projectScannerProfileHTML(profile, local = false) {
     const hint = !enabled ? t('scannerGloballyDisabled') : tool.detect?.join(', ') || t(tool.scope === 'repository' ? 'scannerRepositoryWide' : 'scannerAutomaticDetection');
     return `<label class="check-row scanner-profile-tool ${enabled?'':'scanner-tool-disabled'}" title="${esc(hint)}"><input type="checkbox" data-project-scanner-tool="${esc(tool.id)}" data-profile-additional="${additional}" ${checked?'checked':''} ${enabled?'':'disabled'}><span>${esc(tool.label)}</span></label>`;
   };
-  const modes = local ? ['auto','custom','disabled'] : ['custom','disabled'];
   return `<div class="repository-scanner-profile" data-repository-profile data-scanner-location="${local?'local':'github'}">
     <div class="scanner-profile-header"><strong>${t('repositoryScannerProfile')}</strong><label class="scanner-profile-mode"><span>${t('scannerMode')}</span><select data-project-scanner-mode>${modes.map(value => `<option value="${value}" ${mode === value?'selected':''}>${t('scannerMode_' + value)}</option>`).join('')}</select></label></div>
-    <p class="scanner-profile-hint" data-profile-mode-hint>${scannerModeHint(mode, local)}</p>
+    <p class="scanner-profile-hint" data-profile-mode-hint>${esc(scannerModeHint(mode, local))}</p>
     <div class="scanner-profile-tools" data-profile-custom ${mode === 'custom'?'':'hidden'}>${enabledTools.length ? enabledTools.map(tool => choice(tool, false)).join('') : `<p class="form-note">${t('scannerCustomNoTools')}</p>`}</div>
     ${preservedTools.map(id => `<input type="hidden" data-profile-preserved-tool="${esc(id)}" data-profile-additional="false">`).join('')}
     ${preservedAdditionalTools.map(id => `<input type="hidden" data-profile-preserved-tool="${esc(id)}" data-profile-additional="true">`).join('')}
