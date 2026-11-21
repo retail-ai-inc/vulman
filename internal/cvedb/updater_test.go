@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"vulman/internal/apperror"
 )
 
 type transportFunc func(*http.Request) (*http.Response, error)
@@ -114,6 +116,122 @@ func TestVerifiedImportResumesSavedCursorAndSupportsNestedZIP(t *testing.T) {
 			stats, err = s.Stats()
 			if err != nil || stats.Records != 600 {
 				t.Fatalf("delta duplicated records: %+v %v", stats, err)
+			}
+		})
+	}
+}
+
+func TestEmptyDeltaResumesCheckpointAndContinuesUpdates(t *testing.T) {
+	s := testCatalogue(t)
+	u := NewUpdater(s)
+	u.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("verified archive was downloaded again")
+	})
+	ctx := context.Background()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	baseline := testZIP(t, 2, false)
+	if err := s.root.WriteFile(downloadFile, baseline, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.importArchive(ctx, testArchive(baseline, true, start)); err != nil {
+		t.Fatal(err)
+	}
+	active := s.snapshot().Active
+
+	empty := testZIP(t, 0, false)
+	if len(empty) != 22 {
+		t.Fatal("expected a valid empty ZIP, matching an official no-change delta")
+	}
+	if err := s.root.WriteFile(downloadFile, empty, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.begin(ctx, testArchive(empty, false, start.Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resume the saved empty delta before planning the next nonempty release.
+	data := testZIP(t, 3, false)
+	next := testArchive(data, false, start.Add(2*time.Hour))
+	next.Name = "2026-01-01_delta_CVEs_at_0200Z.zip"
+	next.URL = "https://github.com/CVEProject/cvelistV5/releases/download/test/" + next.Name
+	latest := releaseFor(t, next.At)
+	for i := range latest.Assets {
+		if strings.Contains(latest.Assets[i].Name, "_delta_") {
+			latest.Assets[i].Name, latest.Assets[i].URL = next.Name, next.URL
+			latest.Assets[i].Size, latest.Assets[i].Digest = next.Size, next.Digest
+		}
+	}
+	latestJSON, err := json.Marshal(latest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyJSON, err := json.Marshal([]release{latest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloads := 0
+	u.HTTP.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		var body []byte
+		switch {
+		case r.URL.String() == u.apiURL+"/latest":
+			body = latestJSON
+		case strings.HasPrefix(r.URL.String(), u.apiURL+"?"):
+			body = historyJSON
+		case r.URL.String() == next.URL:
+			downloads++
+			body = data
+		default:
+			return nil, fmt.Errorf("unexpected request: %s", r.URL)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body))}, nil
+	})
+	if err := u.sync(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.Stats()
+	if err != nil || stats.Records != 3 || !stats.Initialized || stats.Resumable || !stats.SourceAt.Equal(next.At) || stats.CheckedAt.IsZero() || downloads != 1 || s.snapshot().Active != active {
+		t.Fatalf("empty delta blocked updates or changed the active catalogue: %+v, downloads %d, error %v", stats, downloads, err)
+	}
+	for _, id := range []string{"CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0003"} {
+		if _, found, err := s.Lookup(id); err != nil || !found {
+			t.Fatalf("missing record after no-change update: %s, %v", id, err)
+		}
+	}
+}
+
+func TestEmptyBaselineCannotReplaceActiveCatalogue(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		t.Run(fmt.Sprint(nested), func(t *testing.T) {
+			s := testCatalogue(t)
+			u := NewUpdater(s)
+			u.HTTP.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("verified archive was downloaded again")
+			})
+			ctx := context.Background()
+			at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			baseline := testZIP(t, 2, false)
+			if err := s.root.WriteFile(downloadFile, baseline, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := u.importArchive(ctx, testArchive(baseline, true, at)); err != nil {
+				t.Fatal(err)
+			}
+			active := s.snapshot().Active
+
+			empty := testZIP(t, 0, nested)
+			if err := s.root.WriteFile(downloadFile, empty, 0600); err != nil {
+				t.Fatal(err)
+			}
+			err := u.importArchive(ctx, testArchive(empty, true, at.Add(time.Hour)))
+			if err == nil || apperror.Public(err).Code != "empty_cve_baseline" {
+				t.Fatalf("empty baseline was not rejected by the publication guard: %v", err)
+			}
+			stats, err := s.Stats()
+			if err != nil || !stats.Initialized || stats.Records != 2 || !stats.SourceAt.Equal(at) || !stats.Resumable || s.snapshot().Active != active {
+				t.Fatalf("empty baseline replaced the active catalogue: %+v, %v", stats, err)
+			}
+			if _, found, err := s.Lookup("CVE-2026-0001"); err != nil || !found {
+				t.Fatalf("empty baseline lost an existing record: %v", err)
 			}
 		})
 	}

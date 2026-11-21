@@ -186,6 +186,16 @@ select,.topbar-right .language-select{-webkit-appearance:none;appearance:none;ba
 .storage-directory-controls { margin: 7px 0 8px; }
 .storage-directory .notice { margin: 12px 0 0; }
 
+.database-freshness-warning { display: flex; align-items: flex-start; gap: 12px; }
+.database-freshness-warning > svg { flex: 0 0 20px; width: 20px; height: 20px; margin-top: 2px; }
+.database-freshness-content { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.database-freshness-content h2 { color: #785a20; font-size: 14px; margin: 0 0 4px; }
+.database-freshness-content p { margin: 0; }
+.database-freshness-content ul { margin: 8px 0; padding-inline-start: 18px; }
+.database-freshness-content .text-link { font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+.database-freshness-warning .icon-button { color: #785a20; min-width: 30px; min-height: 30px; }
+.database-freshness-warning .icon-button:hover { background: #f1e8ca; }
+
 .storage-paths.database-paths { gap: 0; border: 1px solid var(--line); border-radius: 8px; background: #fbfcf9; overflow: hidden; }
 .database-paths > div { display: grid; grid-template-columns: 190px minmax(0, 1fr); align-items: center; gap: 8px 16px; padding: 11px 14px; }
 .database-paths > div + div { border-top: 1px solid var(--line); }

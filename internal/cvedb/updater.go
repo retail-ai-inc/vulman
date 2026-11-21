@@ -452,6 +452,12 @@ func (u *Updater) openZIP(ctx context.Context) (*zip.Reader, func(), error) {
 		closeOuter()
 		return nil, nil, err
 	}
+	// Official hourly deltas can be valid empty ZIPs when no CVEs changed.
+	// Store.finish still rejects an empty baseline before publishing it.
+	if len(z.File) == 0 {
+		return z, closeOuter, nil
+	}
+
 	for _, member := range z.File {
 		if strings.HasSuffix(member.Name, ".json") {
 			return z, closeOuter, nil

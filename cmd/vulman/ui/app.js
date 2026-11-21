@@ -109,6 +109,8 @@ function heading(title,sub='',actions='',eyebrow=''){return `<div class="page-he
 function empty(title,sub,art='projects',actions=''){return `<div class="empty-state"><div class="empty-art">${icon(art)}</div><h3>${t(title)}</h3><p>${t(sub)}</p>${actions}</div>`;}
 const expandedRuns=new Set();
 const dismissedRuns=new Set();
+const dismissedDatabaseWarnings = new Set();
+const databaseWarningAgeDays = 7;
 function canDismissWorkflow(run){return !!run&&['complete','partial','failed','interrupted','stopped'].includes(run.status);}
 function stepLabel(step){return ({nvd:'NIST NVD',osv:'OSV.dev',cve:'CVE Program',scanner:t('codeScanners'),save:t('saveResults')}[step.kind]||step.kind)+(step.component?' · '+step.component:'');}
 function interruptionMessage(run, fullProject = false) {
@@ -425,6 +427,7 @@ function applyPollingState(next) {
     state.cache_stats = next.cache_stats;
     if (page === 'settings') updateCacheMetrics(next.cache_stats);
     else updateSyncPanels();
+    updateDatabaseFreshnessWarning();
     return;
   }
   if (page === 'settings') {
@@ -444,7 +447,10 @@ function applyPollingState(next) {
   const progressOnly = progressSnapshot(next) === progressSnapshot(state);
   state = next;
   lang = supportedLanguage(state.settings.language);
-  if (progressOnly) updateSyncPanels();
+  if (progressOnly) {
+    updateSyncPanels();
+    updateDatabaseFreshnessWarning();
+  }
   else {
     localize();
     render();
@@ -593,6 +599,72 @@ function breakdown(counts) {
 function canDeleteActivity(run){return !!run&&['interrupted','partial','failed','stopped'].includes(run.status);}
 async function deleteActivity(projectID,runID){const p=state.projects.find(p=>p.id===projectID),run=p?.runs?.find(r=>r.id===runID);if(!canDeleteActivity(run))return false;if(!(await confirmAction(t('confirmDeleteActivity')+'\n\n'+p.name+' · '+fmtDate(run.started_at))))return false;await invoke('DeleteRun',projectID,runID);expandedRuns.delete(runID);dismissedRuns.delete(runID);await refresh();toast(t('activityDeleted'));return true;}
 function activityList(runs=allRuns(),compact=false){if(!runs.length)return empty('noActivity','noActivitySub','activity');return runs.map(r=>`<div class="activity-item"><span class="activity-symbol">${r.status==='complete'?'✓':r.status==='running'?'↻':['pausing','paused'].includes(r.status)?'Ⅱ':['stopping','stopped'].includes(r.status)?'■':'!'}</span><div class="activity-content"><strong><a href="#project/${r.project_id}">${esc(r.project_name)}</a> · ${t(r.mode==='code'?'codeScan':'assessment')}</strong><p>${t(r.trigger==='schedule'?'scheduled':'manual')} · ${runSelectionLabel(r)?esc(runSelectionLabel(r))+' · ':''} ${syncSeverityLabel(r.severity)} · ${t(r.status)} · ${r.count} ${t('findings')}</p>${workflowRun({id:r.project_id,name:r.project_name},r)}${r.warnings?.length?`<details><summary>${t('warnings')} (${r.warnings.length})</summary><ul>${runWarnings(r).map(w=>`<li>${esc(w)}</li>`).join('')}</ul></details>`:''}</div><div class="activity-actions"><span class="activity-time">${fmtDate(r.started_at)}</span>${canDeleteActivity(r)?`<button type="button" class="button danger small" data-action="delete-activity" data-id="${esc(r.project_id)}" data-run="${esc(r.id)}">${t('deleteActivity')}</button>`:''}</div></div>`).join('');}
+function staleLocalDatabases(now = Date.now()) {
+  const cutoff = now - databaseWarningAgeDays * 24 * 60 * 60 * 1000;
+  const timestamp = value => typeof value === 'string' && !value.startsWith('0001') ? Date.parse(value) : NaN;
+  const stale = [];
+  const add = (id, label, values) => {
+    const dates = values.map(timestamp).filter(Number.isFinite);
+    if (!dates.length) return;
+
+    const at = Math.min(...dates);
+    if (at < cutoff) stale.push({id, label, at});
+  };
+
+  const cve = state.cve_database;
+  if (cve?.initialized && state.settings.sources?.cve !== false) {
+    add('cve', t('cveDBTitle'), [cve.source_at]);
+  }
+
+  const nvd = state.nvd_database;
+  if (nvd?.initialized && state.settings.sources?.nvd !== false) {
+    add('nvd', t('nvdDBTitle'), [nvd.source_at, nvd.cpe_at]);
+  }
+
+  if (state.settings.sources?.osv !== false) {
+    const selected = new Set(state.settings.osv_ecosystems ?? suggestedOSVEcosystems());
+    for (const ecosystem of state.osv_database?.ecosystems || []) {
+      if (!ecosystem.initialized || !selected.has(ecosystem.ecosystem)) continue;
+
+      // OSV's successful check advances even when its change index is unchanged.
+      const checked = Number.isFinite(timestamp(ecosystem.checked_at)) ? ecosystem.checked_at : ecosystem.source_at;
+      add('osv:' + ecosystem.ecosystem, t('osvDBTitle') + ' · ' + ecosystem.ecosystem, [checked]);
+    }
+  }
+
+  return stale.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function databaseWarningKey(databases) {
+  return JSON.stringify([state.data_directory || state.storage_paths?.database || '', databases.map(({id, at}) => [id, at])]);
+}
+
+function databaseFreshnessWarningHTML(now = Date.now()) {
+  const databases = staleLocalDatabases(now);
+  if (!databases.length || dismissedDatabaseWarnings.has(databaseWarningKey(databases))) return '';
+
+  const details = databases.map(({label, at}) => `<li><strong>${esc(label)}</strong> · ${esc(t('databaseWarningLastUpdated'))} <time datetime="${new Date(at).toISOString()}">${esc(fmtDate(new Date(at).toISOString()))}</time></li>`).join('');
+  return `<section class="notice database-freshness-warning" aria-labelledby="database-freshness-title">${icon('info')}<div class="database-freshness-content"><h2 id="database-freshness-title">${esc(t('databaseWarningTitle'))}</h2><p>${esc(t('databaseWarningHint').replace('{days}', cacheNumber(databaseWarningAgeDays)))}</p><ul>${details}</ul><a class="text-link" href="#settings">${esc(t('databaseWarningConfigure'))} →</a></div><button type="button" class="icon-button" data-action="dismiss-database-warning" aria-label="${esc(t('databaseWarningDismiss'))}" title="${esc(t('databaseWarningDismiss'))}">×</button></section>`;
+}
+
+function updateDatabaseFreshnessWarning() {
+  const [page] = route();
+  if (page && page !== 'overview') return;
+
+  const notice = $('#database-freshness-notice');
+  if (!notice) return;
+
+  const html = databaseFreshnessWarningHTML();
+  if (notice.innerHTML !== html) notice.innerHTML = html;
+}
+
+function dismissDatabaseFreshnessWarning() {
+  const databases = staleLocalDatabases();
+  if (databases.length) dismissedDatabaseWarnings.add(databaseWarningKey(databases));
+
+  updateDatabaseFreshnessWarning();
+}
+
 function renderOverview(){
   const counts = Object.create(null);
   let total = 0, assets = 0;
@@ -603,7 +675,7 @@ function renderOverview(){
       counts[severity] = (counts[severity] || 0) + 1;
     }
   }
-  $('#main').innerHTML=heading(t('securityOverview'),t('overviewSub'),(state.projects.length?syncAllControls(false):'')+button('addProject','new-project',true,'plus'),'VULNERABILITY MANAGEMENT')+`<div class="metrics">${[['totalFindings',total,'allSeverities','vulnerabilities',''],['critical',counts.CRITICAL||0,'criticalNote','vulnerabilities','critical-text'],['high',counts.HIGH||0,'highNote','activity','high-text'],['projectCount',state.projects.length,'components','projects','']].map(([key,value,note,ico,cls])=>`<div class="metric"><div class="metric-top"><span>${t(key)}</span>${icon(ico)}</div><div class="metric-value ${cls}">${value}</div><div class="metric-note ${cls}">${cls?'<span class="dot"></span>':''}${key==='projectCount'?assets+' ':''}${t(note)}</div></div>`).join('')}</div><div class="dashboard-grid"><div><div class="panel"><div class="panel-head"><div><h2>${t('yourProjects')}</h2><p>${t('projectPanelSub')}</p></div><a class="text-link" href="#projects">${t('viewAll')} ↗</a></div>${projectList(state.projects.slice(0,5))}<div class="panel-bottom">${icon('check')}${t('localInventory')}</div></div><div class="section-caption"><h2>${t('recentActivity')}</h2><a class="text-link" href="#activity">${t('viewAll')} ↗</a></div><div class="panel">${activityList(allRuns().slice(0,3),true)}</div></div><aside class="dashboard-aside">${sourcesPanel()}${total?breakdown(counts):`<div class="insight">${icon('leaf')}<div class="eyebrow">${t('schedule').toUpperCase()}</div><h3>${t('quietTitle')}</h3><p>${t('quietText')}</p></div>`}</aside></div>`;}
+  $('#main').innerHTML=`<div id="database-freshness-notice" role="status" aria-live="polite">${databaseFreshnessWarningHTML()}</div>`+heading(t('securityOverview'),t('overviewSub'),(state.projects.length?syncAllControls(false):'')+button('addProject','new-project',true,'plus'),'VULNERABILITY MANAGEMENT')+`<div class="metrics">${[['totalFindings',total,'allSeverities','vulnerabilities',''],['critical',counts.CRITICAL||0,'criticalNote','vulnerabilities','critical-text'],['high',counts.HIGH||0,'highNote','activity','high-text'],['projectCount',state.projects.length,'components','projects','']].map(([key,value,note,ico,cls])=>`<div class="metric"><div class="metric-top"><span>${t(key)}</span>${icon(ico)}</div><div class="metric-value ${cls}">${value}</div><div class="metric-note ${cls}">${cls?'<span class="dot"></span>':''}${key==='projectCount'?assets+' ':''}${t(note)}</div></div>`).join('')}</div><div class="dashboard-grid"><div><div class="panel"><div class="panel-head"><div><h2>${t('yourProjects')}</h2><p>${t('projectPanelSub')}</p></div><a class="text-link" href="#projects">${t('viewAll')} ↗</a></div>${projectList(state.projects.slice(0,5))}<div class="panel-bottom">${icon('check')}${t('localInventory')}</div></div><div class="section-caption"><h2>${t('recentActivity')}</h2><a class="text-link" href="#activity">${t('viewAll')} ↗</a></div><div class="panel">${activityList(allRuns().slice(0,3),true)}</div></div><aside class="dashboard-aside">${sourcesPanel()}${total?breakdown(counts):`<div class="insight">${icon('leaf')}<div class="eyebrow">${t('schedule').toUpperCase()}</div><h3>${t('quietTitle')}</h3><p>${t('quietText')}</p></div>`}</aside></div>`;}
 function stackKey(projectID,assetID){return JSON.stringify([projectID,assetID]);}
 function scanLocationKey(projectID, target) {
   return JSON.stringify([projectID, 'scanner', target]);
@@ -1877,7 +1949,7 @@ function showFinding(id,asset,project){
   const f = {...finding, project_id:p.id, project_name:p.name};
   currentFinding=f;$('#detail-body').innerHTML=`<div class="detail-tags">${pill(t(severityKey(f.severity)),severityKey(f.severity))}${pill(f.id)}${pill(t(f.match),f.match==='review'?'review':'')}${f.score?pill(t('score')+' '+f.score):''}</div><h2 class="detail-title">${esc(f.title||f.id)}</h2><p class="subtitle">${esc(f.component)} ${esc(findingVersionLabel(f))} · ${esc(f.project_name)} · ${esc(f.sources.join(' + '))}</p>${f.match==='review'?`<div class="notice">${t('reviewWarning')}</div>`:f.match==='cpe'?`<div class="notice info">${t('cpeWarning')}</div>`:''}<p class="detail-description">${esc(f.description)}</p><div class="detail-section"><h3>${t('remediation')}</h3><div id="advice-result"></div><div class="advice-actions"><select id="advice-provider" aria-label="${t('defaultProvider')}">${providerOptions(state.settings.ai_provider)}</select><button class="button primary small" data-action="advice">${t('getAdvice')}</button></div><p class="form-note">${t('aiDisclosure')}</p></div><div class="detail-section"><h3>${t('references')}</h3><ul class="reference-list">${f.references?.length?f.references.map(u=>safeURL(u)?`<li><a href="${safeURL(u)}" target="_blank" rel="noreferrer">${esc(u)} ↗</a></li>`:'').join(''):`<li class="muted">${t('noReferences')}</li>`}</ul></div>`;$('#detail-dialog').showModal();getAdvice('public');}
 async function getAdvice(provider){const f=currentFinding,container=$('#advice-result');container.innerHTML=`<div class="advice-box"><p>${t('generating')}</p></div>`;const btn=$('[data-action="advice"]');if(btn)btn.disabled=true;try{const a=await invoke('Advice',f.project_id,{finding_id:f.id,asset_id:f.asset_id,provider});if(currentFinding!==f)return;container.innerHTML=`<div class="advice-box"><h3>${t(a.provider)}</h3><p>${esc(a.text)}</p>${a.warning_message || a.warning?`<p class="form-error">${esc(messageText(a.warning_message || a.warning))}</p>`:''}${a.provider!=='public'?`<p class="form-note">${t('aiReview')}</p>`:''}</div>`;}catch(err){container.innerHTML=`<p class="form-error">${esc(formatError(err))}</p>`;}finally{if(btn)btn.disabled=false;}}
-document.addEventListener('click',async e=>{if(changingDataDirectory)return;const pageButton=e.target.closest('[data-finding-page]');if(pageButton){if(!pageButton.disabled)turnFindingPage(pageButton.dataset.findingPage);return;}const close=e.target.closest('.close-dialog');if(close){close.closest('dialog').close();return;}if(e.target.closest('.asset-remove')){e.target.closest('.asset-field').remove();return;}const clear=e.target.closest('[data-clear-token]');if(clear){clearCredential(clear);return;}const dismiss=e.target.closest('[data-dismiss-workflow]');if(dismiss){dismissWorkflow(dismiss.dataset.projectId,dismiss.dataset.dismissWorkflow);return;}const toggle=e.target.closest('[data-toggle-workflow]');if(toggle){toggleWorkflow(toggle.dataset.toggleWorkflow);return;}const tab=e.target.closest('[data-tab]');if(tab){if(projectTab!==tab.dataset.tab)expandedRuns.clear();projectTab=tab.dataset.tab;render();return;}const row=e.target.closest('[data-finding]');if(row){showFinding(row.dataset.finding,row.dataset.asset,row.dataset.project);return;}const target=e.target.closest('[data-action]');if(!target)return;try{switch(target.dataset.action){case'clear-scope-search':clearScopeSearch(target);break;case'new-project':openNewProject();break;case'edit-project':location.hash='project/'+target.dataset.id+'/edit';break;case'cancel-project':cancelProject(target.closest('form'));break;case'add-project-asset':{const asset=componentFields();$('[data-project-assets]',target.closest('form')).append(asset);$('[data-field="name"]',asset).focus();break;}case'add-component':openComponent(target.dataset.id);break;case'scan-code':target.disabled=true;await scanProjectCode(target.dataset.id);break;case'sync':target.disabled=true;await syncProject(target.dataset.id,syncSelection[target.dataset.id]||'', $('#sync-mode')?.value||'auto',$('#sync-severity')?.value||'');break;case'sync-asset':target.disabled=true;await syncProject(target.dataset.id,target.dataset.asset,'auto',componentSyncSeveritySelection.get(stackKey(target.dataset.id,target.dataset.asset))||'');break;case'sync-all':{const severity=syncAllSeverity;target.disabled=true;for(const p of state.projects)if(!p.syncing)await invoke('Sync',p.id,severity?{severity}:{});await refresh();toast(t(state.projects.some(p=>p.runs?.[0]&&queuedWorkflow(p.runs[0]))?'syncRequestsSubmitted':'syncStarted'));break;}case'sample':target.disabled=true;await sample();break;case'delete-project':openProjectDeletion(target.dataset.id);break;
+document.addEventListener('click',async e=>{if(changingDataDirectory)return;const pageButton=e.target.closest('[data-finding-page]');if(pageButton){if(!pageButton.disabled)turnFindingPage(pageButton.dataset.findingPage);return;}const close=e.target.closest('.close-dialog');if(close){close.closest('dialog').close();return;}if(e.target.closest('.asset-remove')){e.target.closest('.asset-field').remove();return;}const clear=e.target.closest('[data-clear-token]');if(clear){clearCredential(clear);return;}const dismiss=e.target.closest('[data-dismiss-workflow]');if(dismiss){dismissWorkflow(dismiss.dataset.projectId,dismiss.dataset.dismissWorkflow);return;}const toggle=e.target.closest('[data-toggle-workflow]');if(toggle){toggleWorkflow(toggle.dataset.toggleWorkflow);return;}const tab=e.target.closest('[data-tab]');if(tab){if(projectTab!==tab.dataset.tab)expandedRuns.clear();projectTab=tab.dataset.tab;render();return;}const row=e.target.closest('[data-finding]');if(row){showFinding(row.dataset.finding,row.dataset.asset,row.dataset.project);return;}const target=e.target.closest('[data-action]');if(!target)return;try{switch(target.dataset.action){case'dismiss-database-warning':dismissDatabaseFreshnessWarning();break;case'clear-scope-search':clearScopeSearch(target);break;case'new-project':openNewProject();break;case'edit-project':location.hash='project/'+target.dataset.id+'/edit';break;case'cancel-project':cancelProject(target.closest('form'));break;case'add-project-asset':{const asset=componentFields();$('[data-project-assets]',target.closest('form')).append(asset);$('[data-field="name"]',asset).focus();break;}case'add-component':openComponent(target.dataset.id);break;case'scan-code':target.disabled=true;await scanProjectCode(target.dataset.id);break;case'sync':target.disabled=true;await syncProject(target.dataset.id,syncSelection[target.dataset.id]||'', $('#sync-mode')?.value||'auto',$('#sync-severity')?.value||'');break;case'sync-asset':target.disabled=true;await syncProject(target.dataset.id,target.dataset.asset,'auto',componentSyncSeveritySelection.get(stackKey(target.dataset.id,target.dataset.asset))||'');break;case'sync-all':{const severity=syncAllSeverity;target.disabled=true;for(const p of state.projects)if(!p.syncing)await invoke('Sync',p.id,severity?{severity}:{});await refresh();toast(t(state.projects.some(p=>p.runs?.[0]&&queuedWorkflow(p.runs[0]))?'syncRequestsSubmitted':'syncStarted'));break;}case'sample':target.disabled=true;await sample();break;case'delete-project':openProjectDeletion(target.dataset.id);break;
 case'cancel-project-deletion':location.hash='project/'+target.closest('form').dataset.projectId+'/edit';break;
 case'control-sync':target.disabled=true;try{await controlWorkflow(target.dataset.id,target.dataset.run,target.dataset.control);}finally{target.disabled=false;}break;case'delete-activity':target.disabled=true;try{await deleteActivity(target.dataset.id,target.dataset.run);}finally{target.disabled=false;}break;case'browse-data-directory':await browseFolder($('#data-directory'),'chooseDataDirectory',state.data_directory);break;case'add-repository': {
   const row = repositoryField();

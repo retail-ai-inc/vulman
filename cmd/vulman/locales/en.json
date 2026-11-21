@@ -2,6 +2,11 @@
   "name": "English",
   "locale": "en-US",
   "messages": {
+    "databaseWarningTitle": "Local vulnerability databases need updating",
+    "databaseWarningHint": "The active data below is more than {days} days old. Results may miss recent vulnerabilities, even when automatic updates are enabled.",
+    "databaseWarningLastUpdated": "Last updated",
+    "databaseWarningConfigure": "Open Configuration to update databases",
+    "databaseWarningDismiss": "Dismiss database update warning",
     "osvDBTitle": "Local OSV database",
     "osvDBHint": "Select the ecosystems to download, enable OSV as a source, and save configuration before starting the first update. Updates use the change index and replace baselines older than one week. Unselected catalogues remain stored but stop updating.",
     "osvDBRecords": "Stored OSV records",
