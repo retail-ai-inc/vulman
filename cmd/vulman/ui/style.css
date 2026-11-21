@@ -186,6 +186,18 @@ select,.topbar-right .language-select{-webkit-appearance:none;appearance:none;ba
 .storage-directory-controls { margin: 7px 0 8px; }
 .storage-directory .notice { margin: 12px 0 0; }
 
+.storage-paths.database-paths { gap: 0; border: 1px solid var(--line); border-radius: 8px; background: #fbfcf9; overflow: hidden; }
+.database-paths > div { display: grid; grid-template-columns: 190px minmax(0, 1fr); align-items: center; gap: 8px 16px; padding: 11px 14px; }
+.database-paths > div + div { border-top: 1px solid var(--line); }
+.database-paths > div:first-child { background: #eef4e9; }
+.database-paths dt { margin: 0; }
+.database-paths > div:first-child dt { color: var(--green); font-weight: 600; }
+.database-paths dd { min-width: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: none; }
+.storage-key-path { margin-top: 16px; }
+@media (max-width: 700px) {
+  .database-paths > div { grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 10px 12px; }
+}
+
 .source-option { width: fit-content; max-width: 100%; }
 .source-option :is(input, span, strong, small) { cursor: pointer; }
 .source-settings-list { display: grid; gap: 16px; }

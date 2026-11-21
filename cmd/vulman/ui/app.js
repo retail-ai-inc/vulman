@@ -1079,13 +1079,13 @@ function revealInvalidAdvancedSetting(event) {
 
 function storagePathsHTML() {
   const paths = state.storage_paths || {};
-  const files = [
+  const databases = [
     ['databaseFile', paths.database],
     ...Object.entries(localDatabaseSettings).map(([source, settings]) => [settings.file, state[source + '_database']?.path, source]),
-    ['keyFile', paths.key],
   ];
+  const row = ([label, path, source]) => `<div><dt>${esc(t(label))}</dt><dd><code${source ? ` data-catalog-path="${source}"` : ''}>${esc(path || '—')}</code></dd></div>`;
 
-  return `<dl class="storage-paths">${files.map(([label, path, source]) => `<div><dt>${esc(t(label))}</dt><dd><code${source ? ` data-catalog-path="${source}"` : ''}>${esc(path || '—')}</code></dd></div>`).join('')}</dl>`;
+  return `<dl class="storage-paths database-paths">${databases.map(row).join('')}</dl><dl class="storage-paths storage-key-path">${row(['keyFile', paths.key])}</dl>`;
 }
 async function browseFolder(input, title, directory = input.value) {
   const chosen = await invoke('ChooseFolder', t(title), directory);

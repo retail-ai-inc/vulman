@@ -1789,7 +1789,7 @@ test('Configuration groups workspace, key and catalog database paths under File 
   assert.match(html, /<input[^>]+name="token_github"[^>]*placeholder="••••••"/);
   assert.match(html, /<input[^>]+name="token_snyk"[^>]*placeholder=""/);
   assert.equal([...html.matchAll(/data-credential-toggle=/g)].length, 5);
-  assert.ok(html.indexOf('Local storage uses AES-GCM')<html.indexOf('class="storage-paths"'));
+  assert.ok(html.indexOf('Local storage uses AES-GCM')<html.indexOf('class="storage-paths database-paths"'));
   run(`lang='ja'`);
   assert.match(run('storagePathsHTML()'),/暗号化キーファイル/);
   assert.match(run('storagePathsHTML()'),/CVE カタログデータベース/);
