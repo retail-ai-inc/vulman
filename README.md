@@ -40,63 +40,29 @@ To extend an existing project's inventory, open its **Tech stack** tab and choos
 
 ### Match by tech stack
 
-The project's **Match by tech stack** selector defaults to **Everything**. **Match VDBs & Scan Code** matches the registered tech stack against vulnerability databases (VDBs) and runs the configured code scanners when code scanning is enabled for the project. Selecting one component, or choosing **Reassess from local data**, changes the action label to **Match VDBs** because those assessments skip repository scanners. Choose a registered component (shown by category, name, and version) to reassess just that component, or use **Match VDBs** on its card in the Tech stack tab.
+Choose **Everything** for a full-project assessment, or use the searchable dropdown to select multiple components, repositories, or both. The action changes to **Match VDBs**, **Scan code**, or **Match VDBs & Scan Code** to match your selection.
 
-The selector opens a checkbox dropdown. Choose multiple tech stack components, multiple repositories, or a mixture in one assessment. **Everything** remains the default and covers the whole project. Selecting a specific item switches from Everything to that selection; choosing Everything again restores the full-project scope. With no items selected, the assessment button is disabled. The dropdown shows the selected item or the total selected count, and keeps selections during navigation and background updates for the current app session. Use Tab and Space to operate the checkboxes, and Escape or a click outside to close the dropdown. Both multi-select dropdowns include a search box that stays visible while scrolling. Search matches component names, versions, categories, project names in global filters, and repository labels, ignoring case and supporting multiple search terms. Searching narrows only the choices; checked items remain selected even when hidden. Everything/All still covers the whole list. Use the clear button to restore all choices; closing the dropdown also clears its search. Both multi-select dropdowns have a visible scrollbar track, wrap long names, and fit within the window. Focus the scroll area to use arrow keys or Page Up/Page Down; menus open upward when space below is limited.
-
-When repositories are registered, the selector is labeled **Match by tech stack & repository** and includes each registered GitHub URL and the local repository folder, when set. Component-only selections use **Match VDBs**; repository-only selections use **Scan code**; mixed selections use **Match VDBs & Scan Code**. Selecting repositories requires code scanning to be enabled for the project and at least one scanner enabled in Configuration. The selected severity applies to all chosen items. The assessment mode selector is fixed to normal mode when repositories are selected; component-only selections also support local-data and forced-refresh modes. Only the selected components and repositories are processed. Other results are preserved, and failed or incomplete assessments retain prior results for the selected items. The workflow and Activity list the selected items. Selected-item runs leave full-project assessment freshness and scheduling unchanged; use Everything for a full-project assessment.
-
-The Vulnerabilities view and the project's Vulnerabilities tab display **All tech stacks & repositories** when repositories are registered in the current project scope; otherwise they display **All tech stacks**. Repository filters group their dependency findings and severity counts under the registered repository.
-
-A component assessment queries the enabled vulnerability databases for that component and updates only its findings. Other components and repository-scanner findings are preserved. If the component assessment fails or is incomplete, its previous findings are also retained. Activity records the selected component and the number of findings in that assessment.
-
-Changing a component's name, version, category, OSV ecosystem, or exact CPE and saving the project marks that component for reassessment. New components also need their first assessment. The Tech stack card shows **Reassessment needed** in place of its previous Critical count. A project warning and saved confirmation explain that retained findings and project totals can refer to previous versions. Previous results and run history remain available. Run an **All severities** assessment for the changed component or the full project to refresh its counts. Failed, interrupted, stopped, and severity-filtered runs leave the warning in place. If an exact CPE was registered, update its version too before reassessing.
-
-Repository scanners run with **Everything**, **Match & Scan All Projects**, scheduled assessments, and the project's **Scan code** button. Component-only assessments leave the full-project last-complete timestamp, assessed inventory revision, and next scheduled assessment unchanged. Scheduled assessments continue to cover everything.
+Selected-item assessments preserve results for other items. Use **Everything** to refresh the full project's assessment status and schedule. After changing a component version or CPE, reassess it with **All severities** to refresh its counts; previous findings remain until a successful assessment.
 
 ### Assess by severity
 
-The **Assess by severity** selector defaults to **All severities**. Choose **Critical**, **High**, **Medium**, **Low**, or **Unrated** for a project assessment or **Match & Scan All Projects** on the Overview and Vulnerabilities pages. Project assessments can combine severity with a selected tech stack and any assessment mode. Each component card in the Tech stack tab has its own **Assess by severity** selector, defaulting to **All severities**. Its **Match VDBs** button uses that card's selection with **Normal assessment** mode. Card selections are independent of the project-level selector and other cards, and are retained during navigation and background updates for the current app session. Display filters remain independent of assessment selections.
+Choose **All severities** for a complete assessment, or focus on Critical, High, Medium, Low, or Unrated. Component cards have their own severity selector.
 
-A severity-specific assessment updates matching findings and preserves findings at other levels. Previously selected advisories whose rating changes are reconciled, so a downgrade updates the advisory rather than hiding it. Failed or incomplete assessments retain previous findings. Workflow panels and Activity identify the selected severity and its result count.
-
-API response cache entries always retain all severities. NVD/OSV queries and repository scanners may retrieve broader results; the selection scopes the assessment and reduces CVE record enrichment to selected findings and previously selected advisories whose rating changed. It does not guarantee a smaller database download.
-
-Severity-specific assessments leave the full-project last-complete timestamp, assessed inventory revision, source-data timestamp, and next scheduled assessment unchanged. Scheduled assessments continue to cover all severities.
+Severity-specific assessments preserve other severity levels and do not refresh full-project assessment status. They may still download broader source data. Display filters are separate from assessment selections.
 
 ### Filter findings by tech stack
 
-Both a project's **Vulnerabilities** tab and the left-side **Vulnerabilities** view include a checkbox filter, defaulting to **All tech stacks & repositories** when repositories are registered, or **All tech stacks** otherwise. Select multiple components, repositories, or a mixture to show their combined findings. Search, severity, project, and match-type filters further narrow these results. The dropdown shows the selected item or selected count. Choosing All resets this filter; unchecking every item shows zero matches. Tab and Space operate the checkboxes, and Escape or clicking outside closes the dropdown.
+In **Vulnerabilities** or a project's Vulnerabilities tab, select components and repositories in the searchable filter. Combine it with search, severity, project, and match-type filters. Repository choices group dependency findings under their registered repository.
 
-The global view includes project names in the option labels. Its project filter narrows the options and retains compatible selections; if all previously selected items are outside the new project, the filter resets to All for that project. Code scanner options represent registered repository URLs and local folders. Selected items show aggregate counts for every severity across findings that match your search, project, and match-type filters. Each finding is counted once even when multiple selected options match it. The severity filter narrows the table rows. Use the **Code scanner** match filter to review older findings whose scan location was unavailable.
-
-Both views show a live result count above the list, such as **Showing 3 of 12 vulnerabilities**, including zero matches. The project's tab compares against all findings in that project; the global view compares against findings across all projects. The count updates for search, tech stack, severity, project, and match-type filters.
-
-Both views render up to **100 findings per page**. Filtering and severity ordering apply across the full result set. The count shows the current range, matching findings, and the total when filtered. Changing a filter returns to the first page.
+Counts reflect the full matching result set, with **100 findings per page**. Filtering changes the display, not saved results.
 
 ### Live assessment workflow
 
-While an assessment runs, a compact workflow panel shows the current database/component, elapsed time, and finished-step count. **Show more** expands a vertical stepper and timestamped workflow logs; **Show less** collapses it. Full-project and component-only assessments show only the work included in that run. “Match & Scan All Projects” shows a panel for each running project.
+The workflow panel shows progress, elapsed time, and results. **Show more** opens step details, scanner jobs, and logs. Use **Pause**, **Resume**, or **Stop** to control a run; finished runs remain in **Activity**. Progress counts finished steps, not time remaining.
 
-If a required local NVD/CPE, CVE, or OSV ecosystem update is already running, **Match VDBs & Scan Code**, component assessments, **Match & Scan All Projects**, and scheduled assessments enter a **Queued** workflow. The panel lists the required databases and their update status. The assessment starts once, automatically, after those updates finish successfully, keeping its selected tech stack, severity, and assessment mode. Waiting time is excluded from elapsed active time and the assessment timeout. Queued projects remain locked against overlapping assessments and inventory edits. Updates for disabled sources or custom endpoints do not delay an assessment, and standalone code scans do not wait for vulnerability catalogue downloads.
+If a required local database is updating, the assessment queues and starts automatically when the update succeeds. If it fails, retry the update, cancel the assessment, or choose **Use available data**. That option skips vulnerability API requests and code scanners and may produce incomplete results.
 
-The queued workflow shows live progress for each required database even while **Show more** is collapsed. Downloads show MiB and a percentage when their size is known. NVD/CPE updates also identify the current feed and completed feed count. Import bars compare committed progress with the source total when available. NVD/CPE counts are records, while CVE counts are ZIP archive entries processed, including any non-record members. Verification, cleanup, and imports with unknown totals use indeterminate bars. Progress comes from the existing status polls without persisting every byte change or rebuilding the page.
-
-The **Configuration** page uses the same live download, import, and NVD/CPE feed progress bars in its local database sections. Updates refresh those status areas while preserving unsaved configuration fields.
-
-**Cancel queued assessment** keeps previous findings and leaves database updates running. If a required update fails or is stopped, the workflow shows the affected database and any available error details. Choose **Retry database updates**, **Use available data**, or **Cancel queued assessment**. Using available data requires confirmation and explicitly switches that request to reassessment from available local data. It sends no vulnerability API requests and skips code scanners, so missing or stale data can produce an incomplete assessment. Queue controls address the exact run to prevent stale controls from affecting an assessment that has already started. Closing Vulman marks an unstarted queued assessment interrupted. Its request is not automatically replayed after restart, while database downloads retain their own resume checkpoints.
-
-Use **Pause** to wait at the next checkpoint between database requests (including paginated requests), CVE records, scanner commands, or final saving. A request or scanner already in progress is allowed to finish; **Pausing** changes to **Paused** when the checkpoint is reached. **Resume** continues the same run with the same scope and in-memory progress. Paused time is excluded from elapsed active time and the 20-minute assessment budget. Paused projects stay locked against overlapping assessments and inventory edits. Pause does not survive an application restart: an unfinished run is recovered as interrupted.
-
-Use **Stop** to cancel the current run, including a paused run. After confirmation, active database requests and scanner process trees are cancelled and the workflow finishes as **Stopped**. Unsaved assessment results are discarded; previously saved findings and full-project freshness stay unchanged. Complete responses already added to the shared cache remain reusable. Stop applies to this run only; future scheduled assessments remain enabled, and you can start a new manual assessment after stopping finishes. Controls address an exact run, so an outdated page cannot stop a newer assessment. Each project's workflow can be controlled separately, including runs started by **Match & Scan All Projects** or the scheduler.
-
-After a run finishes, use the **×** button to close its workflow panel on the project page. Finished, partially completed, failed, interrupted, and stopped runs can be dismissed. The run remains available in **Activity**, and the next assessment displays a new panel. Dismissal lasts for the current app session and survives navigation and background updates.
-
-To permanently remove an interrupted, partial, failed, or stopped entry, choose **Delete activity** beside it in Activity, the project's Activity tab, or the recent Activity list. Confirmation removes that entry and its workflow logs from the local database. Project inventory, vulnerability findings, cache data, freshness timestamps, and schedules remain unchanged. Active (including paused) and successfully completed assessments cannot be deleted. An older incomplete entry can be deleted while a new assessment runs.
-
-Steps cover NVD/OSV queries per component, CVE record enrichment, optional code scanning, and saving results. NVD rate-limit waits and database pagination are visible. The progress bar counts finished steps; it is not an estimated percentage of time remaining. Failed/interrupted steps keep their status even after the bar reaches the end.
-
-The interface polls every two seconds while visible. A version check skips decoding and sending unchanged workspace data while continuing to update cache metrics. Progress-only updates preserve active filters and expanded panels. Completed workflows remain in the project's latest-run panel and in **Activity**. The most recent 200 log events per run are retained in the encrypted database. Interrupted workflows are recovered on restart. English and Japanese UI labels and structured error messages are available. Older text-only history retains its original language.
+Stopping a run preserves saved findings. Unfinished runs are marked interrupted after restart. Use **×** to hide a finished panel, or **Delete activity** with confirmation to remove an incomplete run's history without deleting project findings.
 
 ## Sources and matching
 
@@ -123,95 +89,38 @@ If any source/scanner fails, the assessment is marked partial or failed and **pr
 
 ## API response cache and assessment modes
 
-Local vulnerability databases provide the primary data for matching. The **API response cache** stores successful API query results and on-demand CVE enrichment used for fallback, validation, and custom endpoints. These responses are shared across projects, encrypted in dedicated buckets inside `vulman.db`, and preserved across application restarts. Query identities include the source endpoint, component/package identity, exact version, ecosystem, CPE, and matching-schema version. Cache entries do not store project IDs, and results are attached to the requesting project's component when reused. Changing a version or source endpoint selects a different entry.
+Local vulnerability databases supply matching data. The encrypted **API response cache** shares successful fallback and validation responses across projects.
 
-The downloaded catalogues are stored separately in `vulman-cve.db`, `vulman-nvd.db`, and `vulman-osv.db`. API response cache capacity and freshness settings apply only to API responses. Each catalogue has its own storage and update schedule in Configuration.
-
-The **Assessment mode** selector on a project offers:
-
-| Mode | Behavior |
+| Assessment mode | Behavior |
 | --- | --- |
-| Normal assessment | Use available local catalogues first. For API fallback or validation, reuse fresh API responses and fetch missing or expired responses. Used by scheduled assessments, component-card assessment buttons, and Match & Scan All Projects. |
-| Reassess from local data | Use downloaded catalogues and previously cached API responses without vulnerability API requests or repository scans. Missing, stale, or uncertain data is reported explicitly and leaves the assessment incomplete. Skipping configured code scanners also makes the run incomplete. Background catalogue updates continue independently. |
-| Force refresh | Fetch current results from upstream APIs, bypassing local catalogue results and fresh API response entries, while still respecting rate limits, cooldowns, and concurrent lookup sharing. |
+| **Normal assessment** | Use local databases and fresh cached responses; query APIs when needed. |
+| **Reassess from local data** | Use saved data without vulnerability API requests or code scans. Missing, stale, or uncertain data leaves the assessment incomplete. |
+| **Force refresh** | Query upstream APIs instead of reusing local results, while respecting rate limits. |
 
-Open **Configuration → Advanced settings → API response cache** to adjust its controls. Advanced settings is collapsed by default. API response freshness can be set from 1–168 hours; the default is **6 hours**. Empty query results expire after at most **1 hour**, so a previous “no findings” response is periodically rechecked when the API path is used. API responses refresh on demand during assessments. The local CVE, NVD/CPE, and OSV catalogues update separately through their manual or scheduled updaters.
+Cache controls are under **Configuration → Advanced settings → API response cache**. Defaults are **6 hours**, **10,000 entries**, and **512 MiB**. **Clear API response cache** requires confirmation and keeps projects, findings, credentials, and downloaded databases.
 
-**Clear API response cache** opens a confirmation dialog and removes only cached API responses and their indexes in one atomic transaction. It keeps projects, inventory, findings, credentials, activity history, settings, cumulative cache statistics, and the downloaded CVE, NVD/CPE, and OSV databases. The cache usage display updates immediately without saving or replacing unsaved Configuration fields. Active scans and database updates continue; active or future API requests can refill the cache. Clearing frees pages for reuse inside `vulman.db` and does not necessarily shrink its physical file.
+Background database updates run independently of assessment mode. Failed or incomplete requests do not replace successful cached responses; stale fallbacks are labeled and leave the assessment incomplete.
 
-Only complete, successful queries are cached. Incomplete pagination, authentication errors, and failed requests never replace a successful entry or advance its source-check timestamp. When an upstream refresh fails, an existing entry can be used as a clearly marked fallback, with the assessment left incomplete and previous findings retained. Rejected CVE records invalidate their cached enrichment.
+## Local vulnerability databases
 
-Concurrent identical lookups share one upstream operation. A cancelled waiting project stops waiting without cancelling the active lookup. If the project performing that lookup is interrupted, waiting projects receive its error and can refresh on a later assessment.
+Manage downloads, update schedules, and progress in **Configuration**. Initial downloads can be large; **Daily** updates are the default and run while Vulman is open. Select **More info** in the UI for setup guidance and detailed status.
 
-The HTTP clients serialize requests per provider and attempt temporary failures at most **three times**. They use exponential backoff with jitter and honor `Retry-After` seconds or HTTP dates. A delay longer than 30 seconds defers the request rather than blocking a run for that wait; the provider-wide cooldown continues to apply to other requests. Permanent errors such as HTTP 401/403 are not retried. These protections apply to Vulman's database clients; external scanners manage their own networking.
-
-Workflow steps identify reused local data, shared API lookups, upstream refreshes, stale fallbacks, and retries. **Source data checked** shows the oldest upstream-check timestamp used by the assessment, separately from when the assessment ran. Reassessment from local data does not postpone the next scheduled assessment. Component-only assessments retain the project's last complete assessment metadata.
-
-The API response cache defaults to **10,000 entries** and **512 MiB** of encrypted entries, with an **8 MiB per-entry limit**. In **Configuration → Advanced settings → API response cache**, the entry limit can be set from **100–1,000,000**, and the size limit from **16–4,096 MiB**. The freshness setting remains separate. These capacities grow on demand and do not preallocate the configured disk size or change upstream query frequency.
-
-Oldest entries are evicted whenever either limit is reached. Saving a lower limit immediately removes entries as needed; raising it keeps existing entries. Oversized results can still be used by the current assessment but are not cached. These are logical cache limits, not a limit on the full bbolt database file, which also holds project history and can retain freed pages. Reclaiming physical disk space may require database compaction.
-
-Advanced settings shows API response cache usage, **fresh cache hits**, **cache misses**, **hit rate**, and **capacity evictions**, updated during normal polling without replacing unsaved form values or opening the collapsed section. Hits and misses count logical API cache lookups during normal assessment or reassessment from local data; local catalogue matches do not contribute to these counters. Expired or missing API responses count as a miss, including when a concurrent lookup is shared. Forced refreshes and internal diagnostic reads are excluded. Explicit invalidation of a rejected CVE is not counted as a capacity eviction.
-
-Metrics start at zero on upgrade and accumulate across clean restarts. Hit/miss counters are buffered in memory and checkpointed during writes and clean shutdown. Capacity evictions and usage counters are updated atomically with the affected cache entries. Routine statistics and cache writes use maintained metadata instead of scanning the cache; older databases with missing counters are repaired once on opening.
+- Downloads are verified, and atomic checkpoints let interrupted imports resume. A replacement catalogue activates only after validation, keeping the previous catalogue available during rebuilding.
+- **Stop** cancels update work and keeps committed progress; the database's **Update** button resumes it. **Rebuild catalogue** starts a replacement after confirmation.
+- Overview warns when active data is **more than 7 days old**, even with automatic updates enabled. The warning links to Configuration and can be dismissed.
+- Paths appear under **Configuration → File & Databases**. Back up the databases and `vulman.key` together while Vulman is stopped.
 
 ### Local CVE catalogue
 
-The local database sections in Configuration keep status, record counts, update schedules, update/rebuild/stop controls, and live progress or errors visible. Select **More info** for setup guidance, import safety notes, detailed timestamps, and OSV per-ecosystem results. Database file paths are grouped in **Configuration → File & Databases**. Expand **Downloaded ecosystems** to edit OSV selections, then select **Save configuration** to apply them.
-
-In **Configuration → Local CVE database**, select **Update CVE database** to initialize `vulman-cve.db` from the official [CVE List V5 release archives](https://github.com/CVEProject/cvelistV5#releases). The first full download can be several hundred MiB and needs additional temporary disk space. Vulman stores the titles, references, modification dates, and publication/rejection states used for enrichment. Project inventory, findings, and credentials remain in `vulman.db`.
-
-Choose **Manual only**, **Hourly**, or **Daily** automatic updates. The default is **Daily**. The initial bulk download starts when you explicitly select the update button. After initialization, updates run while Vulman is open and overdue updates run after restart. An interrupted initial import also resumes automatically when its update schedule is enabled. **Update CVE database** resumes it immediately. **Stop** cancels download/import work and leaves the last committed checkpoint available.
-
-Updates apply each missing hourly release in order, including across UTC day boundaries. If the release history has a gap or the catalogue is over seven days behind, Vulman imports a current baseline and the subsequent hourly releases. A remaining gap is reported as an error. Successful archive checkpoints and the final successful check are persisted separately, so a failed update cannot claim coverage of skipped releases. GitHub release downloads have their own availability and rate limits. Rate-limit errors are shown in Configuration and can be retried later.
-
-Project assessments use indexed CVE-ID lookups against the catalogue. Missing records are fetched individually through the existing paced CVE client and saved in an independent on-demand bucket. These records survive shared query-cache eviction. Record freshness follows the catalogue's hourly/daily interval with one hour of allowance for release publication. Manual-only mode uses a 24-hour interval. An overdue initialized catalogue supplies clearly labeled stale enrichment and leaves the assessment incomplete while its updater catches up. This avoids refreshing thousands of existing records individually. **Force refresh** still fetches individual CVE records directly. Custom CVE endpoints continue using the endpoint-specific shared query cache.
-
-The catalogue uses AES-GCM with the existing `vulman.key`. Its record payloads and import metadata are encrypted. Archive downloads contain public CVE data and are removed after a successful import. A verified download can be reused when resuming an interrupted import. SHA-256 digests and sizes from the official release metadata are checked before importing, and ZIP CRCs are checked while reading individual records. Archive members are read directly without extracting their paths.
-
-bbolt's synchronized transactions stay enabled. Imports commit at most 256 records together with the ZIP position in each transaction. A full baseline is built in an inactive bucket, then activated by one atomic metadata transaction after all records validate. An interrupted baseline leaves the previous catalogue available. Incremental updates can expose individually committed changes while their last fully imported release remains the freshness checkpoint. On reopening, bbolt recovers committed transactions and Vulman resumes from the saved ZIP position. A partially downloaded archive is downloaded again and verified before import resumes.
-
-Readers use short transactions and B+tree lookups. Maintained counters make status polling independent of catalogue size. Cleanup uses cursors in bounded transactions, and obsolete baseline pages become reusable after activation. **Rebuild catalogue** starts a new full import after confirmation and keeps the current catalogue available until replacement succeeds. bbolt can retain freed pages, so rebuilding can reuse disk space without shrinking the physical file.
-
-Configuration shows the catalogue path, record count, size, release timestamp, last update check, download/import progress, and errors. The catalogue has no independent encryption key. Include `vulman-cve.db` with `vulman.db` and `vulman.key` to back up the downloaded data while Vulman is stopped. You can rebuild the catalogue from the public source if it is omitted from a backup.
+Select **Update CVE database** to download the official [CVE release archives](https://github.com/CVEProject/cvelistV5#releases) into `vulman-cve.db`. Subsequent updates apply hourly changes. Choose **Manual only**, **Hourly**, or **Daily**. The catalogue enriches discovered CVE IDs with original records.
 
 ### Local NVD database and CPE dictionary
 
-In **Configuration → Local NVD database and CPE dictionary**, select **Update NVD database** for the initial import. Vulman downloads the official NVD JSON 2.0 yearly feeds and complete CPE dictionary into `vulman-nvd.db`, using the existing `vulman.key` for AES-GCM encryption. Record payloads and import metadata are encrypted, and index terms are hashed. The initial download, expanded source data, database, and indexes require additional disk space. The full dictionary ZIP contains multiple JSON chunks, all of which are imported.
-
-Choose **Manual only**, **Every two hours**, or **Daily** updates. **Daily** is the default. The first import starts explicitly. After initialization, automatic updates run while Vulman is open, with overdue updates and interrupted imports checked on restart. Update and Stop controls operate independently of project assessments. Rebuild requires confirmation and preserves the currently published catalogue until the replacement is complete.
-
-The updater checks official `.meta` files before downloading. Successful checks skip unchanged feeds. Normal updates apply the **Modified** vulnerability feed and download a replacement dictionary only when its metadata changes. The Modified feed covers eight days, so an NVD catalogue or interrupted import more than seven days behind starts a full baseline import to avoid a coverage gap. [NVD feed documentation](https://nvd.nist.gov/vuln/data-feeds)
-
-Compressed sizes, uncompressed sizes, and SHA-256 hashes are checked before import. For CPE ZIP files, verification covers the concatenated uncompressed JSON members in archive order. JSON record counts are validated against the envelope and dictionary totals. Archive paths are never extracted. Downloads and decoding are bounded. Import transactions hold at most 256 NVD records or 4,096 CPE entries, with an additional approximately 4 MiB source-payload cap. The CPE dictionary uses a direct name index to keep lookups fast and reduce database overhead.
-
-Each transaction saves records, their search-index changes, counters, and the resume offset together. bbolt's synchronized commits remain enabled. Full NVD baselines and dictionary replacements are staged in inactive buckets and activated through one atomic metadata transaction after all feeds complete. Incremental NVD changes become visible per committed batch, with freshness advancing after the complete update. Readers use inverted indexes, cursors, and short transactions, and status polling reads maintained counters.
-
-After interruption, Update resumes the saved feed and record position. Verified complete downloads can be reused. A partial download restarts. Because NVD feed URLs are mutable, a changed checksum restarts the affected feed and removes its incomplete staged data and indexes. Completed years are retained while the Modified feed can cover intervening changes. Cancellation takes effect between transactions. Closing Vulman joins the updater before closing its database. Forceful process termination leaves committed checkpoints for recovery on the next launch.
-
-Local assessments search an indexed product/CPE identity or component-name terms. Name-only findings remain **Needs review**. The dictionary identifies deprecated CPE names. Exact CPE matching supports escaped fields, wildcard criteria, and numeric dotted version ranges. Conditional or negated applicability, deprecated identities, and unsupported version schemes require NVD API validation during normal assessment. **Reassess from local data** mode returns candidate findings with an explicit incomplete-assessment warning when validation is needed. Deployment conditions still require review. Force refresh and custom NVD endpoints use the existing paced API path.
-
-An overdue local catalogue supplies labeled stale results and leaves the assessment incomplete while database updates catch up. The vulnerability feed uses the chosen interval with two hours of publication allowance. CPE dictionary freshness is checked separately against its daily feed cadence. Configuration displays advisory and CPE counts, disk usage, source timestamps, feed progress, errors, and the database path. Include `vulman-nvd.db` in a stopped-app backup to retain the downloaded catalogue. It can also be rebuilt from public data.
+Select **Update NVD database** to download [NVD feeds](https://nvd.nist.gov/vuln/data-feeds) and the CPE dictionary into `vulman-nvd.db`. Choose **Manual only**, **Every two hours**, or **Daily**. Name-only matches still need review; uncertain applicability may require API validation.
 
 ### Local OSV database
 
-Enable **OSV.dev** in Configuration, select the ecosystems under **Local OSV database**, and save configuration. **Use project ecosystems** suggests selections from registered components. Select **Update OSV database** to start the first download. New ecosystems require an explicit update. Supported ecosystem options are bundled, and registered ecosystem variants such as `Debian:12` use the parent `Debian` download. OSV remains disabled as a discovery source by default.
-
-Vulman stores the selected catalogues in `vulman-osv.db`, encrypted with the existing `vulman.key`. Advisory payloads, import metadata, and pending changes use AES-GCM encryption. Package-index terms are hashed. Ecosystem names and advisory identifiers are structural keys for public vulnerability data. No project source code is stored in this catalogue. Counts describe stored ecosystem records, so an advisory exported to multiple ecosystems can appear more than once in the storage count. Assessment findings still merge aliases and preserve source provenance.
-
-The first update downloads each ecosystem's official `all.zip`, publishes the validated baseline, then applies a fresh `modified_id.csv` snapshot to catch up. Subsequent updates download the bounded change index and fetch only relevant changed records. The index uses a 48-hour overlap with the previous successful check, retains the newest timestamp for duplicate IDs, and does not rely on timestamp ordering for completeness. Record fetches are serial with a 50 ms pause between records and bounded retries for rate limits and transient service errors. [OSV export documentation](https://google.github.io/osv.dev/data/)
-
-Downloads are pinned to the Cloud Storage object generation and checked against its size and CRC32C checksum. ZIP members are read directly, with CRC verification and expansion/record-size limits. Archive paths are never extracted. A partial download restarts; verified complete downloads and committed import offsets can be reused. If an old object generation is no longer available, the next retry starts a replacement baseline. An interrupted import older than 48 hours also restarts with a fresh baseline.
-
-bbolt's synchronized commits remain enabled. Full baselines import into inactive generations in transactions of at most 256 records or approximately 4 MiB of source payload. Records, package indexes, maintained counters, and checkpoints commit together. A baseline becomes active only after its complete import validates. A crash leaves committed work available for resumption and discards an unfinished transaction. Incremental record replacement, stale-index removal, pending-task deletion, and cursor advancement are also atomic. The successful incremental-check timestamp advances only after all pending records succeed. A newly published baseline retains its archive timestamp until catch-up succeeds.
-
-When a baseline is at least one week old, the next update performs a full reconciliation. Received withdrawn advisories stop matching immediately. Records removed from an export or moved out of an ecosystem are fully reconciled by the next baseline replacement; the modification index is not treated as an append-only deletion log. **Rebuild catalogue** forces replacement of the selected ecosystems. Deselected ecosystems remain stored for local queries but stop receiving automatic updates.
-
-Choose **Manual only**, **Hourly**, or **Daily** updates, with **Daily** as the default. Automatic updates and overdue work run while Vulman is open. **Stop** cancels the updater, and **Update OSV database** resumes pending work. Closing Vulman joins the updater before closing its database. Configuration displays per-ecosystem status, counts, freshness, the database path, and download/import progress. Queued project assessments wait only for their required ecosystems, including when assessing one selected component. Progress polling does not repeatedly write the workspace or replace unsaved Configuration fields.
-
-Local matching uses exact affected-version lists and `SEMVER` ranges, including prereleases, exclusive fixed/limit boundaries, and inclusive last-affected versions. Semantic ordering uses Go's maintained `golang.org/x/mod/semver` package. PyPI names normalize separator spelling and case, with ecosystem-appropriate name handling for supported lookups. Other `ECOSYSTEM` range rules and Git commit graphs require OSV API validation when an explicit version does not establish a match. **Reassess from local data** mode reports uncertain matches as incomplete, with no vulnerability API calls. An overdue catalogue also produces a freshness warning. External code scanners continue using their own databases and services.
-
-Include `vulman-osv.db` with `vulman.db` and `vulman.key` in a stopped-app backup to retain the downloaded data. The catalogue can also be rebuilt from public exports. Temporary downloads contain public advisory data and are removed after successful import. bbolt reuses freed pages, so rebuilding does not necessarily shrink the physical file.
+Enable **OSV.dev**, select ecosystems under **Local OSV database**, and **Save configuration**, then select **Update OSV database**. Only selected [ecosystem exports](https://google.github.io/osv.dev/data/) are downloaded to `vulman-osv.db`. Choose **Manual only**, **Hourly**, or **Daily**. Deselected ecosystems stay stored but stop updating. External code scanners use their own advisory services.
 
 ## Scheduling
 
@@ -237,54 +146,32 @@ Enable a tool in Configuration, install it on PATH, and explicitly enable **Run 
 
 ### Per-repository scanner profiles
 
-Under **Configuration → Code scanners**, enable the tools Vulman is allowed to use. Open **Edit project → Code scanning** to choose the scanner profile directly below each GitHub repository URL and local folder. The same controls are available when adding a project. Select a mode:
+1. Enable installed tools under **Configuration → Code scanners**. **More info** provides installation and permission guidance for your OS; **Check again** rechecks availability.
+2. In **Add project** or **Edit project → Code scanning**, set a profile for each GitHub URL and local folder:
 
-- **GitHub repository URLs:** **Custom selection** or **Disabled**. New URL rows start with Custom selection and no tools preselected; select at least one tool or choose Disabled before saving. Tool selection is explicit before cloning. Vulman still checks required inputs and finds the selected tools’ working folders after cloning.
-- **Local repository folders:** **Automatic** (default), **Custom selection**, or **Disabled**. Automatic discovers manifests in the root and subfolders and uses applicable globally enabled language tools. Only enabled tools appear in its detection rules and optional additions. Selections for temporarily disabled additions are preserved.
-- **Custom selection:** choose one or more tools for the target. Only tools enabled in **Configuration → Code scanners** are shown. A PHP/JavaScript GitHub repository can select Composer and npm. Saved choices for temporarily disabled tools are preserved and remain inactive until those tools are enabled again.
-- **Disabled:** skip the target, including cloning for GitHub URLs. Existing findings remain available.
+   | Target | Modes |
+   | --- | --- |
+   | GitHub repository URL | **Custom selection** or **Disabled**. Choose tools explicitly before saving. |
+   | Local repository folder | **Automatic**, **Custom selection**, or **Disabled**. Automatic detects supported project files. |
 
-Existing GitHub profiles that used Automatic, including legacy projects without an explicit profile, are treated as Disabled until tools are explicitly selected. The editor shows a notice for these profiles. Previous findings are preserved; local Automatic profiles continue to work.
+3. Enable **Run configured code scanners** and **Save project**. Use **Scan code** to run scanners independently, or include them in a full assessment.
 
-Use **Save project** to save repository URLs, the local folder, and their scanner profiles together in one transaction. Removed repositories also lose their saved profiles. Global tool permissions are saved separately with **Save configuration**. Changing scanner permissions or a repository profile marks its scanner coverage as needing a new code scan. Active assessments must finish before their scanner policy can change. Profile changes do not alter the full-project assessment timestamp.
+Only globally enabled tools can run. Disabled, skipped, or failed jobs retain their previous findings. The workflow lists each job's status and raw finding count; saved results merge duplicate reports within the same repository and project folder.
 
-| Language tool | Detected files | Required inputs per project folder |
+| Tool | Checks | Required inputs |
 | --- | --- | --- |
-| govulncheck | `go.mod` | `go.mod` and a working Go toolchain |
-| npm audit | `package.json`, npm/yarn/pnpm lockfiles | `package.json` and `package-lock.json` or `npm-shrinkwrap.json`; yarn/pnpm lockfiles alone cannot be audited with npm |
-| composer audit | `composer.json`, `composer.lock` | Both files |
-| pip-audit | `requirements.txt`, `pyproject.toml`, `pylock.toml`, `pylock.*.toml` | Supported Python lockfiles or pinned `requirements.txt`; `pyproject.toml` alone is insufficient |
+| govulncheck | Go vulnerabilities | `go.mod` and a Go toolchain |
+| npm audit | JavaScript dependencies | `package.json` and an npm lockfile |
+| composer audit | PHP dependencies | `composer.json` and `composer.lock` |
+| pip-audit | Python dependencies | Supported Python lockfiles or pinned `requirements.txt` |
+| Trivy | Filesystem dependencies | Supported dependency manifests |
+| Snyk | Dependencies across supported ecosystems | Snyk CLI and a configured token |
 
-Discovery excludes `.git`, `node_modules`, `vendor`, `.venv`, `venv`, and `__pycache__`, and does not follow symlinks. Discovery and job counts are bounded. Vulman does not generate lockfiles or install dependencies to make a scanner applicable.
+Vulman checks required inputs and reports missing tools or unsupported projects. It does not create lockfiles or install project dependencies to make a scanner applicable.
 
-The expanded workflow shows each scanner job, repository, relative project folder, status, and skip/block reason, with the most recently updated jobs first. Running, completed, and failed jobs move to the top as their status changes. Older saved runs use available workflow log order, then reverse plan order when no update history remains. The Findings column records each completed job’s raw report count, including zero, before deduplication and severity filtering. Unfinished or skipped jobs show —. Older completed jobs recover their counts from available run logs; missing historical counts also show —. Files and tool permissions are checked again during each scan. Editing profiles does not clone repositories or inspect code. Scanner settings and workflow messages support English and Japanese.
+For **private GitHub repositories**, save a personal access token under **Configuration → API credentials**. Fine-grained tokens need access to the selected repositories with **Contents → Read-only** permission. Use an HTTPS GitHub.com repository URL; authenticated cloning requires Git with `--config-env` support. [GitHub token guidance](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
 
-Successful scans replace only the findings covered by that scanner and project folder. Skipped, disabled, blocked, failed, or otherwise unassessed tools retain their previous findings and provenance. Unknown legacy provenance is retained conservatively. The workflow separates fresh results from retained results; a run with no completed scanner is explicitly identified and does not display a clean zero-result severity summary. Duplicate reports from multiple tools are merged within the same repository and project folder.
-
-Scanner definitions in `internal/scanner/registry.go` provide tool IDs, labels, manifest rules, required inputs, command builders, probes, and parsers. Configuration and CLI validation consume this catalogue, so new integrations can use the same profile and planning UI.
-
-Vulman puts shallow clones, scan temporary files, and supported scanner caches in private system temporary storage outside the active Vulman data directory. It removes that workspace when the scan finishes, fails, or is cancelled. After a force quit, Vulman removes abandoned scan files on the next desktop launch or code scan. The database retains vulnerability findings and run metadata. Scanner caches may be downloaded again on later scans.
-
-For a private repository, enter a **GitHub personal access token** under **Configuration → API credentials** and save. A fine-grained token can be scoped to the repositories you want to scan with **Contents → Read-only** permission. Add the HTTPS repository URL to your project as usual. Vulman tries the clone anonymously first and retries with the token if needed. Git must support `--config-env` for authenticated clones. [GitHub personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) · [Git command options](https://git-scm.com/docs/git#Documentation/git.txt---config-envltnamegtltenvvargt)
-
-Selecting a tool in **Configuration → Code scanners** runs a short local help or version command using Vulman’s PATH and account permissions. Each compact scanner card shows whether Vulman could start the tool. Select the amber **More info** button to open installation and permission guidance for the running OS, executable paths, and detailed errors. The Snyk pop-up also explains token setup and links to its credential field. Use **Check again** after fixing an installation or permission issue. Repository access and scan prerequisites are checked during the assessment.
-
-On macOS, Vulman also searches the standard Homebrew and Go installation folders when opened from Finder. It searches the inherited `PATH` first and adds `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/local/go/bin`, and `~/go/bin` for scanner commands and their runtimes. For a custom installation, launch Vulman’s executable from a terminal whose `PATH` includes that tool.
-
-| Tool | Invocation | Scope |
-| --- | --- | --- |
-| govulncheck | `govulncheck -json ./...` | Go package/code vulnerability analysis; Go toolchain required. |
-| npm 7+ | `npm audit --json --ignore-scripts` | npm dependency advisories; requires a lockfile. |
-| Composer | `composer --no-plugins --no-scripts --no-interaction audit --locked --format=json` | PHP dependency advisories from the lockfile. |
-| pip-audit | `pip-audit --format json --locked .` or `pip-audit --format json --disable-pip --no-deps -r requirements.txt` | Python dependency advisories from repository manifests. |
-| Trivy | `trivy fs --format json --scanners vuln --quiet .` | Filesystem dependency vulnerability scan. |
-| Snyk CLI | `snyk test --all-projects --fail-fast --json` | Supported dependency manifests; requires a Snyk token and CLI. |
-
-On Windows, Vulman runs the installed `npm-cli.js` through `node.exe` and `composer.phar` through `php.exe` when npm or Composer uses a standard batch launcher. Keep those files in the standard layout beside their launchers. Native `.exe` launchers on PATH also work.
-
-For Python, install a current [pip-audit release](https://github.com/pypa/pip-audit#installation). Vulman checks each detected Python project folder and uses `pylock.toml` and any `pylock.*.toml` files when present. Otherwise, it uses a standalone `requirements.txt` with exact versions for all dependencies you want audited. pip-audit queries PyPI for advisories without installing dependencies. Findings without severity information appear as **Unrated**.
-
-The built-in scanner integrations cover dependency and reachability vulnerabilities. Vulman runs a fixed set of scanner commands.
+Clones, scan temporary files, and supported scanner caches use private system temporary storage outside Vulman's data directory. They are removed after scans; abandoned files from a force quit are cleaned on the next desktop launch or scan. Only findings and run metadata are retained in the database.
 
 ### Set up Snyk
 

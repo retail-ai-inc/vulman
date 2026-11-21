@@ -2,6 +2,11 @@
   "name": "日本語",
   "locale": "ja-JP",
   "messages": {
+    "databaseWarningTitle": "ローカル脆弱性データベースの更新が必要です",
+    "databaseWarningHint": "以下の使用中のデータは、{days} 日を超えて更新されていません。自動更新が有効でも、最近の脆弱性が検出されない可能性があります。",
+    "databaseWarningLastUpdated": "最終更新",
+    "databaseWarningConfigure": "設定を開いてデータベースを更新",
+    "databaseWarningDismiss": "データベース更新の警告を閉じる",
     "osvDBTitle": "ローカルOSVデータベース",
     "osvDBHint": "ダウンロードするエコシステムを選択し、OSVを有効にして設定を保存してから初回更新を開始してください。変更インデックスで更新し、1週間以上経過した全体カタログを再同期します。選択解除したカタログは保持されますが更新されません。",
     "osvDBRecords": "保存済みOSVレコード",

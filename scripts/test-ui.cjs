@@ -191,6 +191,117 @@ test('Overview severity rows open the workspace findings with the matching sever
   assert.equal(run('filter.severity'), '');
 });
 
+test('Overview warns about old active database checkpoints for every update schedule', () => {
+  const run = app();
+  run(`
+    Date.now = () => Date.parse('2026-11-21T12:00:00Z');
+    const ago = days => new Date(Date.now() - days * 86400000).toISOString();
+    state = {projects:[], data_directory:'/workspace', settings:{sources:{cve:true,nvd:true,osv:true},osv_ecosystems:['Go','PyPI']},
+      cve_database:{initialized:true,source_at:ago(8),checked_at:ago(0)},
+      nvd_database:{initialized:true,source_at:ago(1),cpe_at:ago(16),checked_at:ago(0)},
+      osv_database:{initialized:true,ecosystems:[
+        {ecosystem:'Go',initialized:true,checked_at:ago(9)},
+        {ecosystem:'PyPI',initialized:true,checked_at:ago(1),source_at:ago(20)},
+        {ecosystem:'Maven',initialized:true,checked_at:ago(20)}
+      ]}};
+  `);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(staleLocalDatabases().map(item => item.id))')), ['cve','nvd','osv:Go']);
+
+  for (const schedule of ['off','hourly','two_hourly','daily']) {
+    run(`state.settings.cve_update_schedule = state.settings.nvd_update_schedule = state.settings.osv_update_schedule = '${schedule}';`);
+    const html = run('databaseFreshnessWarningHTML()');
+    assert.match(html, /more than 7 days old/);
+    assert.match(html, /Local CVE database/);
+    assert.match(html, /Local NVD database and CPE dictionary/);
+    assert.match(html, /Local OSV database · Go/);
+    assert.doesNotMatch(html, /PyPI|Maven/);
+    assert.match(html, /href="#settings"/);
+    assert.match(html, /data-action="dismiss-database-warning"/);
+    assert.match(html, /datetime="2026-11-05T12:00:00.000Z"/);
+  }
+
+  run(`state.settings.sources = {cve:false,nvd:false,osv:false};`);
+  assert.equal(run('databaseFreshnessWarningHTML()'), '');
+});
+
+test('database age warning excludes fresh, uninitialized, missing, and invalid dates', () => {
+  const run = app();
+  run(`
+    Date.now = () => Date.parse('2026-11-21T12:00:00Z');
+    state = {projects:[],settings:{sources:{}},cve_database:{initialized:true}};
+  `);
+
+  for (const date of [undefined, '', 'invalid', '0001-01-01T00:00:00Z', '2026-11-22T12:00:00Z', '2026-11-14T12:00:00Z']) {
+    run(`state.cve_database.source_at = ${JSON.stringify(date)};`);
+    assert.equal(run('databaseFreshnessWarningHTML()'), '', String(date));
+  }
+
+  run(`state.cve_database.source_at = '2026-11-14T11:59:59.999Z';`);
+  assert.match(run('databaseFreshnessWarningHTML()'), /Local CVE database/);
+  run('state.cve_database.initialized = false');
+  assert.equal(run('databaseFreshnessWarningHTML()'), '');
+  run(`state.osv_database = {ecosystems:[{ecosystem:'Go',initialized:true,checked_at:'invalid',source_at:'2026-11-01T00:00:00Z'}]};
+    state.osv_suggested_ecosystems = ['Go'];`);
+  assert.match(run('databaseFreshnessWarningHTML()'), /Local OSV database · Go/);
+  run('state.settings.osv_ecosystems = []');
+  assert.equal(run('databaseFreshnessWarningHTML()'), '');
+});
+
+test('database warning polling and dismissal preserve the Overview page and return for changed data', async () => {
+  const run = app();
+  run(`
+    Date.now = () => Date.parse('2026-11-21T12:00:00Z');
+    state = {version:'1',projects:[],data_directory:'/workspace',settings:{language:'en',sources:{}},
+      cve_database:{initialized:true,source_at:'2026-11-01T00:00:00Z'}};
+    location.hash = '#overview'; renderOverview();
+    const pageHTML = $('#main').innerHTML;
+    const notice = $('#database-freshness-notice');
+    updateDatabaseFreshnessWarning();
+    var dismiss = {dataset:{action:'dismiss-database-warning'},closest:selector => selector === '[data-action]' ? dismiss : null};
+  `);
+  assert.match(run('pageHTML'), /^<div id="database-freshness-notice" role="status" aria-live="polite">.*Local vulnerability databases need updating/);
+  await run('document.listeners.click({target:dismiss})');
+  assert.equal(run('notice.innerHTML'), '');
+
+  run(`applyPollingState({version:'1',cache_stats:{},cve_database:{initialized:true,running:true,source_at:'2026-11-01T00:00:00Z'}});`);
+  assert.equal(run('notice.innerHTML'), '');
+  run(`location.hash = '#projects'; render(); location.hash = '#overview'; renderOverview();`);
+  assert.equal(run('databaseFreshnessWarningHTML()'), '');
+
+  run(`applyPollingState({...state,cve_database:{initialized:true,source_at:'2026-11-02T00:00:00Z'}});`);
+  assert.match(run('notice.innerHTML'), /Local CVE database/);
+  await run('document.listeners.click({target:dismiss})');
+  assert.equal(run('notice.innerHTML'), '');
+  run(`state.data_directory = '/another-workspace'; updateDatabaseFreshnessWarning();`);
+  assert.match(run('notice.innerHTML'), /Local CVE database/);
+  run(`const renderedOverview = $('#main').innerHTML;
+    applyPollingState({version:'1',cache_stats:{},cve_database:{initialized:true,source_at:'2026-11-21T00:00:00Z'}});`);
+  assert.equal(run('notice.innerHTML'), '');
+  assert.equal(run(`$('#main').innerHTML === renderedOverview`), true);
+
+  run(`state.cve_database.source_at = '2026-11-14T12:00:00Z'; updateDatabaseFreshnessWarning();`);
+  assert.equal(run('notice.innerHTML'), '');
+  run(`Date.now = () => Date.parse('2026-11-21T12:00:01Z'); applyPollingState({version:'1',cache_stats:{}});`);
+  assert.match(run('notice.innerHTML'), /Local CVE database/);
+});
+
+test('database warning is localized and escapes ecosystem labels', () => {
+  const run = app();
+  run(`
+    Date.now = () => Date.parse('2026-11-21T12:00:00Z');
+    const ecosystem = '<SCRIPT>unsafe</SCRIPT>';
+    state = {projects:[],settings:{sources:{},osv_ecosystems:[ecosystem]},osv_database:{ecosystems:[
+      {ecosystem,initialized:true,checked_at:'2026-11-01T00:00:00Z'}
+    ]}};
+    lang = 'ja';
+  `);
+  const html = run('databaseFreshnessWarningHTML()');
+  assert.match(html, /ローカル脆弱性データベースの更新が必要です/);
+  assert.match(html, /設定を開いてデータベースを更新/);
+  assert.match(html, /&lt;SCRIPT&gt;unsafe&lt;\/SCRIPT&gt;/);
+  assert.doesNotMatch(html, unexpectedHTMLTag);
+});
+
 test('vulnerability pages render at most 100 findings and filter the entire sorted result set', async () => {
   const run = app();
   run(`
@@ -1789,7 +1900,7 @@ test('Configuration groups workspace, key and catalog database paths under File 
   assert.match(html, /<input[^>]+name="token_github"[^>]*placeholder="••••••"/);
   assert.match(html, /<input[^>]+name="token_snyk"[^>]*placeholder=""/);
   assert.equal([...html.matchAll(/data-credential-toggle=/g)].length, 5);
-  assert.ok(html.indexOf('Local storage uses AES-GCM')<html.indexOf('class="storage-paths"'));
+  assert.ok(html.indexOf('Local storage uses AES-GCM')<html.indexOf('class="storage-paths database-paths"'));
   run(`lang='ja'`);
   assert.match(run('storagePathsHTML()'),/暗号化キーファイル/);
   assert.match(run('storagePathsHTML()'),/CVE カタログデータベース/);
