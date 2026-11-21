@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/engine"
 	"vulman/internal/model"
+	"vulman/internal/scanner"
 	"vulman/internal/store"
 )
 
@@ -71,7 +73,7 @@ func TestStateSinceReturnsDataOnlyAfterACommittedChange(t *testing.T) {
 
 func TestProjectRepositoryURLsPersistThroughDesktopUpdate(t *testing.T) {
 	desktop := &Desktop{store: newTestStore(t)}
-	urls := []string{"https://github.com/owner/first.git", "https://github.com/owner/second.git"}
+	urls := []string{"https://github.com/owner/first.git", "https://github.com/owner/second.git?tab=readme#overview"}
 	project, err := desktop.CreateProject(ProjectInput{Name: "Demo", Schedule: "off", Repository: urls[0], ScanCode: true})
 	if err != nil {
 		t.Fatal(err)
@@ -85,6 +87,52 @@ func TestProjectRepositoryURLsPersistThroughDesktopUpdate(t *testing.T) {
 	}
 	if stored := state.Projects[0]; !reflect.DeepEqual(stored.Repositories(), urls) || stored.Repository != urls[0] {
 		t.Fatalf("unexpected saved repository URLs: %+v", stored.Repositories())
+	}
+	want := []ScanRepository{
+		{Key: scanner.RemoteTargetKey(urls[0]), Label: "github.com/owner/first.git", URL: urls[0]},
+		{Key: scanner.RemoteTargetKey(urls[1]), Label: "github.com/owner/second.git", URL: urls[1]},
+	}
+	if got := state.ScanRepositories[project.ID]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected scan repository identifiers in the workspace: %+v", got)
+	}
+}
+
+func TestDesktopSyncValidatesMultipleSelectionFields(t *testing.T) {
+	db := newTestStore(t)
+	if err := db.Update(func(st *model.State) error {
+		st.Settings.Sources = nil
+		st.Projects = []model.Project{{ID: "p", Assets: []model.Asset{{ID: "a", Name: "demo", Version: "1"}}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := engine.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(eng.Close)
+	desktop := &Desktop{store: db, engine: eng}
+	for _, tc := range []struct{ json, code string }{
+		{`{"asset_ids":[],"scan_targets":[]}`, "assessment_selection_empty"},
+		{`{"asset_ids":["a","missing"]}`, "tech_stack_component_not_found"},
+		{`{"asset_ids":["a"],"scan_targets":["local"]}`, "scan_repository_not_registered"},
+		{`{"asset_id":"a","asset_ids":["a"]}`, "assessment_selection_conflict"},
+	} {
+		var input SyncInput
+		if err := json.Unmarshal([]byte(tc.json), &input); err != nil {
+			t.Fatal(err)
+		}
+		err := desktop.Sync("p", input)
+		if message := apperror.Public(err); message == nil || message.Code != tc.code {
+			t.Fatalf("multiple-selection request was ignored or returned the wrong error: %s, %v", tc.json, err)
+		}
+	}
+	st, err := db.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Projects[0].Syncing || len(st.Projects[0].Runs) != 0 {
+		t.Fatal("invalid desktop selection started a full-project assessment")
 	}
 }
 
@@ -369,6 +417,43 @@ func TestDesktopCacheConfiguration(t *testing.T) {
 	}
 	if state.Settings.CacheHours != 12 || state.CacheStats.MaxEntries != 25000 || state.CacheStats.MaxBytes != 1024<<20 {
 		t.Fatalf("unexpected cache settings: %+v", state.CacheStats)
+	}
+}
+
+func TestDesktopOSVConfigurationNormalizesAndPreservesExplicitSelections(t *testing.T) {
+	desktop := &Desktop{store: newTestStore(t)}
+	cfg := model.Defaults().Settings
+	cfg.OSVEcosystems = []string{"Go", "Debian:12", "Go"}
+	if err := desktop.SaveSettings(SettingsInput{Settings: cfg}); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := desktop.State()
+	if err != nil || !reflect.DeepEqual(state.Settings.OSVEcosystems, []string{"Debian", "Go"}) || state.Settings.OSVUpdateSchedule != "daily" {
+		t.Fatalf("unexpected OSV configuration: %+v %v", state.Settings, err)
+	}
+
+	for _, values := range [][]string{{"../Go"}, {"https://host"}, {"Go/../../"}} {
+		invalid := cfg
+		invalid.OSVEcosystems = values
+		if err := desktop.SaveSettings(SettingsInput{Settings: invalid}); err == nil {
+			t.Fatalf("invalid ecosystem accepted: %v", values)
+		}
+	}
+
+	cfg.OSVEcosystems = []string{}
+	if err := desktop.SaveSettings(SettingsInput{Settings: cfg}); err != nil {
+		t.Fatal(err)
+	}
+
+	stored, err := desktop.store.Read()
+	if err != nil || stored.Settings.OSVEcosystems == nil || len(stored.Settings.OSVEcosystems) != 0 {
+		t.Fatal("an explicit empty selection was replaced by automatic project suggestions")
+	}
+
+	cfg.OSVUpdateSchedule = "weekly"
+	if err := desktop.SaveSettings(SettingsInput{Settings: cfg}); err == nil {
+		t.Fatal("unsupported OSV schedule accepted")
 	}
 }
 

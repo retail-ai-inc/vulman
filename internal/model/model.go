@@ -3,22 +3,23 @@ package model
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"time"
+
+	"vulman/internal/apperror"
 )
 
 type Asset struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	Version   string `json:"version"`
-	Ecosystem string `json:"ecosystem"`
-	CPE       string `json:"cpe"`
+	NeedsAssessment bool   `json:"needs_assessment,omitempty"`
+	ID              string `json:"id"`
+	Kind            string `json:"kind"`
+	Name            string `json:"name"`
+	Version         string `json:"version"`
+	Ecosystem       string `json:"ecosystem"`
+	CPE             string `json:"cpe"`
 }
 
 type Finding struct {
@@ -26,6 +27,7 @@ type Finding struct {
 	AssetID        string   `json:"asset_id"`
 	ScanTarget     string   `json:"scan_target,omitempty"`
 	ScanRepository string   `json:"scan_repository,omitempty"`
+	ScanPath       string   `json:"scan_path,omitempty"`
 	Component      string   `json:"component"`
 	Version        string   `json:"version"`
 	Title          string   `json:"title"`
@@ -40,38 +42,83 @@ type Finding struct {
 }
 
 type Run struct {
-	ID             string         `json:"id"`
-	StartedAt      time.Time      `json:"started_at"`
-	FinishedAt     time.Time      `json:"finished_at"`
-	Status         string         `json:"status"`
-	Trigger        string         `json:"trigger"`
-	AssetID        string         `json:"asset_id,omitempty"`
-	AssetName      string         `json:"asset_name,omitempty"`
-	Count          int            `json:"count"`
-	SeverityCounts map[string]int `json:"severity_counts,omitempty"`
-	Warnings       []string       `json:"warnings"`
-	Steps          []SyncStep     `json:"steps,omitempty"`
-	Logs           []SyncLog      `json:"logs,omitempty"`
-	Mode           string         `json:"mode,omitempty"`
-	Severity       string         `json:"severity,omitempty"`
-	ScanTargets    []string       `json:"scan_targets,omitempty"`
-	DataCheckedAt  time.Time      `json:"data_checked_at"`
-	PausedAt       time.Time      `json:"paused_at"`
-	PausedSeconds  float64        `json:"paused_seconds,omitempty"`
+	ID                      string               `json:"id"`
+	StartedAt               time.Time            `json:"started_at"`
+	FinishedAt              time.Time            `json:"finished_at"`
+	Status                  string               `json:"status"`
+	Trigger                 string               `json:"trigger"`
+	AssetID                 string               `json:"asset_id,omitempty"`
+	AssetName               string               `json:"asset_name,omitempty"`
+	Count                   int                  `json:"count"`
+	SeverityCounts          map[string]int       `json:"severity_counts,omitempty"`
+	Warnings                []string             `json:"warnings"`
+	WarningMessages         []apperror.Message   `json:"warning_messages,omitempty"`
+	Steps                   []SyncStep           `json:"steps,omitempty"`
+	Logs                    []SyncLog            `json:"logs,omitempty"`
+	Mode                    string               `json:"mode,omitempty"`
+	Severity                string               `json:"severity,omitempty"`
+	ScanTargets             []string             `json:"scan_targets,omitempty"`
+	ScanTarget              string               `json:"scan_target,omitempty"`
+	ScanRepository          string               `json:"scan_repository,omitempty"`
+	Selection               *AssessmentSelection `json:"selection,omitempty"`
+	ScannerJobs             []ScannerJob         `json:"scanner_jobs,omitempty"`
+	ScannerJobSequence      uint64               `json:"scanner_job_sequence,omitempty"`
+	ScannersCompleted       int                  `json:"scanners_completed,omitempty"`
+	RetainedScannerFindings int                  `json:"retained_scanner_findings,omitempty"`
+	DataCheckedAt           time.Time            `json:"data_checked_at"`
+	PausedAt                time.Time            `json:"paused_at"`
+	PausedSeconds           float64              `json:"paused_seconds,omitempty"`
+	DatabaseWaits           []DatabaseWait       `json:"database_waits,omitempty"`
+}
+
+type AssessmentSelection struct {
+	Assets       []AssessmentItem `json:"assets,omitempty"`
+	Repositories []AssessmentItem `json:"repositories,omitempty"`
+}
+
+type AssessmentItem struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+type ScannerProfile struct {
+	Mode            string   `json:"mode"`
+	Tools           []string `json:"tools,omitempty"`
+	AdditionalTools []string `json:"additional_tools,omitempty"`
+	NeedsScan       bool     `json:"needs_scan,omitempty"`
+}
+
+type ScannerJob struct {
+	UpdateSequence uint64 `json:"update_sequence,omitempty"`
+	Findings       *int   `json:"findings,omitempty"`
+	Target         string `json:"target"`
+	Repository     string `json:"repository,omitempty"`
+	Tool           string `json:"tool"`
+	Path           string `json:"path,omitempty"`
+	Status         string `json:"status"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+type DatabaseWait struct {
+	Message *apperror.Message `json:"message,omitempty"`
+	Source  string            `json:"source"`
+	Status  string            `json:"status"`
+	Detail  string            `json:"detail,omitempty"`
 }
 
 // SyncProgress reports work performed, never an estimate of elapsed completion.
 type SyncProgress struct {
-	Phase          string    `json:"phase"`
-	Item           string    `json:"item,omitempty"`
-	ScanTarget     string    `json:"scan_target,omitempty"`
-	ScanRepository string    `json:"scan_repository,omitempty"`
-	Processed      int       `json:"processed"`
-	Total          int       `json:"total"`
-	Found          int       `json:"found"`
-	WaitSeconds    int       `json:"wait_seconds,omitempty"`
-	CacheStatus    string    `json:"cache_status,omitempty"`
-	CheckedAt      time.Time `json:"checked_at"`
+	Message        *apperror.Message `json:"message,omitempty"`
+	Phase          string            `json:"phase"`
+	Item           string            `json:"item,omitempty"`
+	ScanTarget     string            `json:"scan_target,omitempty"`
+	ScanRepository string            `json:"scan_repository,omitempty"`
+	Processed      int               `json:"processed"`
+	Total          int               `json:"total"`
+	Found          int               `json:"found"`
+	WaitSeconds    int               `json:"wait_seconds,omitempty"`
+	CacheStatus    string            `json:"cache_status,omitempty"`
+	CheckedAt      time.Time         `json:"checked_at"`
 }
 
 type SyncStep struct {
@@ -85,53 +132,85 @@ type SyncStep struct {
 }
 
 type SyncLog struct {
-	At             time.Time `json:"at"`
-	StepID         string    `json:"step_id,omitempty"`
-	Event          string    `json:"event"`
-	Detail         string    `json:"detail,omitempty"`
-	Findings       *int      `json:"findings,omitempty"`
-	ScanTarget     string    `json:"scan_target,omitempty"`
-	ScanRepository string    `json:"scan_repository,omitempty"`
+	Message        *apperror.Message `json:"message,omitempty"`
+	Tool           string            `json:"tool,omitempty"`
+	At             time.Time         `json:"at"`
+	StepID         string            `json:"step_id,omitempty"`
+	Event          string            `json:"event"`
+	Detail         string            `json:"detail,omitempty"`
+	Findings       *int              `json:"findings,omitempty"`
+	ScanTarget     string            `json:"scan_target,omitempty"`
+	ScanRepository string            `json:"scan_repository,omitempty"`
+	ScanPath       string            `json:"scan_path,omitempty"`
+	ScanReason     string            `json:"scan_reason,omitempty"`
 }
 
 const MaxSyncLogs = 200
+const MaxScannerJobs = 1200
 
 type Project struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	Description      string    `json:"description"`
-	Repository       string    `json:"repository"`
-	RepositoryURLs   []string  `json:"repository_urls,omitempty"`
-	LocalPath        string    `json:"local_path"`
-	ScanCode         bool      `json:"scan_code"`
-	Assets           []Asset   `json:"assets"`
-	Schedule         string    `json:"schedule"`
-	NextRun          time.Time `json:"next_run"`
-	LastSync         time.Time `json:"last_sync"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
-	Revision         int       `json:"revision"`
-	AssessedRevision int       `json:"assessed_revision"`
-	DataCheckedAt    time.Time `json:"data_checked_at"`
-	Findings         []Finding `json:"findings"`
-	Runs             []Run     `json:"runs"`
-	Syncing          bool      `json:"syncing"`
+	ID               string                    `json:"id"`
+	Name             string                    `json:"name"`
+	Description      string                    `json:"description"`
+	Repository       string                    `json:"repository"`
+	RepositoryURLs   []string                  `json:"repository_urls,omitempty"`
+	LocalPath        string                    `json:"local_path"`
+	ScanCode         bool                      `json:"scan_code"`
+	ScannerProfiles  map[string]ScannerProfile `json:"scanner_profiles,omitempty"`
+	Assets           []Asset                   `json:"assets"`
+	Schedule         string                    `json:"schedule"`
+	NextRun          time.Time                 `json:"next_run"`
+	LastSync         time.Time                 `json:"last_sync"`
+	CreatedAt        time.Time                 `json:"created_at"`
+	UpdatedAt        time.Time                 `json:"updated_at"`
+	Revision         int                       `json:"revision"`
+	AssessedRevision int                       `json:"assessed_revision"`
+	DataCheckedAt    time.Time                 `json:"data_checked_at"`
+	Findings         []Finding                 `json:"findings"`
+	Runs             []Run                     `json:"runs"`
+	Syncing          bool                      `json:"syncing"`
+}
+
+// MarkOutdatedComponents recognizes results saved before component freshness
+// was tracked explicitly, without discarding the previous assessment.
+func (p *Project) MarkOutdatedComponents() {
+	assets := make(map[string]int, len(p.Assets))
+	for i, asset := range p.Assets {
+		assets[asset.ID] = i
+	}
+
+	for _, finding := range p.Findings {
+		index, ok := assets[finding.AssetID]
+		if !ok || finding.Match == "scanner" {
+			continue
+		}
+
+		asset := &p.Assets[index]
+		if finding.Version != "" && finding.Version != asset.Version || finding.Component != "" && finding.Component != asset.Name {
+			asset.NeedsAssessment = true
+		}
+	}
 }
 
 type Settings struct {
-	CacheHours      int               `json:"cache_hours"`
-	CacheMaxEntries int               `json:"cache_max_entries"`
-	CacheMaxMiB     int               `json:"cache_max_mib"`
-	Language        string            `json:"language"`
-	Sources         map[string]bool   `json:"sources"`
-	NVDURL          string            `json:"nvd_url"`
-	CVEURL          string            `json:"cve_url"`
-	OSVURL          string            `json:"osv_url"`
-	AIProvider      string            `json:"ai_provider"`
-	OpenAIModel     string            `json:"openai_model"`
-	ClaudeModel     string            `json:"claude_model"`
-	Scanners        map[string]bool   `json:"scanners"`
-	Tokens          map[string]string `json:"tokens,omitempty"`
+	OSVUpdateSchedule     string            `json:"osv_update_schedule"`
+	OSVEcosystems         []string          `json:"osv_ecosystems"`
+	NVDUpdateSchedule     string            `json:"nvd_update_schedule"`
+	CVEUpdateSchedule     string            `json:"cve_update_schedule"`
+	CacheHours            int               `json:"cache_hours"`
+	CacheMaxEntries       int               `json:"cache_max_entries"`
+	CacheMaxMiB           int               `json:"cache_max_mib"`
+	Language              string            `json:"language"`
+	Sources               map[string]bool   `json:"sources"`
+	NVDURL                string            `json:"nvd_url"`
+	CVEURL                string            `json:"cve_url"`
+	OSVURL                string            `json:"osv_url"`
+	AIProvider            string            `json:"ai_provider"`
+	OpenAIModel           string            `json:"openai_model"`
+	ClaudeModel           string            `json:"claude_model"`
+	Scanners              map[string]bool   `json:"scanners"`
+	ScannerConfigRevision string            `json:"scanner_config_revision,omitempty"`
+	Tokens                map[string]string `json:"tokens,omitempty"`
 }
 
 type State struct {
@@ -140,6 +219,9 @@ type State struct {
 }
 
 const DefaultCacheMaxEntries = 10000
+const DefaultCVEURL = "https://cveawg.mitre.org/api/cve"
+const DefaultNVDURL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+const DefaultOSVURL = "https://api.osv.dev/v1/query"
 const DefaultCacheMaxMiB = 512
 const MinCacheMaxEntries = 100
 const MaxCacheMaxEntries = 1000000
@@ -161,13 +243,26 @@ func CacheLimits(s Settings) (uint64, uint64) {
 
 func Defaults() State {
 	return State{Projects: []Project{}, Settings: Settings{
-		CacheHours:      6,
-		CacheMaxEntries: DefaultCacheMaxEntries, CacheMaxMiB: DefaultCacheMaxMiB,
+		OSVUpdateSchedule: "daily",
+		NVDUpdateSchedule: "daily",
+		CVEUpdateSchedule: "daily",
+		CacheHours:        6,
+		CacheMaxEntries:   DefaultCacheMaxEntries, CacheMaxMiB: DefaultCacheMaxMiB,
 		Language: "en", Sources: map[string]bool{"nvd": true, "cve": true, "osv": false},
-		NVDURL: "https://services.nvd.nist.gov/rest/json/cves/2.0",
-		CVEURL: "https://cveawg.mitre.org/api/cve", OSVURL: "https://api.osv.dev/v1/query",
+		NVDURL: DefaultNVDURL,
+		CVEURL: DefaultCVEURL, OSVURL: DefaultOSVURL,
 		AIProvider: "public", Scanners: map[string]bool{}, Tokens: map[string]string{},
 	}}
+}
+
+func NVDInterval(schedule string) time.Duration {
+	if schedule == "two_hourly" {
+		return 2 * time.Hour
+	}
+	if schedule == "" || schedule == "daily" {
+		return 24 * time.Hour
+	}
+	return 0
 }
 
 func NewID() string {
@@ -192,7 +287,7 @@ func Interval(s string) time.Duration {
 }
 
 var githubRepositoryPath = regexp.MustCompile(`^/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+/?$`)
-var errGitHubRepositoryURL = errors.New("Use an HTTPS GitHub repository URL such as https://github.com/owner/repository") // nolint: staticcheck
+var errGitHubRepositoryURL = apperror.New("repository_url_invalid", "Use an HTTPS GitHub repository URL such as https://github.com/owner/repository")
 
 func ValidateRepositoryURL(repository string) error {
 	_, err := GitHubCloneURL(repository)
@@ -240,15 +335,15 @@ func ValidateProject(p *Project) error {
 
 	p.Name = strings.TrimSpace(p.Name)
 	if p.Name == "" || len(p.Name) > 120 {
-		return fmt.Errorf("project name must contain 1–120 characters")
+		return apperror.New("project_name_invalid", "project name must contain 1–120 characters")
 	}
 
 	if len(p.Description) > 4000 || len(p.Assets) > 200 {
-		return fmt.Errorf("description or inventory is too large")
+		return apperror.New("project_inventory_too_large", "description or inventory is too large")
 	}
 
 	if p.Schedule != "off" && Interval(p.Schedule) == 0 {
-		return fmt.Errorf("invalid schedule")
+		return apperror.New("project_schedule_invalid", "invalid schedule")
 	}
 
 	var repositories []string
@@ -275,7 +370,7 @@ func ValidateProject(p *Project) error {
 	}
 
 	if p.ScanCode && len(repositories) == 0 && p.LocalPath == "" {
-		return fmt.Errorf("code scanning requires a repository or local folder")
+		return apperror.New("project_scanner_target_required", "code scanning requires a repository or local folder")
 	}
 
 	seen := map[string]bool{}
@@ -290,25 +385,25 @@ func ValidateProject(p *Project) error {
 		}
 
 		if seen[a.ID] {
-			return fmt.Errorf("duplicate component ID")
+			return apperror.New("component_id_duplicate", "duplicate component ID")
 		}
 
 		seen[a.ID] = true
 
 		if a.Name == "" || a.Version == "" || len(a.Name) > 300 || len(a.Version) > 100 {
-			return fmt.Errorf("each component needs a name and exact version")
+			return apperror.New("component_identity_required", "each component needs a name and exact version")
 		}
 
 		switch a.Kind {
 		case "language", "database", "container", "docker", "webserver", "ai", "library", "other":
 		default:
-			return fmt.Errorf("invalid component category")
+			return apperror.New("component_category_invalid", "invalid component category")
 		}
 
 		if a.CPE != "" {
 			parts := strings.Split(a.CPE, ":")
 			if len(parts) != 13 || parts[0] != "cpe" || parts[1] != "2.3" || parts[5] != a.Version {
-				return fmt.Errorf("CPE must have 13 fields and contain the component's exact version")
+				return apperror.New("cpe_version_invalid", "CPE must have 13 fields and contain the component's exact version")
 			}
 		}
 	}

@@ -4,10 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"math"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 
 	bolt "go.etcd.io/bbolt"
@@ -55,7 +55,7 @@ func (s *Store) CacheGet(key string) (CachedResponse, bool, error) {
 
 		n := s.aead.NonceSize()
 		if len(b) < n {
-			return fmt.Errorf("invalid cache entry")
+			return apperror.New("invalid_cache_entry", "invalid cache entry")
 		}
 
 		plain, err := s.aead.Open(nil, b[:n], b[n:], []byte("vulman-cache-v1:"+key))
@@ -128,7 +128,7 @@ func removeCache(root *bolt.Bucket, key []byte, u *cacheUsage) error {
 	}
 
 	if u.count == 0 || u.bytes < uint64(len(old)) {
-		return fmt.Errorf("invalid cache usage counters")
+		return apperror.New("invalid_cache_usage_counters", "invalid cache usage counters")
 	}
 
 	u.count--
@@ -153,12 +153,12 @@ func enforceCacheLimits(root *bolt.Bucket, u *cacheUsage, maxEntries, maxBytes u
 	for u.count > maxEntries || u.bytes > maxBytes {
 		old, _ := order.Cursor().First()
 		if len(old) < 8 {
-			return fmt.Errorf("cache eviction index is incomplete")
+			return apperror.New("cache_eviction_index_is_incomplete", "cache eviction index is incomplete")
 		}
 
 		key := append([]byte{}, old[8:]...)
 		if root.Bucket([]byte("entries")).Get(key) == nil {
-			return fmt.Errorf("cache eviction index references a missing entry")
+			return apperror.New("cache_eviction_index_references_a_missing_entry", "cache eviction index references a missing entry")
 		}
 
 		if err := removeCache(root, key, u); err != nil {
@@ -225,7 +225,7 @@ func (s *Store) CachePut(key string, entry CachedResponse) error {
 	}
 
 	if len(plain) > maxCacheEntryBytes {
-		return fmt.Errorf("query result exceeds the 8 MiB cache entry limit")
+		return apperror.New("query_result_exceeds_the_8_mib_cache_entry_limit", "query result exceeds the 8 MiB cache entry limit")
 	}
 
 	nonce := make([]byte, s.aead.NonceSize())
@@ -245,7 +245,7 @@ func (s *Store) CachePut(key string, entry CachedResponse) error {
 
 		size := uint64(len(data))
 		if u.count == math.MaxUint64 || u.bytes > math.MaxUint64-size {
-			return fmt.Errorf("cache usage counters would overflow")
+			return apperror.New("cache_usage_counters_would_overflow", "cache usage counters would overflow")
 		}
 
 		if err := entries.Put([]byte(key), data); err != nil {
@@ -287,6 +287,44 @@ func (s *Store) CacheDelete(key string) error {
 		return saveUsage(meta, u)
 	})
 }
+
+// ClearAPIResponseCache removes response payloads and their indexes in one
+// commit. Workspace state and catalogue files are never opened or modified.
+// Limits and cumulative statistics survive; new API responses may refill it.
+func (s *Store) ClearAPIResponseCache() error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		root := tx.Bucket([]byte("cache-v1"))
+		meta := root.Bucket([]byte("meta"))
+		retained := make(map[string]uint64)
+		for _, key := range []string{"_limit_entries", "_limit_bytes", "_evictions"} {
+			retained[key] = readUint(meta.Get([]byte(key)))
+		}
+
+		for _, name := range []string{"entries", "order", "meta"} {
+			if err := root.DeleteBucket([]byte(name)); err != nil {
+				return err
+			}
+
+			if _, err := root.CreateBucket([]byte(name)); err != nil {
+				return err
+			}
+		}
+
+		meta = root.Bucket([]byte("meta"))
+		for key, value := range retained {
+			if err := meta.Put([]byte(key), uintBytes(value)); err != nil {
+				return err
+			}
+		}
+
+		if err := saveUsage(meta, cacheUsage{}); err != nil {
+			return err
+		}
+
+		return s.persistCacheCounters(meta)
+	})
+}
+
 func (s *Store) CacheStats() (CacheStats, error) {
 	var stats CacheStats
 	err := s.db.View(func(tx *bolt.Tx) error {

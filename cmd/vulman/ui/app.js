@@ -15,6 +15,7 @@ const icons = {
   clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
   check:'<path d="m5 12 4 4L19 6"/>',
+  info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/>',
   stack:'<path d="m12 3 10 5-10 5L2 8Zm-9 10 9 5 9-5M3 18l9 5 9-5"/>',
   leaf:'<path d="M20 3C6 1 2 8 5 15s16 6 15-12Z"/><path d="M4 22 15 9M9 17V9"/>',
   eye:'<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/>',
@@ -54,6 +55,33 @@ const findingSeverities = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
 let findingsPage = 1;
 let filter={search:'',severity:'',project:'',match:'',stack:''}, projectTab='vulnerabilities';
 const t = key => localizations[lang]?.messages[key] || localizations[defaultLanguage]?.messages[key] || key;
+// Messages are translated when rendered so stored workflow history follows the
+// selected language. Legacy string-only history remains readable.
+function messageText(message, depth = 0) {
+  if (typeof message === 'string') return message;
+  if (!message || depth > 12) return '';
+  if (Array.isArray(message)) return message.map(item => messageText(item, depth + 1)).filter(Boolean).join(' · ');
+  if (typeof message.code !== 'string') return '';
+  const key = 'error_' + message.code;
+  const template = message.code === 'multiple' ? '' :
+    localizations[lang]?.messages[key] || localizations[defaultLanguage]?.messages[key] || message.fallback || t('error_unexpected');
+  const text = template.replace(/\{([a-zA-Z0-9_]+)\}/g, (placeholder, key) =>
+    message.params && Object.hasOwn(message.params, key) ? String(message.params[key]) : placeholder);
+  const causes = Array.isArray(message.causes) ? message.causes.map(item => messageText(item, depth + 1)).filter(Boolean).join(' · ') : '';
+  return [text, causes].filter(Boolean).join(': ');
+}
+
+function formatError(error) {
+  return messageText(error?.cause) || messageText(error) || error?.message || t('error_unexpected');
+}
+
+function runWarnings(run) {
+  const warnings = run.warnings || [];
+  const messages = run.warning_messages || [];
+  return Array.from({length:Math.max(warnings.length, messages.length)}, (_, index) =>
+    messageText(messages[index]) || warnings[index] || '');
+}
+
 const supportedLanguage = code => Object.hasOwn(localizations, code) ? code : defaultLanguage;
 const formatLocale = () => localizations[lang]?.locale || lang;
 function languageOptions() {
@@ -84,6 +112,8 @@ const dismissedRuns=new Set();
 function canDismissWorkflow(run){return !!run&&['complete','partial','failed','interrupted','stopped'].includes(run.status);}
 function stepLabel(step){return ({nvd:'NIST NVD',osv:'OSV.dev',cve:'CVE Program',scanner:t('codeScanners'),save:t('saveResults')}[step.kind]||step.kind)+(step.component?' · '+step.component:'');}
 function interruptionMessage(run, fullProject = false) {
+  if (run.logs?.some(entry => entry.event === 'queue_interrupted')) return t('event_queue_interrupted');
+
   const step = run.steps?.find(step => step.status === 'interrupted');
   const key = fullProject ? 'fullSyncInterrupted' : 'syncInterrupted';
   return step ? t(key + 'During').replace('{step}', () => stepLabel(step)) : t(key);
@@ -93,7 +123,7 @@ function scanTargetLabel(target, repository) {
 }
 
 function findingVersionLabel(finding) {
-  return [finding.version, scanTargetLabel(finding.scan_target, finding.scan_repository)].filter(Boolean).join(' · ');
+  return [finding.version, finding.scan_path, scanTargetLabel(finding.scan_target, finding.scan_repository)].filter(Boolean).join(' · ');
 }
 
 function projectRepositories(project) {
@@ -120,26 +150,30 @@ function workflowLogs(run, steps) {
     const scanner = entry.step_id === 'scanner';
     const source = scanner ? t('codeScanners') : step && stepLabel(step);
     let event = entry.event;
-    let detail = event === 'run_finished' ? t(entry.detail) : entry.detail;
+    let detail = entry.message ? messageText(entry.message) : event === 'run_finished' ? t(entry.detail) : entry.detail;
+    if (event === 'cache_summary') detail = t('cache_' + entry.detail);
+    if (event.startsWith('database_wait_')) detail = databaseLabel(detail);
     if (scanner && event === 'scanner_configured') {
-      if (detail) detail = detail.split(',').map(name => scannerLabels[name] || name).join(', ');
+      if (detail) detail = detail.split(',').map(name => scannerLabel(name)).join(', ');
       else event = 'scanner_none_configured';
     } else if (scanner && event === 'skipped' && run.mode === 'local') {
       event = 'scanner_skipped_cache';
-    } else if (scanner && event === 'scanner_missing_token') {
-      detail = '';
+    } else if (scanner && entry.message) {
+      detail = [scannerLabel(entry.tool), detail].filter(Boolean).join(' · ');
     } else if (scanner && detail) {
       const [name, ...rest] = detail.split(' · ');
-      detail = [scannerLabels[name] || name, ...rest].join(' · ');
+      detail = [scannerLabel(name), ...rest].join(' · ');
     }
-    const parts = [source, scanTargetLabel(entry.scan_target, entry.scan_repository), t('event_' + event), detail];
+    const parts = [source, scanTargetLabel(entry.scan_target, entry.scan_repository), entry.scan_path, t('event_' + event), detail, entry.scan_reason ? t('scannerReason_' + entry.scan_reason) : ''];
     if (Number.isInteger(entry.findings)) {
       const key = entry.findings === 1 ? 'scannerFindingReported' : 'scannerFindingsReported';
       parts.push(t(key).replace('{count}', entry.findings.toLocaleString(formatLocale())));
     }
-    const error = ['failed', 'interrupted', 'scanner_failed', 'scanner_interrupted', 'scanner_target_failed'].includes(event);
+    const cleanup = event === 'scanner_cleanup_completed' || event === 'scanner_cleanup_failed';
+    const error = ['failed', 'interrupted', 'scanner_failed', 'scanner_interrupted', 'scanner_target_failed', 'scanner_cleanup_failed', 'database_wait_failed', 'database_wait_interrupted'].includes(event);
     const time = entry.at ? `<time>${esc(new Date(entry.at).toLocaleTimeString(formatLocale(),{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}))}</time>` : '<time>—</time>';
-    return `<li class="${error ? 'workflow-log-error' : ''}">${time}<span>${esc(parts.filter(Boolean).join(' · '))}</span></li>`;
+    const text = esc(parts.filter(Boolean).join(' · '));
+    return `<li class="${error ? 'workflow-log-error' : ''}">${time}<span>${cleanup ? `<strong>${text}</strong>` : text}</span></li>`;
   }).join('');
 }
 function workflowElapsed(run){const end=validDate(run.finished_at)?new Date(run.finished_at).getTime():validDate(run.paused_at)?new Date(run.paused_at).getTime():Date.now();const seconds=Math.max(0,Math.floor((end-new Date(run.started_at).getTime())/1000-(run.paused_seconds||0))||0);return Math.floor(seconds/60)+'m '+seconds%60+'s';}
@@ -155,7 +189,7 @@ function stepProgress(step) {
   if (running) parts.push(t('phase_' + (progress.phase || 'request')));
   if (progress.item && (!scanner || running || ['interrupted', 'stopped'].includes(step.status))) {
     if (scanner && progress.scan_target) parts.push(scanTargetLabel(progress.scan_target, progress.scan_repository));
-    parts.push(scanner ? scannerLabels[progress.item] || progress.item : progress.item);
+    parts.push(progress.message ? messageText(progress.message) : scanner ? scannerLabel(progress.item) : progress.item);
   }
   if (progress.wait_seconds && running && progress.phase === 'waiting') parts.push(progress.wait_seconds + 's');
   if (progress.total > 0) parts.push(progress.processed + ' / ' + progress.total + ' ' + t('processed'));
@@ -174,10 +208,117 @@ function stepProgress(step) {
   if (validDate(progress.checked_at)) parts.push(t('sourceDataChecked') + ' ' + fmtDate(progress.checked_at));
   return parts.join(' · ');
 }
-function workflowControls(project,run){if(!['running','pausing','paused','stopping'].includes(run.status))return '';const control=(action,label,danger=false)=>`<button type="button" class="button ${danger?'danger':'secondary'} small" data-action="control-sync" data-control="${action}" data-id="${esc(project.id)}" data-run="${esc(run.id)}" ${run.status==='stopping'?'disabled':''}>${t(label)}</button>`;return (run.status==='stopping'?'':control(run.status==='running'?'pause':'resume',run.status==='running'?'pauseSync':'resumeSync'))+control('stop','stopSync',true);}
-async function controlWorkflow(projectID,runID,action){if(action==='stop'&&!(await confirmAction(t('confirmStopSync'))))return false;await invoke('ControlRun',projectID,runID,action);await refresh();toast(t('control_'+action));return true;}
+function queuedWorkflow(run) {
+  return ['queued', 'waiting_databases'].includes(run.status);
+}
+
+function databaseLabel(source) {
+  if (source === 'osv' || source.startsWith('osv:')) return t('osvDBTitle') + (source.startsWith('osv:') ? ' · ' + source.slice(4) : '');
+
+  return source === 'nvd' ? t('queueNVDLabel') : source === 'cve' ? t('queueCVELabel') : source;
+}
+
+function databaseProgressNumber(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function databaseProgressBar(label, current = 0, total = 0) {
+  const attributes = total > 0 ? `max="${total}" value="${Math.min(current, total)}"` : '';
+  return `<progress class="database-update-progress" ${attributes} aria-label="${esc(label)}"></progress>`;
+}
+
+function databaseUpdateProgressHTML(source, stats = {}) {
+  const phase = stats.phase;
+  const title = databaseLabel(source);
+  const phaseKey = source === 'nvd' ? 'nvdDBPhase_' : source.startsWith('osv') ? 'osvDBPhase_' : 'cveDBPhase_';
+  const label = t(phaseKey + (phase || 'checking'));
+  const parts = [];
+  let progress = '';
+
+  if (phase === 'downloading') {
+    const downloaded = databaseProgressNumber(stats.downloaded);
+    const total = databaseProgressNumber(stats.download_total);
+    const doneMiB = (downloaded / 1048576).toLocaleString(formatLocale(), {minimumFractionDigits:1, maximumFractionDigits:1});
+    const totalMiB = (total / 1048576).toLocaleString(formatLocale(), {minimumFractionDigits:1, maximumFractionDigits:1});
+    const text = total > 0 ? t('queueDownloadBytes').replace('{done}', doneMiB).replace('{total}', totalMiB) : t('queueDownloadedBytes').replace('{done}', doneMiB);
+    const percent = total > 0 ? ` · ${Math.min(100, Math.floor(downloaded / total * 100))}%` : '';
+
+    progress = databaseProgressBar(title + ' · ' + label, downloaded, total);
+    parts.push(text + percent);
+  } else if (phase === 'importing') {
+    const imported = databaseProgressNumber(stats.imported);
+    const total = databaseProgressNumber(stats.import_total);
+    const countKey = source === 'cve' ? 'queueArchiveEntries' : 'queueImportedRecords';
+    const text = total > 0 ? t(countKey + 'Total').replace('{done}', cacheNumber(imported)).replace('{total}', cacheNumber(total)) : t(countKey).replace('{done}', cacheNumber(imported));
+
+    progress = databaseProgressBar(title + ' · ' + label, imported, total);
+    parts.push(text);
+  } else if (stats?.running) {
+    progress = databaseProgressBar(title + ' · ' + label);
+  }
+
+  if (source === 'nvd' && stats.feed) {
+    parts.unshift(stats.feed === 'dictionary' ? t('queueCPEFeed') : t('queueNVDFeed').replace('{feed}', stats.feed));
+  }
+
+  if (source.startsWith('osv') && stats.feed) parts.unshift(t('osvDBCurrentEcosystem').replace('{ecosystem}', stats.feed));
+
+  const feedsDone = databaseProgressNumber(stats?.feeds_done);
+  const feedsTotal = databaseProgressNumber(stats?.feeds_total);
+  const feeds = (source === 'nvd' || source.startsWith('osv')) && stats.resumable && feedsTotal > 0 ? `<div class="database-feed-progress"><span>${esc(t(source.startsWith('osv') ? 'osvDBFeedProgress' : 'nvdDBFeedProgress').replace('{done}', cacheNumber(feedsDone)).replace('{total}', cacheNumber(feedsTotal)))}</span>${databaseProgressBar(title + ' · ' + t('queueFeedsProgress'), feedsDone, feedsTotal)}</div>` : '';
+
+  if (!parts.length && !progress && !feeds) return '';
+
+  return `<div class="database-update-details">${parts.length ? `<p>${esc(parts.join(' · '))}</p>` : ''}${progress}${feeds}</div>`;
+}
+
+function databaseWaitProgress(wait) {
+  const baseStats = wait.source.startsWith('osv:') ? state?.osv_database : state?.[wait.source + '_database'];
+  const ecosystem = wait.source.startsWith('osv:') ? wait.source.slice(4) : '';
+  const item = ecosystem && baseStats?.ecosystems?.find(item => item.ecosystem === ecosystem);
+  const stats = item ? {...(baseStats.feed === ecosystem ? baseStats : {}), ...item, feed:ecosystem} : baseStats;
+  const phase = stats?.phase;
+  const title = databaseLabel(wait.source);
+  const phaseKey = wait.source === 'nvd' ? 'nvdDBPhase_' : wait.source.startsWith('osv') ? 'osvDBPhase_' : 'cveDBPhase_';
+  const label = phase ? t(phaseKey + phase) : t('databaseWait_' + wait.status);
+  const detail = phase ? messageText(stats.error_message || stats.error) : messageText(wait.message || wait.detail);
+  const failed = phase ? ['failed', 'interrupted'].includes(phase) : ['failed', 'interrupted'].includes(wait.status);
+
+  return `<li class="database-wait-card"><div class="database-wait-heading"><strong>${esc(title)}</strong>${pill(label, failed ? 'partial' : stats?.running ? 'running' : '')}</div>${databaseUpdateProgressHTML(wait.source, stats)}${detail ? `<p class="form-error">${esc(detail)}</p>` : ''}</li>`;
+}
+
+function databaseWaitNotice(run) {
+  if (!queuedWorkflow(run)) return '';
+
+  const waits = (run.database_waits || []).map(databaseWaitProgress).join('');
+
+  return `<div class="workflow-database-wait"><ul>${waits}</ul><p>${esc(t('queueAvailableHint'))}</p></div>`;
+}
+
+function workflowControls(project, run) {
+  const control = (action, label, danger = false) => `<button type="button" class="button ${danger ? 'danger' : 'secondary'} small" data-action="control-sync" data-control="${action}" data-id="${esc(project.id)}" data-run="${esc(run.id)}" ${run.status === 'stopping' ? 'disabled' : ''}>${t(label)}</button>`;
+
+  if (queuedWorkflow(run)) {
+    const recovery = run.status === 'waiting_databases' ? control('retry-databases', 'retryDatabases') + control('use-available', 'useAvailableData') : '';
+    return recovery + control('cancel-queued', 'cancelQueuedSync', true);
+  }
+
+  if (!['running', 'pausing', 'paused', 'stopping'].includes(run.status)) return '';
+
+  return (run.status === 'stopping' ? '' : control(run.status === 'running' ? 'pause' : 'resume', run.status === 'running' ? 'pauseSync' : 'resumeSync')) + control('stop', 'stopSync', true);
+}
+
+async function controlWorkflow(projectID, runID, action) {
+  if (action === 'stop' && !(await confirmAction(t('confirmStopSync')))) return false;
+  if (action === 'use-available' && !(await confirmAction(t('confirmUseAvailableData')))) return false;
+
+  await invoke('ControlRun', projectID, runID, action);
+  await refresh();
+  toast(t('control_' + action));
+  return true;
+}
 function codeScanSeverityBreakdown(project, run) {
-  if (run.mode !== 'code' || run.status !== 'complete') return '';
+  if (run.mode !== 'code' || run.status !== 'complete' || run.scanner_jobs?.length && !run.scanners_completed) return '';
   let counts = run.severity_counts;
   let heading = 'severityBreakdown';
   if (!counts && run.count === 0) counts = {};
@@ -196,25 +337,40 @@ function codeScanSeverityBreakdown(project, run) {
     }
   }
   if (!counts) return `<p class="workflow-severity">${esc(t('severityBreakdownUnavailable'))}</p>`;
+  return `<div class="workflow-severity"><span>${esc(t(heading))}</span>${severityCountList(counts)}</div>`;
+}
+
+function severityCountList(counts) {
   const items = findingSeverities.map(severity => {
     const key = severityKey(severity);
     return `<li class="pill ${key}">${esc(t(key))} <strong>${formatResultNumber(counts[severity] ?? 0)}</strong></li>`;
   }).join('');
-  return `<div class="workflow-severity"><span>${esc(t(heading))}</span><ul class="workflow-severity-counts">${items}</ul></div>`;
+  return `<ul class="severity-counts">${items}</ul>`;
+}
+
+function runSelectionLabel(run) {
+  if (run.selection) {
+    return [
+      ...(run.selection.assets || []).map(item => item.label),
+      ...(run.selection.repositories || []).map(item => item.id === 'local' ? t('scanTarget_local') : item.label),
+    ].join(', ');
+  }
+  if (run.mode === 'code') return run.scan_repository || (run.scan_target === 'local' ? t('scanTarget_local') : '');
+  return run.asset_name || t('syncEverything');
 }
 
 function workflowBody(project,run,dismissible=false){
   const steps=run.steps||[],done=steps.filter(s=>!['pending','running'].includes(s.status)).length;
   const current=steps.find(s=>s.status==='running')||(run.status==='running'?steps.find(s=>s.status==='pending'):null);
   const expanded=expandedRuns.has(run.id),detailsID='workflow-details-'+run.id;
-  const statusMessage = {pausing:'pauseHint', paused:'pausedHint', stopping:'stoppingHint', partial:'assessmentPartial'}[run.status];
+  const statusMessage = {pausing:'pauseHint', paused:'pausedHint', stopping:'stoppingHint', partial:'assessmentPartial', queued:'queuedSyncHint', waiting_databases:'blockedSyncHint'}[run.status];
   const summary = run.status === 'interrupted' ? interruptionMessage(run) : statusMessage && t(statusMessage);
   const codeScan = run.mode === 'code';
-  const scope = codeScan ? syncSeverityLabel(run.severity) : `${run.asset_name || t('syncEverything')} · ${syncSeverityLabel(run.severity)} · ${t('mode_' + (run.mode || 'auto'))}`;
+  const scope = [runSelectionLabel(run), syncSeverityLabel(run.severity), codeScan ? '' : t('mode_' + (run.mode || 'auto'))].filter(Boolean).join(' · ');
   const progress=t('stepsFinished').replace('{done}',done).replace('{total}',steps.length);
-  return `<div class="workflow-heading"><div><h3>${t(codeScan ? 'codeScanWorkflow' : 'workflow')} · ${esc(project.name)}</h3><p>${esc(scope)} · ${t('elapsed')} ${workflowElapsed(run)}</p>${validDate(run.data_checked_at)?`<p title="${t('sourceDataHint')}">${t('sourceDataChecked')}: ${fmtDate(run.data_checked_at)}</p>`:''}</div><div class="workflow-actions">${pill(t(run.status),run.status)}${workflowControls(project,run)}<button type="button" class="button secondary small" data-toggle-workflow="${esc(run.id)}" aria-expanded="${expanded}" aria-controls="${esc(detailsID)}">${t(expanded?'showLess':'showMore')}</button>${dismissible&&canDismissWorkflow(run)?`<button type="button" class="icon-button workflow-close" data-dismiss-workflow="${esc(run.id)}" data-project-id="${esc(project.id)}" aria-label="${t('closeWorkflow')}" title="${t('closeWorkflow')}">×</button>`:''}</div></div><div class="workflow-progress"><progress max="${Math.max(1,steps.length)}" value="${done}" aria-label="${esc(progress)}"></progress><span>${esc(progress)}</span></div><div class="workflow-current" role="status">${summary?esc(summary):current?`${esc(stepLabel(current))}<span>${esc(stepProgress(current)||t('phase_queued'))}</span>`:esc(t(run.status==='running'?'finishing':run.status))}</div>${codeScanSeverityBreakdown(project, run)}<div class="workflow-details" id="${esc(detailsID)}" ${expanded?'':'hidden'}>${expanded?`<ol class="workflow-stepper">${steps.map(step=>`<li class="workflow-step ${esc(step.status)}"><span class="workflow-step-marker" aria-hidden="true">${{complete:'✓',running:'↻',failed:'!',interrupted:'!',stopped:'■',skipped:'–',pending:'·'}[step.status]||'·'}</span><div><strong>${esc(stepLabel(step))}</strong><p>${esc(stepProgress(step))}</p></div>${pill(t(step.status),step.status)}</li>`).join('')}</ol><div class="workflow-log-heading"><h3>${t('workflowLogs')}</h3><small>${t('workflowLogsHint')}</small></div><ol class="workflow-logs">${workflowLogs(run, steps)}</ol>`:''}</div>`;
+  return `<div class="workflow-heading"><div><h3>${t(codeScan ? 'codeScanWorkflow' : 'workflow')} · ${esc(project.name)}</h3><p>${esc(scope)} · ${t('elapsed')} ${workflowElapsed(run)}</p>${validDate(run.data_checked_at)?`<p title="${t('sourceDataHint')}">${t('sourceDataChecked')}: ${fmtDate(run.data_checked_at)}</p>`:''}</div><div class="workflow-actions">${pill(t(run.status),run.status)}${workflowControls(project,run)}<button type="button" class="button secondary small" data-toggle-workflow="${esc(run.id)}" aria-expanded="${expanded}" aria-controls="${esc(detailsID)}">${t(expanded?'showLess':'showMore')}</button>${dismissible&&canDismissWorkflow(run)?`<button type="button" class="icon-button workflow-close" data-dismiss-workflow="${esc(run.id)}" data-project-id="${esc(project.id)}" aria-label="${t('closeWorkflow')}" title="${t('closeWorkflow')}">×</button>`:''}</div></div><div class="workflow-progress"><progress max="${Math.max(1,steps.length)}" value="${done}" aria-label="${esc(progress)}"></progress><span>${esc(progress)}</span></div><div class="workflow-current" role="status">${summary?esc(summary):current?`${esc(stepLabel(current))}<span>${esc(stepProgress(current)||t('phase_queued'))}</span>`:esc(t(run.status==='running'?'finishing':run.status))}</div>${databaseWaitNotice(run)}${scannerRunSummary(run)}${codeScanSeverityBreakdown(project, run)}<div class="workflow-details" id="${esc(detailsID)}" ${expanded?'':'hidden'}>${expanded?`<ol class="workflow-stepper">${steps.map(step=>`<li class="workflow-step ${esc(step.status)}"><span class="workflow-step-marker" aria-hidden="true">${{complete:'✓',running:'↻',failed:'!',interrupted:'!',stopped:'■',skipped:'–',pending:'·'}[step.status]||'·'}</span><div><strong>${esc(stepLabel(step))}</strong><p>${esc(stepProgress(step))}</p></div>${pill(t(step.status),step.status)}</li>`).join('')}</ol>${run.scanner_jobs?.length ? `<div class="workflow-log-heading"><h3>${t('scannerRunPlan')}</h3><small>${t('scannerJobsOrderHint')}</small></div>${scannerJobHTML(run.scanner_jobs, run.logs)}` : ''}<div class="workflow-log-heading"><h3>${t('workflowLogs')}</h3><small>${t('workflowLogsHint')}</small></div><ol class="workflow-logs" tabindex="0" aria-label="${esc(t('workflowLogs'))}">${workflowLogs(run, steps)}</ol>`:''}</div>`;
 }
-function workflowRun(project,run,dismissible=false){if(dismissible&&canDismissWorkflow(run)&&dismissedRuns.has(run.id))return '';return run?.steps?.length?`<section class="sync-workflow ${esc(run.status)}" data-sync-project-id="${esc(project.id)}" data-sync-run="${esc(run.id)}" data-sync-scope="${run.asset_id || run.severity || run.mode === 'code' ? 'scoped' : 'full'}" data-workflow-dismissible="${dismissible}">${workflowBody(project,run,dismissible)}</section>`:'';}
+function workflowRun(project,run,dismissible=false){if(dismissible&&canDismissWorkflow(run)&&dismissedRuns.has(run.id))return '';return run?.steps?.length?`<section class="sync-workflow ${esc(run.status)}" data-sync-project-id="${esc(project.id)}" data-sync-run="${esc(run.id)}" data-sync-scope="${scopedAssessment(run) ? 'scoped' : 'full'}" data-workflow-dismissible="${dismissible}">${workflowBody(project,run,dismissible)}</section>`:'';}
 function mountActiveSyncs(){if(['project','settings','activity'].includes(route()[0]))return;const html=state.projects.filter(p=>p.syncing).map(p=>workflowRun(p,p.runs?.[0])).join('');$('.page-heading')?.insertAdjacentHTML('afterend','<div id="active-syncs">'+html+'</div>');}
 function updateSyncPanels(runID){
   for (const el of $$('[data-sync-run]')) {
@@ -229,7 +385,17 @@ function updateSyncPanels(runID){
     }
     // Replacing paused or finished panels during polling restarts their animations.
     if (runID || (run.status !== 'paused' && !canDismissWorkflow(run))) {
+      const logs = $('.workflow-logs', el);
+      const scrollTop = logs?.scrollTop;
+      const focused = logs && document.activeElement === logs;
       el.innerHTML = workflowBody(project, run, dismissible);
+      if (logs) {
+        const updated = $('.workflow-logs', el);
+        if (updated) {
+          updated.scrollTop = scrollTop;
+          if (focused) updated.focus({preventScroll:true});
+        }
+      }
     }
   }
 }
@@ -239,9 +405,22 @@ function toggleWorkflow(id) {
   else expandedRuns.add(id);
   updateSyncPanels(id);
 }
-function progressSnapshot(st){const {cache_stats,version,...rest}=st;return JSON.stringify({...rest,projects:st.projects.map(p=>({...p,runs:(p.runs||[]).map(({steps,logs,data_checked_at,...run})=>run)}))});}
+function progressSnapshot(st){const {cache_stats,cve_database,nvd_database,osv_database,version,...rest}=st;return JSON.stringify({...rest,projects:st.projects.map(p=>({...p,runs:(p.runs||[]).map(({steps,logs,data_checked_at,...run})=>run)}))});}
 function applyPollingState(next) {
   const [page, id, view] = route();
+  if (next.osv_database) {
+    state.osv_database = next.osv_database;
+    if (page === 'settings') updateOSVDatabaseStatus(next.osv_database);
+  }
+
+  if (next.nvd_database) {
+    state.nvd_database = next.nvd_database;
+    if (page === 'settings') updateNVDDatabaseStatus(next.nvd_database);
+  }
+  if (next.cve_database) {
+    state.cve_database = next.cve_database;
+    if (page === 'settings') updateCVEDatabaseStatus(next.cve_database);
+  }
   if (next.projects === undefined) {
     state.cache_stats = next.cache_stats;
     if (page === 'settings') updateCacheMetrics(next.cache_stats);
@@ -271,24 +450,121 @@ function applyPollingState(next) {
     render();
   }
 }
-function latestFullRun(p){return p.runs?.find(r=>!r.asset_id&&!r.severity&&r.mode!=='code');}
-function projectStatus(p){const full=latestFullRun(p);if(p.syncing){const status=p.runs?.[0]?.status;return ['pausing','paused','stopping'].includes(status)?pill(t(status),status):pill(t(p.runs?.[0]?.mode==='code'?'scanningCode':'syncing'),'running pulse');}if(full&&full.status!=='complete')return pill(t(full.status),full.status);if(p.revision!==p.assessed_revision&&p.assessed_revision)return pill(t('stale'),'review');if(!validDate(p.last_sync))return pill(t('fullAssessmentNeeded'));return pill(t('complete'));}
+function scopedAssessment(run){return Boolean(run.selection || run.asset_id || run.severity || run.mode === 'code');}
+function latestFullRun(p){return p.runs?.find(r=>!scopedAssessment(r));}
+function projectNeedsAssessment(project) {
+  return (project.assets || []).some(asset => asset.needs_assessment);
+}
+
+function projectStatus(p){const full=latestFullRun(p);if(p.syncing){const status=p.runs?.[0]?.status;return ['pausing','paused','stopping','queued','waiting_databases'].includes(status)?pill(t(status),status):pill(t(p.runs?.[0]?.mode==='code'?'scanningCode':'syncing'),'running pulse');}if(projectNeedsAssessment(p))return pill(t(p.runs?.length||p.findings?.length?'stale':'fullAssessmentNeeded'),'review');if(full&&full.status!=='complete')return pill(t(full.status),full.status);if(p.revision!==p.assessed_revision&&p.assessed_revision)return pill(t('stale'),'review');if(!validDate(p.last_sync))return pill(t('fullAssessmentNeeded'));return pill(t('complete'));}
 function syncSeverityLabel(severity){return severity?t(severityKey(severity)):t('anySeverity');}
 function severityOptions(selected=''){return `<option value="">${t('anySeverity')}</option>`+findingSeverities.map(value=>`<option value="${value}" ${selected===value?'selected':''}>${syncSeverityLabel(value)}</option>`).join('');}
-function syncAllControls(primary=false){return `<div class="sync-all-controls"><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-all-severity" data-sync-all-severity aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}">${severityOptions(syncAllSeverity)}</select></label>${button('syncAll','sync-all',primary,'refresh')}</div>`;}
-function syncControls(p){const selected=p.assets.some(a=>a.id===syncSelection[p.id])?syncSelection[p.id]:'';return `<div class="sync-controls"><label class="sync-scope"><span>${t('syncScope')}</span><select id="sync-asset" data-sync-project="${p.id}" aria-label="${t('syncScope')}" ${p.syncing?'disabled':''}><option value="">${t('syncEverything')}</option>${p.assets.map(a=>`<option value="${esc(a.id)}" ${selected===a.id?'selected':''}>${esc(t(a.kind)+' · '+a.name+' '+a.version)}</option>`).join('')}</select></label><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-severity" data-sync-severity-project="${p.id}" aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}" ${p.syncing?'disabled':''}>${severityOptions(syncSeveritySelection[p.id]||'')}</select></label><label class="sync-scope sync-mode"><span>${t('syncMode')}</span><select id="sync-mode" data-sync-mode-project="${p.id}" aria-label="${t('syncMode')}" ${p.syncing?'disabled':''}>${['auto','local','refresh'].map(mode=>`<option value="${mode}" ${(syncModeSelection[p.id]||'auto')===mode?'selected':''}>${t('mode_'+mode)}</option>`).join('')}</select></label><button class="button primary" data-action="sync" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('refresh')}${t(p.syncing&&p.runs?.[0]?.mode!=='code'?'syncing':'sync')}</button></div>`;}
+function syncAllControls(primary=false){return `<div class="sync-all-controls"><label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-all-severity" data-sync-all-severity aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}">${severityOptions(syncAllSeverity)}</select></label>${button('syncAll','sync-all',primary,'search')}</div>`;}
 
-function projectList(projects = state.projects, detailed = false) {
+function assessmentOptions(project) {
+  return [
+    ...project.assets.map(asset => ({key:asset.id, label:t(asset.kind) + ' · ' + asset.name + ' ' + asset.version})),
+    ...scanLocations(project).map(location => ({...location, label:t('scanner') + ' · ' + location.label})),
+  ];
+}
+
+function assessmentSelection(project) {
+  const saved = syncSelection[project.id];
+  if (!Array.isArray(saved) && !saved) return null;
+  const values = new Set(Array.isArray(saved) ? saved : [saved]);
+  return assessmentOptions(project).filter(option => values.has(option.key));
+}
+
+function assessmentActionKey(project) {
+  if (project.syncing && queuedWorkflow(project.runs?.[0] || {})) return project.runs[0].status;
+  if (project.syncing) return project.runs?.[0]?.mode === 'code' ? 'scanningCode' : 'syncing';
+  const selected = assessmentSelection(project);
+  if (selected?.some(option => option.target)) return selected.some(option => !option.target) ? 'sync' : 'runCodeScan';
+  return selected !== null || syncModeSelection[project.id] === 'local' ? 'matchVDBs' : 'sync';
+}
+
+function assessmentSummary(project, selected = assessmentSelection(project)) {
+  if (selected === null) return t('syncEverything');
+  if (selected.length === 0) return t('assessmentChooseItems');
+  if (selected.length === 1) return selected[0].label;
+  return t('assessmentSelectedCount').replace('{count}', formatResultNumber(selected.length));
+}
+
+function assessmentHint(project, selected = assessmentSelection(project)) {
+  if (selected?.some(option => option.target)) return t('selectedAssessmentHint');
+  if (selected?.length === 0) return t('assessmentChooseItems');
+  if (selected?.length > 1) return t('selectedComponentsHint');
+  return t(selected === null ? 'assessmentActionHint' : 'componentMatchHint');
+}
+
+function updateAssessmentAction(projectID) {
+  const project = state?.projects?.find(project => project.id === projectID);
+  const action = $('#project-assessment-action');
+  if (!project || !action) return;
+
+  const selected = assessmentSelection(project);
+  const repositories = selected?.some(option => option.target);
+  action.innerHTML = icon('search') + esc(t(assessmentActionKey(project)));
+  action.title = assessmentHint(project, selected);
+  action.disabled = Boolean(project.syncing || selected?.length === 0);
+  const mode = $('#sync-mode');
+  if (mode) {
+    mode.disabled = Boolean(project.syncing || repositories);
+    mode.value = repositories ? 'auto' : syncModeSelection[projectID] || 'auto';
+  }
+  const summary = $('#assessment-scope-summary');
+  if (summary) summary.textContent = assessmentSummary(project, selected);
+  const keys = selected && new Set(selected.map(option => option.key));
+  $$('[data-assessment-item]').forEach(input => {input.checked = Boolean(keys?.has(input.value));});
+  const everything = $('[data-assessment-everything]');
+  if (everything) everything.checked = selected === null;
+}
+
+function changeAssessmentSelection(input) {
+  const project = state?.projects?.find(project => project.id === input.dataset.syncProject);
+  if (!project || project.syncing) return;
+
+  if (input.matches('[data-assessment-everything]')) {
+    syncSelection[project.id] = input.checked ? null : [];
+  } else {
+    const keys = new Set((assessmentSelection(project) || []).map(option => option.key));
+    if (input.checked) keys.add(input.value);
+    else keys.delete(input.value);
+    syncSelection[project.id] = [...keys];
+  }
+  updateAssessmentAction(project.id);
+}
+
+function assessmentPicker(project, label) {
+  const selected = assessmentSelection(project);
+  const keys = new Set((selected || []).map(option => option.key));
+  const options = assessmentOptions(project);
+  const item = option => `<label class="scope-choice"><input type="checkbox" data-assessment-item data-sync-project="${esc(project.id)}" value="${esc(option.key)}" ${keys.has(option.key) ? 'checked' : ''} ${project.syncing ? 'disabled' : ''}><span>${esc(option.label)}</span></label>`;
+  const components = options.filter(option => !option.target);
+  const repositories = options.filter(option => option.target);
+  const group = (key, items) => items.length ? `<div class="scope-group" role="group" aria-label="${esc(t(key))}"><strong>${esc(t(key))}</strong>${items.map(item).join('')}</div>` : '';
+
+  return `<div class="sync-scope scope-field"><span id="assessment-scope-label">${esc(label)}</span><details class="scope-picker" id="assessment-scope-picker"><summary aria-labelledby="assessment-scope-label assessment-scope-summary" aria-disabled="${Boolean(project.syncing)}" ${project.syncing ? 'tabindex="-1"' : ''}><span id="assessment-scope-summary">${esc(assessmentSummary(project, selected))}</span></summary><div class="scope-picker-menu" tabindex="0" role="region" aria-label="${esc(t('scopeChoices'))}">${scopeSearchHTML(project.syncing)}<label class="scope-choice scope-everything"><input type="checkbox" data-assessment-everything data-sync-project="${esc(project.id)}" ${selected === null ? 'checked' : ''} ${project.syncing ? 'disabled' : ''}><span>${t('syncEverything')}</span></label><p>${esc(t('assessmentSelectionHint'))}</p>${group('techStack', components)}${group('assessmentRepositories', repositories)}</div></details></div>`;
+}
+
+function syncControls(p) {
+  const selected = assessmentSelection(p);
+  const repositories = selected?.some(option => option.target);
+  const label = t(scanLocations(p).length ? 'syncScopeRepository' : 'syncScope');
+  const mode = repositories ? 'auto' : syncModeSelection[p.id] || 'auto';
+
+  return `<div class="sync-controls">${assessmentPicker(p, label)}<label class="sync-scope sync-severity"><span>${t('syncSeverity')}</span><select id="sync-severity" data-sync-severity-project="${p.id}" aria-label="${t('syncSeverity')}" title="${t('severitySyncHint')}" ${p.syncing ? 'disabled' : ''}>${severityOptions(syncSeveritySelection[p.id] || '')}</select></label><label class="sync-scope sync-mode"><span>${t('syncMode')}</span><select id="sync-mode" data-sync-mode-project="${p.id}" aria-label="${t('syncMode')}" ${p.syncing || repositories ? 'disabled' : ''}>${['auto','local','refresh'].map(value => `<option value="${value}" ${mode === value ? 'selected' : ''}>${t('mode_' + value)}</option>`).join('')}</select></label><button class="button primary" id="project-assessment-action" data-action="sync" data-id="${p.id}" title="${esc(assessmentHint(p, selected))}" ${p.syncing || selected?.length === 0 ? 'disabled' : ''}>${icon('search')}${esc(t(assessmentActionKey(p)))}</button></div>`;
+}
+
+function projectList(projects = state.projects, showEdit = false) {
   if (!projects.length) return empty('noProjects','noProjectsSub','projects',button('firstProject','new-project',true,'plus')+`<button class="sample-button" data-action="sample">${t('sample')}</button>`);
   return projects.map(project => {
     const id = esc(project.id);
     const components = `${formatResultNumber(project.assets?.length ?? 0)} ${t('components')}`;
     const description = esc(project.description);
-    const details = detailed
-      ? projectListSummary(project, components) + (description ? `<p>${description}</p>` : '')
-      : `<p>${components}${description ? ' · ' + description : ''}</p>`;
+    const details = projectListSummary(project, components) + (description ? `<p>${description}</p>` : '');
     const card = `<a class="project-card" href="#project/${id}"><div class="project-avatar">${esc(project.name.slice(0, 2).toUpperCase())}</div><div class="project-info"><strong>${esc(project.name)}</strong>${details}</div><div class="project-card-stats">${projectStatus(project)}</div><span class="chevron">›</span></a>`;
-    if (!detailed) return card;
+    if (!showEdit) return card;
     return `<div class="project-list-row">${card}<button type="button" class="button secondary small project-list-edit" data-action="edit-project" data-id="${id}" aria-label="${esc(t('editProject') + ' · ' + project.name)}" ${project.syncing ? 'disabled' : ''}>${t('editProject')}</button></div>`;
   }).join('');
 }
@@ -302,7 +578,7 @@ function projectListSummary(project, components) {
   for (const finding of project.findings || []) {
     if (finding.severity === 'CRITICAL') critical++;
   }
-  return `<p class="project-list-summary"><span>${components}</span>${repositories}${pill(t('critical') + ' ' + formatResultNumber(critical), critical ? 'critical' : '')}</p>`;
+  return `<p class="project-list-summary"><span>${components}</span>${repositories}${pill(t('critical') + ' ' + formatResultNumber(critical), critical ? 'critical' : '')}${projectNeedsAssessment(project) || projectNeedsCodeScan(project) ? pill(t('severityCountsOutdated'), 'review') : ''}</p>`;
 }
 function sourcesPanel(){return `<div class="panel sources-panel"><div class="panel-head"><div><h2>${t('dataSources')}</h2><p>${t('sourcesSub')}</p></div>${icon('stack')}</div>${[['nvd','NVD','discovery'],['cve','CVE','enrichment'],['osv','OSV','packageMatching']].map(([id,name,note])=>`<div class="source-item"><span class="source-symbol">${name}</span><div><strong>${name==='NVD'?'NIST NVD':name==='CVE'?'CVE Program':'OSV.dev'}</strong><small>${t(note)} · ${t(state.settings.sources[id]?'enabled':'disabled')}</small></div><span class="status-dot ${state.settings.sources[id]?'':'off'}"></span></div>`).join('')}<p class="source-note">${t('sourceNote')}</p></div>`;}
 function breakdown(counts) {
@@ -316,7 +592,7 @@ function breakdown(counts) {
 }
 function canDeleteActivity(run){return !!run&&['interrupted','partial','failed','stopped'].includes(run.status);}
 async function deleteActivity(projectID,runID){const p=state.projects.find(p=>p.id===projectID),run=p?.runs?.find(r=>r.id===runID);if(!canDeleteActivity(run))return false;if(!(await confirmAction(t('confirmDeleteActivity')+'\n\n'+p.name+' · '+fmtDate(run.started_at))))return false;await invoke('DeleteRun',projectID,runID);expandedRuns.delete(runID);dismissedRuns.delete(runID);await refresh();toast(t('activityDeleted'));return true;}
-function activityList(runs=allRuns(),compact=false){if(!runs.length)return empty('noActivity','noActivitySub','activity');return runs.map(r=>`<div class="activity-item"><span class="activity-symbol">${r.status==='complete'?'✓':r.status==='running'?'↻':['pausing','paused'].includes(r.status)?'Ⅱ':['stopping','stopped'].includes(r.status)?'■':'!'}</span><div class="activity-content"><strong><a href="#project/${r.project_id}">${esc(r.project_name)}</a> · ${t(r.mode==='code'?'codeScan':'assessment')}</strong><p>${t(r.trigger==='schedule'?'scheduled':'manual')} · ${r.mode==='code'?'':esc(r.asset_id?r.asset_name:t('syncEverything'))+' · '} ${syncSeverityLabel(r.severity)} · ${t(r.status)} · ${r.count} ${t('findings')}</p>${workflowRun({id:r.project_id,name:r.project_name},r)}${r.warnings?.length?`<details><summary>${t('warnings')} (${r.warnings.length})</summary><ul>${r.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></details>`:''}</div><div class="activity-actions"><span class="activity-time">${fmtDate(r.started_at)}</span>${canDeleteActivity(r)?`<button type="button" class="button danger small" data-action="delete-activity" data-id="${esc(r.project_id)}" data-run="${esc(r.id)}">${t('deleteActivity')}</button>`:''}</div></div>`).join('');}
+function activityList(runs=allRuns(),compact=false){if(!runs.length)return empty('noActivity','noActivitySub','activity');return runs.map(r=>`<div class="activity-item"><span class="activity-symbol">${r.status==='complete'?'✓':r.status==='running'?'↻':['pausing','paused'].includes(r.status)?'Ⅱ':['stopping','stopped'].includes(r.status)?'■':'!'}</span><div class="activity-content"><strong><a href="#project/${r.project_id}">${esc(r.project_name)}</a> · ${t(r.mode==='code'?'codeScan':'assessment')}</strong><p>${t(r.trigger==='schedule'?'scheduled':'manual')} · ${runSelectionLabel(r)?esc(runSelectionLabel(r))+' · ':''} ${syncSeverityLabel(r.severity)} · ${t(r.status)} · ${r.count} ${t('findings')}</p>${workflowRun({id:r.project_id,name:r.project_name},r)}${r.warnings?.length?`<details><summary>${t('warnings')} (${r.warnings.length})</summary><ul>${runWarnings(r).map(w=>`<li>${esc(w)}</li>`).join('')}</ul></details>`:''}</div><div class="activity-actions"><span class="activity-time">${fmtDate(r.started_at)}</span>${canDeleteActivity(r)?`<button type="button" class="button danger small" data-action="delete-activity" data-id="${esc(r.project_id)}" data-run="${esc(r.id)}">${t('deleteActivity')}</button>`:''}</div></div>`).join('');}
 function renderOverview(){
   const counts = Object.create(null);
   let total = 0, assets = 0;
@@ -329,21 +605,153 @@ function renderOverview(){
   }
   $('#main').innerHTML=heading(t('securityOverview'),t('overviewSub'),(state.projects.length?syncAllControls(false):'')+button('addProject','new-project',true,'plus'),'VULNERABILITY MANAGEMENT')+`<div class="metrics">${[['totalFindings',total,'allSeverities','vulnerabilities',''],['critical',counts.CRITICAL||0,'criticalNote','vulnerabilities','critical-text'],['high',counts.HIGH||0,'highNote','activity','high-text'],['projectCount',state.projects.length,'components','projects','']].map(([key,value,note,ico,cls])=>`<div class="metric"><div class="metric-top"><span>${t(key)}</span>${icon(ico)}</div><div class="metric-value ${cls}">${value}</div><div class="metric-note ${cls}">${cls?'<span class="dot"></span>':''}${key==='projectCount'?assets+' ':''}${t(note)}</div></div>`).join('')}</div><div class="dashboard-grid"><div><div class="panel"><div class="panel-head"><div><h2>${t('yourProjects')}</h2><p>${t('projectPanelSub')}</p></div><a class="text-link" href="#projects">${t('viewAll')} ↗</a></div>${projectList(state.projects.slice(0,5))}<div class="panel-bottom">${icon('check')}${t('localInventory')}</div></div><div class="section-caption"><h2>${t('recentActivity')}</h2><a class="text-link" href="#activity">${t('viewAll')} ↗</a></div><div class="panel">${activityList(allRuns().slice(0,3),true)}</div></div><aside class="dashboard-aside">${sourcesPanel()}${total?breakdown(counts):`<div class="insight">${icon('leaf')}<div class="eyebrow">${t('schedule').toUpperCase()}</div><h3>${t('quietTitle')}</h3><p>${t('quietText')}</p></div>`}</aside></div>`;}
 function stackKey(projectID,assetID){return JSON.stringify([projectID,assetID]);}
-function techStackOptions(projectID){
-  const scope=projectID||filter.project;
-  return state.projects.filter(p=>!scope||p.id===scope).flatMap(p=>{
-    const entries=new Map();
-    for(const a of p.assets||[])entries.set(a.id,{key:stackKey(p.id,a.id),label:t(a.kind)+' · '+a.name+' '+a.version});
-    for(const f of p.findings||[])if(!entries.has(f.asset_id))entries.set(f.asset_id,{key:stackKey(p.id,f.asset_id),label:t(f.match==='scanner'?'scanner':'previousInventory')+' · '+f.component+' '+findingVersionLabel(f)});
-    return [...entries.values()].map(option=>({...option,label:(projectID?'':p.name+' · ')+option.label}));
+function scanLocationKey(projectID, target) {
+  return JSON.stringify([projectID, 'scanner', target]);
+}
+function scanLocations(project) {
+  const repositories = state?.scan_repositories?.[project.id] || [];
+  const labelCounts = new Map();
+  for (const {label} of repositories) labelCounts.set(label, (labelCounts.get(label) || 0) + 1);
+  const labelIndex = new Map();
+  const locations = repositories.map(repository => {
+    let label = repository.label;
+    const uniqueLabel = labelCounts.get(label) === 1;
+    if (!uniqueLabel) {
+      const index = (labelIndex.get(label) || 0) + 1;
+      labelIndex.set(label, index);
+      label += ` (${formatResultNumber(index)})`;
+    }
+    return {key:scanLocationKey(project.id, repository.key), target:repository.key, label, legacyLabel:uniqueLabel ? repository.label : ''};
+  });
+  if (project.local_path) locations.push({key:scanLocationKey(project.id, 'local'), target:'local', label:t('scanTarget_local')});
+  return locations;
+}
+function findingMatchesStackScope(finding, scope) {
+  if (finding.match !== 'scanner') return scope.assets.has(finding.asset_id);
+  const assetID = finding.asset_id || '';
+  if (scope.locations.has('local') && (finding.scan_target === 'local' || assetID.startsWith('code:local:'))) return true;
+  const recordedTarget = assetID.match(/^code:(remote:[0-9a-f]{64}):/)?.[1];
+  if (recordedTarget) return scope.locations.has(recordedTarget);
+  return scope.legacyLabels.has(finding.scan_repository);
+}
+function techStackOptions(projectID) {
+  const scope = projectID || filter.project;
+  return state.projects.filter(project => !scope || project.id === scope).flatMap(project => {
+    const entries = new Map();
+    for (const asset of project.assets || []) {
+      entries.set(asset.id, {key:stackKey(project.id, asset.id), label:t(asset.kind) + ' · ' + asset.name + ' ' + asset.version});
+    }
+    for (const finding of project.findings || []) {
+      if (finding.match === 'scanner' || entries.has(finding.asset_id)) continue;
+      entries.set(finding.asset_id, {
+        key:stackKey(project.id, finding.asset_id),
+        label:t('previousInventory') + ' · ' + finding.component + ' ' + findingVersionLabel(finding),
+      });
+    }
+    const scanners = scanLocations(project).map(({key, label}) => ({key, repository:true, label:t('scanner') + ' · ' + label}));
+    const prefix = projectID ? '' : project.name + ' · ';
+    return [...entries.values(), ...scanners].map(option => ({...option, label:prefix + option.label}));
   });
 }
-function techStackFilterOptions(projectID){
-  const options=techStackOptions(projectID);
-  if(filter.stack&&!options.some(option=>option.key===filter.stack))filter.stack='';
-  return `<option value="">${t('anyTechStack')}</option>`+options.map(option=>`<option value="${esc(option.key)}" ${filter.stack===option.key?'selected':''}>${esc(option.label)}</option>`).join('');
+
+function techStackFilterSelection() {
+  if (Array.isArray(filter.stack)) return [...new Set(filter.stack)];
+  return filter.stack ? [filter.stack] : null;
 }
-function techStackFilterHTML(projectID){return `<select id="tech-stack-filter" aria-label="${t('techStack')}">${techStackFilterOptions(projectID)}</select>`;}
+
+function pruneTechStackFilter(options) {
+  const selected = techStackFilterSelection();
+  if (selected === null) return;
+  const available = new Set(options.map(option => option.key));
+  const retained = selected.filter(key => available.has(key));
+  filter.stack = selected.length && !retained.length ? '' : retained;
+}
+
+function techStackFilterSummary(projectID, options = techStackOptions(projectID)) {
+  const selected = techStackFilterSelection();
+  if (selected === null) return techStackFilterLabel(projectID);
+  if (!selected.length) return t('filterNoItems');
+  if (selected.length === 1) return options.find(option => option.key === selected[0])?.label || t('filterNoItems');
+  return t('filterSelectedCount').replace('{count}', formatResultNumber(selected.length));
+}
+
+function techStackFilterOptions(projectID, options = techStackOptions(projectID)) {
+  pruneTechStackFilter(options);
+  const selected = techStackFilterSelection();
+  const keys = new Set(selected || []);
+  const item = option => `<label class="scope-choice"><input type="checkbox" data-stack-filter-item value="${esc(option.key)}" ${keys.has(option.key) ? 'checked' : ''}><span>${esc(option.label)}</span></label>`;
+  const group = (key, items) => items.length ? `<div class="scope-group" role="group" aria-label="${esc(t(key))}"><strong>${esc(t(key))}</strong>${items.map(item).join('')}</div>` : '';
+
+  return `<label class="scope-choice scope-everything"><input type="checkbox" data-stack-filter-all ${selected === null ? 'checked' : ''}><span>${esc(techStackFilterLabel(projectID))}</span></label><p>${esc(t('filterMultipleHint'))}</p>${group('techStack', options.filter(option => !option.repository))}${group('assessmentRepositories', options.filter(option => option.repository))}`;
+}
+
+function updateTechStackFilter(projectID, replaceOptions = false) {
+  const options = techStackOptions(projectID);
+  if (replaceOptions) {
+    $('#tech-stack-filter-options').innerHTML = techStackFilterOptions(projectID, options);
+    const search = $('#tech-stack-filter [data-scope-search]');
+    if (search?.value) filterScopeChoices(search);
+  }
+  $('#tech-stack-filter').setAttribute('aria-label', techStackFilterLabel(projectID));
+  $('#tech-stack-filter > summary')?.setAttribute('aria-label', techStackFilterLabel(projectID));
+  $('#tech-stack-filter-summary').textContent = techStackFilterSummary(projectID, options);
+  const selected = techStackFilterSelection();
+  const keys = new Set(selected || []);
+  $$('[data-stack-filter-item]').forEach(input => {input.checked = keys.has(input.value);});
+  const all = $('[data-stack-filter-all]');
+  if (all) all.checked = selected === null;
+}
+
+function changeTechStackFilterSelection(input, projectID) {
+  if (input.matches('[data-stack-filter-all]')) filter.stack = input.checked ? '' : [];
+  else {
+    const keys = new Set(techStackFilterSelection() || []);
+    if (input.checked) keys.add(input.value);
+    else keys.delete(input.value);
+    filter.stack = [...keys];
+  }
+  updateTechStackFilter(projectID);
+  findingsPage = 1;
+  $('#finding-results').innerHTML = findingsTable(projectID);
+}
+function techStackFilterLabel(projectID) {
+  const scope = projectID || filter.project;
+  const repositories = state.projects.some(project => (!scope || project.id === scope) && scanLocations(project).length);
+  return t(repositories ? 'anyTechStackRepository' : 'anyTechStack');
+}
+function techStackFilterHTML(projectID) {
+  const options = techStackOptions(projectID);
+  const choices = techStackFilterOptions(projectID, options);
+  return `<details class="scope-picker stack-filter-picker" id="tech-stack-filter" aria-label="${esc(techStackFilterLabel(projectID))}"><summary aria-label="${esc(techStackFilterLabel(projectID))}" aria-describedby="tech-stack-filter-summary"><span id="tech-stack-filter-summary">${esc(techStackFilterSummary(projectID, options))}</span></summary><div class="scope-picker-menu" tabindex="0" role="region" aria-label="${esc(t('scopeChoices'))}">${scopeSearchHTML()}<div id="tech-stack-filter-options">${choices}</div></div></details>`;
+}
+
+function techStackFilterScopes() {
+  const selected = techStackFilterSelection();
+  if (selected === null) return null;
+  const scopes = new Map();
+  const projects = new Map(state.projects.map(project => [project.id, project]));
+  const locationsByProject = new Map();
+  for (const key of selected) {
+    let parts;
+    try { parts = JSON.parse(key); } catch { continue; }
+    if (!Array.isArray(parts) || ![2, 3].includes(parts.length)) continue;
+    const [projectID, assetID, target] = parts;
+    const project = projects.get(projectID);
+    if (!project) continue;
+    if (!scopes.has(projectID)) scopes.set(projectID, {assets:new Set(), locations:new Map(), legacyLabels:new Set()});
+    const scope = scopes.get(projectID);
+    if (parts.length === 2) scope.assets.add(assetID);
+    else if (assetID === 'scanner') {
+      if (!locationsByProject.has(projectID)) locationsByProject.set(projectID, new Map(scanLocations(project).map(location => [location.target, location])));
+      const location = locationsByProject.get(projectID).get(target);
+      if (location) {
+        scope.locations.set(target, location);
+        if (location.legacyLabel) scope.legacyLabels.add(location.legacyLabel);
+      }
+    }
+  }
+  return scopes;
+}
 function filtersHTML(showProject,projectID){return `<div class="filters"><div class="search-wrap">${icon('search')}<input id="finding-search" aria-label="${t('search')}" placeholder="${t('search')}" value="${esc(filter.search)}"></div><select id="severity-filter" aria-label="${t('severity')}">${severityOptions(filter.severity)}</select>${showProject?`<select id="project-filter" aria-label="${t('project')}"><option value="">${t('anyProject')}</option>${state.projects.map(p=>`<option value="${p.id}" ${filter.project===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>`:''}${techStackFilterHTML(projectID)}<select id="match-filter" aria-label="${t('match')}"><option value="">${t('anyMatch')}</option>${['review','package','cpe','scanner'].map(m=>`<option value="${m}" ${filter.match===m?'selected':''}>${t(m)}</option>`).join('')}</select></div>`;}
 function resultsSummary(matches, total, start, filtered) {
   let text;
@@ -371,18 +779,26 @@ function findingPagination(pages) {
 }
 function findingsTable(projectID) {
   const search = filter.search.toLowerCase();
+  const scopes = techStackFilterScopes();
   const items = [];
   let total = 0;
+  const selectedSeverityCounts = scopes === null ? null : {};
   for (const project of state.projects) {
     if (projectID && projectID !== project.id) continue;
     const findings = project.findings || [];
     total += findings.length;
     if (!projectID && filter.project && filter.project !== project.id) continue;
+    const scope = scopes?.get(project.id);
+    if (scopes && !scope) continue;
     for (const finding of findings) {
-      if ((filter.severity && filter.severity !== finding.severity) ||
-          (filter.stack && filter.stack !== stackKey(project.id, finding.asset_id)) ||
-          (filter.match && filter.match !== finding.match) ||
+      if (scope && !findingMatchesStackScope(finding, scope)) continue;
+      if ((filter.match && filter.match !== finding.match) ||
           (search && ![finding.id, finding.title, finding.component].join(' ').toLowerCase().includes(search))) continue;
+      const severity = findingSeverities.includes(finding.severity) ? finding.severity : 'UNKNOWN';
+      if (selectedSeverityCounts) {
+        selectedSeverityCounts[severity] = (selectedSeverityCounts[severity] || 0) + 1;
+      }
+      if (filter.severity && filter.severity !== severity) continue;
       items.push({finding, project});
     }
   }
@@ -390,8 +806,10 @@ function findingsTable(projectID) {
   const pages = Math.max(1, Math.ceil(items.length / findingsPerPage));
   findingsPage = Math.max(1, Math.min(findingsPage, pages));
   const start = (findingsPage - 1) * findingsPerPage;
-  const filtered = filter.search || filter.severity || filter.stack || filter.match || (!projectID && filter.project);
-  const toolbar = `<div class="findings-toolbar">${resultsSummary(items.length, total, start, filtered)}${findingPagination(pages)}</div>`;
+  const filtered = filter.search || filter.severity || scopes !== null || filter.match || (!projectID && filter.project);
+  const severitySummary = selectedSeverityCounts
+    ? `<div class="scan-location-severity"><span>${t('severityBreakdown')}</span>${severityCountList(selectedSeverityCounts)}</div>` : '';
+  const toolbar = `<div class="findings-toolbar">${resultsSummary(items.length, total, start, filtered)}${findingPagination(pages)}</div>` + severitySummary;
   if (!items.length) {
     return toolbar + (filtered ? empty('noMatchingFindings','noMatchingFindingsSub','vulnerabilities') : empty('noFindings','noFindingsSub','vulnerabilities'));
   }
@@ -408,10 +826,15 @@ function bindFilters(projectID) {
     filter.search = e.target.value;
     updateResults();
   });
-  for (const [id,key] of [['severity-filter','severity'],['project-filter','project'],['tech-stack-filter','stack'],['match-filter','match']]) {
+  $('#tech-stack-filter')?.addEventListener('change', e => {
+    if (e.target.matches('[data-stack-filter-item], [data-stack-filter-all]')) changeTechStackFilterSelection(e.target, projectID);
+  });
+  for (const [id,key] of [['severity-filter','severity'],['project-filter','project'],['match-filter','match']]) {
     $('#'+id)?.addEventListener('change', e => {
       filter[key] = e.target.value;
-      if (key === 'project') $('#tech-stack-filter').innerHTML = techStackFilterOptions(projectID);
+      if (key === 'project') {
+        updateTechStackFilter(projectID, true);
+      }
       updateResults();
     });
   }
@@ -425,8 +848,16 @@ function turnFindingPage(direction) {
     results.querySelector('[data-finding-page]:not(:disabled)');
   button?.focus({preventScroll:true});
 }
-function componentSyncControls(project,asset){const selected=componentSyncSeveritySelection.get(stackKey(project.id,asset.id))||'';return `<div class="stack-sync-controls"><label class="sync-scope stack-sync-severity"><span>${t('syncSeverity')}</span><select data-sync-component-severity data-project-id="${esc(project.id)}" data-asset-id="${esc(asset.id)}" title="${t('severitySyncHint')}" ${project.syncing?'disabled':''}>${severityOptions(selected)}</select></label><button class="button secondary small stack-sync" data-action="sync-asset" data-id="${esc(project.id)}" data-asset="${esc(asset.id)}" ${project.syncing?'disabled':''}>${icon('refresh')}${t('sync')}</button></div>`;}
-function componentCriticalCount(project,asset){const count=(project.findings||[]).filter(f=>f.asset_id===asset.id&&f.severity==='CRITICAL').length;return `<div class="stack-critical-count"><span>${t('critical')}</span>${pill(count.toLocaleString(formatLocale()),count?'critical':'')}</div>`;}
+function componentSyncControls(project,asset){const selected=componentSyncSeveritySelection.get(stackKey(project.id,asset.id))||'';return `<div class="stack-sync-controls"><label class="sync-scope stack-sync-severity"><span>${t('syncSeverity')}</span><select data-sync-component-severity data-project-id="${esc(project.id)}" data-asset-id="${esc(asset.id)}" title="${t('severitySyncHint')}" ${project.syncing?'disabled':''}>${severityOptions(selected)}</select></label><button class="button secondary small stack-sync" title="${esc(t('componentMatchHint'))}" data-action="sync-asset" data-id="${esc(project.id)}" data-asset="${esc(asset.id)}" ${project.syncing?'disabled':''}>${icon('search')}${t('matchVDBs')}</button></div>`;}
+function componentCriticalCount(project, asset) {
+  if (asset.needs_assessment) {
+    return `<div class="stack-critical-count"><span>${t('critical')}</span><span class="pill review" title="${esc(t('componentResyncHint'))}">${t('componentSyncNeeded')}</span></div><p class="component-resync-note">${esc(t('componentResyncHint'))}</p>`;
+  }
+
+  const count = (project.findings || []).filter(finding => finding.asset_id === asset.id && finding.severity === 'CRITICAL').length;
+  return `<div class="stack-critical-count"><span>${t('critical')}</span>${pill(count.toLocaleString(formatLocale()), count ? 'critical' : '')}</div>`;
+}
+
 function renderProject(id){const p=state.projects.find(p=>p.id===id);if(!p){location.hash='projects';return;}
   const latestRun = p.runs?.[0];
   const fullRun = latestFullRun(p);
@@ -435,23 +866,233 @@ function renderProject(id){const p=state.projects.find(p=>p.id===id);if(!p){loca
   if (!p.syncing && fullRun?.status === 'interrupted') {
     statusBadge = pill(interruptionMessage(fullRun, true), 'interrupted full-sync-interruption');
   }
-  $('#main').innerHTML=heading(p.name,p.description||t('projectPanelSub'),`<button class="button secondary" data-action="edit-project" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('edit')}${t('editProject')}</button><button type="button" class="button secondary" data-action="scan-code" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${icon('scanCode')}${t('runCodeScan')}</button>${syncControls(p)}`)+`<div class="project-meta">${statusBadge}${pill(t(p.schedule))}${validDate(p.last_sync)?pill(t('lastSync')+' · '+fmtDate(p.last_sync)):''}${validDate(p.data_checked_at)?pill(t('sourceDataChecked')+' · '+fmtDate(p.data_checked_at)):''}${validDate(p.next_run)?pill(t('nextRun')+' · '+fmtDate(p.next_run)):''}${projectRepositoryLinks(p)}</div>${workflow}<div class="tabs">${['vulnerabilities','techStack','activity'].map(tab=>`<button class="tab ${projectTab===tab?'active':''}" data-tab="${tab}">${t(tab)}${tab==='vulnerabilities'?' ('+(p.findings?.length||0)+')':''}</button>`).join('')}</div>${fullRun&&['partial','failed','interrupted','stopped'].includes(fullRun.status)?`<div class="notice">${t('incomplete')}</div>`:''}${(latestRun?.asset_id||latestRun?.severity||latestRun?.mode==='code')&&['partial','failed','interrupted','stopped'].includes(latestRun.status)?`<div class="notice">${t(latestRun.mode==='code'?'codeScanIncomplete':'scopedSyncIncomplete')}</div>`:''}${p.assessed_revision!==p.revision&&p.assessed_revision?`<div class="notice info">${t('inventoryChanged')}</div>`:''}<div id="project-tab-content"></div>`;const content=$('#project-tab-content');if(projectTab==='vulnerabilities'){content.innerHTML=filtersHTML(false,id)+`<div class="panel" id="finding-results">${findingsTable(id)}</div>`;bindFilters(id);}else if(projectTab==='techStack'){content.innerHTML=`<div class="stack-toolbar"><button type="button" class="button primary" data-action="add-component" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${t('addComponent')}</button></div>`+(p.assets.length?`<div class="stack-grid">${p.assets.map(a=>`<div class="stack-card"><div class="eyebrow">${t(a.kind)}</div><strong>${esc(a.name)}</strong><p>${esc(a.version)}${a.ecosystem?' · '+esc(a.ecosystem):''}</p>${a.cpe?`<code>${esc(a.cpe)}</code>`:''}${componentCriticalCount(p,a)}${componentSyncControls(p,a)}</div>`).join('')}</div>`:empty('noStack','noStackSub','stack'));}else content.innerHTML=`<div class="panel">${activityList(allRuns().filter(r=>r.project_id===id))}</div>`;}
+  $('#main').innerHTML=heading(p.name,p.description||t('projectPanelSub'),`<button class="button secondary" data-action="edit-project" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('edit')}${t('editProject')}</button><button type="button" class="button secondary" data-action="scan-code" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${icon('scanCode')}${t('runCodeScan')}</button>${syncControls(p)}`)+`<div class="project-meta">${statusBadge}${pill(t(p.schedule))}${validDate(p.last_sync)?pill(t('lastSync')+' · '+fmtDate(p.last_sync)):''}${validDate(p.data_checked_at)?pill(t('sourceDataChecked')+' · '+fmtDate(p.data_checked_at)):''}${validDate(p.next_run)?pill(t('nextRun')+' · '+fmtDate(p.next_run)):''}${projectRepositoryLinks(p)}</div>${scannerCoverageNotice(p)}${workflow}<div class="tabs">${['vulnerabilities','techStack','activity'].map(tab=>`<button class="tab ${projectTab===tab?'active':''}" data-tab="${tab}">${t(tab)}${tab==='vulnerabilities'?' ('+(p.findings?.length||0)+')':''}</button>`).join('')}</div>${fullRun&&['partial','failed','interrupted','stopped'].includes(fullRun.status)?`<div class="notice">${t('incomplete')}</div>`:''}${(latestRun&&scopedAssessment(latestRun))&&['partial','failed','interrupted','stopped'].includes(latestRun.status)?`<div class="notice">${t(latestRun.mode==='code'?'codeScanIncomplete':'scopedSyncIncomplete')}</div>`:''}${projectNeedsAssessment(p)?`<div class="notice" role="status">${t('techStackResyncHint')}</div>`:p.assessed_revision!==p.revision&&p.assessed_revision?`<div class="notice info">${t('inventoryChanged')}</div>`:''}<div id="project-tab-content"></div>`;const content=$('#project-tab-content');if(projectTab==='vulnerabilities'){content.innerHTML=filtersHTML(false,id)+`<div class="panel" id="finding-results">${findingsTable(id)}</div>`;bindFilters(id);}else if(projectTab==='techStack'){content.innerHTML=`<div class="stack-toolbar"><button type="button" class="button primary" data-action="add-component" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${t('addComponent')}</button></div>`+(p.assets.length?`<div class="stack-grid">${p.assets.map(a=>`<div class="stack-card"><div class="eyebrow">${t(a.kind)}</div><strong>${esc(a.name)}</strong><p>${esc(a.version)}${a.ecosystem?' · '+esc(a.ecosystem):''}</p>${a.cpe?`<code>${esc(a.cpe)}</code>`:''}${componentCriticalCount(p,a)}${componentSyncControls(p,a)}</div>`).join('')}</div>`:empty('noStack','noStackSub','stack'));}else content.innerHTML=`<div class="panel">${activityList(allRuns().filter(r=>r.project_id===id))}</div>`;}
 function field(name,label,value='',type='text',extra=''){return `<label><span>${t(label)}</span><input type="${type}" name="${name}" value="${esc(value)}" ${extra}></label>`;}
+function sourceSettingsHTML(settings) {
+  const sources = [
+    ['nvd', 'NIST NVD', 'discovery', 'nvdEndpoint'],
+    ['cve', 'CVE Program', 'enrichment', 'cveEndpoint'],
+    ['osv', 'OSV.dev', 'packageMatching', 'osvEndpoint'],
+  ];
+
+  return `<section class="settings-section"><h3>${t('sourceSettings')}</h3><p>${t('sourceSettingsHint')}</p>
+    <div class="source-settings-list">${sources.map(([name, label, description, endpoint]) => `<div class="source-settings-row">
+      <label class="check-row source-option"><input type="checkbox" name="source_${name}" ${settings.sources[name] ? 'checked' : ''}><span><strong>${label}</strong><small>${t(description)}</small></span></label>
+      ${field(name + '_url', endpoint, settings[name + '_url'], 'url', 'required')}
+    </div>`).join('')}</div>
+  </section>`;
+}
 function providerOptions(selected){return ['public','openai','claude'].map(v=>`<option value="${v}" ${selected===v?'selected':''}>${t(v)}</option>`).join('');}
 function cacheNumber(n){return Number(n||0).toLocaleString(formatLocale());}
 function cacheUsageHTML(stats={}){return `<span>${t('cacheEntries')}: <strong>${cacheNumber(stats.entries)}</strong></span><span>${t('cacheSize')}: <strong>${((stats.bytes||0)/1048576).toFixed(2)} MiB</strong></span>`;}
 function cacheMetricsHTML(stats={}){const hits=stats.hits||0,misses=stats.misses||0,rate=hits+misses?((hits/(hits+misses))*100).toFixed(1)+'%':'—';return `<div><span>${t('cacheHits')}</span><strong>${cacheNumber(hits)}</strong></div><div><span>${t('cacheMisses')}</span><strong>${cacheNumber(misses)}</strong></div><div><span>${t('cacheHitRate')}</span><strong>${rate}</strong></div><div><span>${t('cacheEvictions')}</span><strong>${cacheNumber(stats.evictions)}</strong></div>`;}
 function updateCacheMetrics(stats){const usage=$('#cache-usage'),metrics=$('#cache-metrics');if(usage)usage.innerHTML=cacheUsageHTML(stats);if(metrics)metrics.innerHTML=cacheMetricsHTML(stats);}
+const localDatabaseSettings = {
+  cve:{title:'cveDBTitle',hint:'cveDBHint',safety:'cveDBSafety',file:'cveDBFile',update:'cveDBUpdate',schedules:['off','hourly','daily']},
+  nvd:{title:'nvdDBTitle',hint:'nvdDBHint',safety:'nvdDBSafety',file:'nvdDBFile',update:'nvdDBUpdate',schedules:['off','two_hourly','daily']},
+  osv:{title:'osvDBTitle',hint:'osvDBHint',safety:'osvDBSafety',file:'osvDBFile',update:'osvDBUpdate',schedules:['off','hourly','daily']},
+};
+
+function localDatabaseStatusHTML(source, stats, detailed = false) {
+  return {cve:cveDatabaseStatusHTML,nvd:nvdDatabaseStatusHTML,osv:osvDatabaseStatusHTML}[source](stats, detailed);
+}
+
+function localDatabaseSettingsHTML(source, extra = '') {
+  const settings = localDatabaseSettings[source], stats = state[source + '_database'] || {};
+  const schedule = state.settings[source + '_update_schedule'] || 'daily';
+
+  return `<section class="settings-section database-settings" data-local-database="${source}">
+    <div class="database-settings-heading"><h3>${t(settings.title)}</h3><div class="local-database-actions">
+      <label class="database-schedule"><span>${t('databaseSchedule')}</span><select name="${source}_update_schedule" title="${esc(t('cveDBSchedule'))}">${settings.schedules.map(value => `<option value="${value}" ${schedule === value ? 'selected' : ''}>${t(value)}</option>`).join('')}</select></label>
+      <button type="button" class="button secondary small" data-action="update-${source}-database" aria-label="${esc(t(settings.update))}" ${stats.running ? 'disabled' : ''}>${t(settings.update)}</button>
+      <button type="button" class="button secondary small" data-action="rebuild-${source}-database" aria-label="${esc(t('cveDBRebuild') + ': ' + t(settings.title))}" ${stats.running ? 'disabled' : ''}>${t('cveDBRebuild')}</button>
+      <button type="button" class="button danger small" data-action="stop-${source}-database" ${stats.running ? '' : 'hidden'}>${t('stop')}</button>
+      <button type="button" class="button small database-more-info" data-action="database-info" data-database="${source}" aria-haspopup="dialog" aria-controls="database-info-dialog" aria-label="${esc(t(settings.title) + ': ' + t('databaseMoreInfo'))}">${icon('info')}${t('databaseMoreInfo')}</button>
+    </div></div>
+    <div class="database-settings-overview" id="${source}-database-status" role="status" aria-live="polite">${localDatabaseStatusHTML(source, stats)}</div>${extra}
+  </section>`;
+}
+
+function openDatabaseInfo(source) {
+  if (!Object.hasOwn(localDatabaseSettings, source)) return;
+  const settings = localDatabaseSettings[source], stats = state[source + '_database'] || {};
+  const dialog = $('#database-info-dialog');
+  dialog.dataset.database = source;
+  $('#database-info-title').textContent = t(settings.title);
+  $('[data-database-info-close]', dialog).setAttribute('aria-label', t('close'));
+  $('#database-info-body').innerHTML = `<p>${t(settings.hint)}</p>
+    <div id="database-info-status" role="status" aria-live="polite">${localDatabaseStatusHTML(source, stats, true)}</div>
+    <p class="database-safety">${t(settings.safety)}</p><p class="form-note">${t('cveDBSchedule')}</p>`;
+  localize(dialog);
+  dialog.showModal();
+}
+
+function updateLocalDatabaseDetails(source, stats) {
+  const path = $(`[data-catalog-path="${source}"]`);
+  const value = stats.path || '—';
+  if (path && path.textContent !== value) path.textContent = value;
+
+  const dialog = $('#database-info-dialog');
+  if (!dialog.open || dialog.dataset.database !== source) return;
+  $('#database-info-status').innerHTML = localDatabaseStatusHTML(source, stats, true);
+}
+
+function cveDatabaseStatusHTML(stats = {}, detailed = false) {
+  const phase = stats.phase || (stats.initialized ? 'complete' : stats.resumable ? 'interrupted' : 'idle');
+  const count = stats.initialized ? stats.records : stats.on_demand;
+  const details = [
+    `${t('cveDBRecords')} ${cacheNumber(count)}`,
+    `${t('databaseSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`,
+  ];
+  if (detailed) {
+    if (validDate(stats.source_at)) details.push(`${t('sourceDataChecked')} ${fmtDate(stats.source_at)}`);
+    if (validDate(stats.checked_at)) details.push(`${t('cveDBLastCheck')} ${fmtDate(stats.checked_at)}`);
+    if (phase !== 'importing' && stats.resumable && stats.imported) details.push(t('cveDBImported').replace('{count}', cacheNumber(stats.imported)));
+  }
+
+  return `<div class="cve-database-summary">${pill(t('cveDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${databaseUpdateProgressHTML('cve', stats)}${stats.error_message || stats.error ? `<p class="form-error">${esc(messageText(stats.error_message || stats.error))}</p>` : ''}</div>`;
+}
+function updateCVEDatabaseStatus(stats) {
+  const status = $('#cve-database-status');
+  if (!status) return;
+  status.innerHTML = cveDatabaseStatusHTML(stats);
+  const start = $('[data-action="update-cve-database"]');
+  const stop = $('[data-action="stop-cve-database"]');
+  if (start) start.disabled = Boolean(stats.running);
+  const rebuild = $('[data-action="rebuild-cve-database"]');
+  if (rebuild) rebuild.disabled = Boolean(stats.running);
+  if (stop) stop.hidden = !stats.running;
+  updateLocalDatabaseDetails('cve', stats);
+}
+function cveDatabaseSettingsHTML() {
+  return localDatabaseSettingsHTML('cve');
+}
+function nvdDatabaseStatusHTML(stats = {}, detailed = false) {
+  const phase = stats.phase || (stats.initialized ? 'complete' : stats.resumable ? 'interrupted' : 'idle');
+  const details = [
+    `${t('nvdDBRecords')} ${cacheNumber(stats.records)}`,
+    `${t('nvdDBCPEs')} ${cacheNumber(stats.cpes)}`,
+    `${t('databaseSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`,
+  ];
+  if (detailed) {
+    if (validDate(stats.source_at)) details.push(`${t('sourceDataChecked')} ${fmtDate(stats.source_at)}`);
+    if (validDate(stats.cpe_at)) details.push(`${t('nvdDBCPEChecked')} ${fmtDate(stats.cpe_at)}`);
+    if (validDate(stats.checked_at)) details.push(`${t('cveDBLastCheck')} ${fmtDate(stats.checked_at)}`);
+    if (phase !== 'importing' && stats.imported) details.push(t('queueImportedRecords').replace('{done}', cacheNumber(stats.imported)));
+  }
+
+  return `<div class="cve-database-summary">${pill(t('nvdDBPhase_' + phase), stats.running ? 'running' : phase === 'failed' || phase === 'interrupted' ? 'partial' : '')}<p>${esc(details.join(' · '))}</p>${databaseUpdateProgressHTML('nvd', stats)}${stats.error_message || stats.error ? `<p class="form-error">${esc(messageText(stats.error_message || stats.error))}</p>` : ''}</div>`;
+}
+function updateNVDDatabaseStatus(stats) {
+  const status = $('#nvd-database-status');
+  if (!status) return;
+  status.innerHTML = nvdDatabaseStatusHTML(stats);
+  for (const action of ['update', 'rebuild']) {
+    const button = $(`[data-action="${action}-nvd-database"]`);
+    if (button) button.disabled = Boolean(stats.running);
+  }
+  const stop = $('[data-action="stop-nvd-database"]');
+  if (stop) stop.hidden = !stats.running;
+  updateLocalDatabaseDetails('nvd', stats);
+}
+function nvdDatabaseSettingsHTML() {
+  return localDatabaseSettingsHTML('nvd');
+}
+function suggestedOSVEcosystems() {
+  if (state.osv_suggested_ecosystems) return state.osv_suggested_ecosystems;
+
+  return [...new Set((state.projects || []).flatMap(project => (project.assets || []).map(asset => asset.ecosystem?.split(':')[0]).filter(Boolean)))].sort();
+}
+
+function osvDatabaseStatusHTML(stats = {}, detailed = false) {
+  const phase = stats.phase || (stats.resumable ? 'interrupted' : stats.initialized ? 'complete' : 'idle');
+  const details = `${t('osvDBRecords')} ${cacheNumber(stats.records)} · ${t('databaseSize')} ${((stats.bytes || 0) / 1048576).toFixed(2)} MiB`;
+  const ecosystems = detailed ? (stats.ecosystems || []).map(item => `<li><strong>${esc(item.ecosystem)}</strong> · ${cacheNumber(item.records)} · ${esc(t('osvDBPhase_' + (item.phase || 'idle')))}${validDate(item.checked_at) ? ` · ${esc(t('sourceDataChecked'))} ${esc(fmtDate(item.checked_at))}` : ''}</li>`).join('') : '';
+
+  return `<div class="cve-database-summary">${pill(t('osvDBPhase_' + phase), stats.running ? 'running' : ['failed','interrupted'].includes(phase) ? 'partial' : '')}<p>${esc(details)}</p>${databaseUpdateProgressHTML('osv', stats)}${ecosystems ? `<ul class="osv-ecosystem-status">${ecosystems}</ul>` : ''}${stats.error_message || stats.error ? `<p class="form-error">${esc(messageText(stats.error_message || stats.error))}</p>` : ''}</div>`;
+}
+
+function updateOSVDatabaseStatus(stats) {
+  const status = $('#osv-database-status');
+  if (!status) return;
+
+  status.innerHTML = osvDatabaseStatusHTML(stats);
+  for (const action of ['update','rebuild']) {
+    const button = $(`[data-action="${action}-osv-database"]`);
+    if (button) button.disabled = Boolean(stats.running);
+  }
+
+  const stop = $('[data-action="stop-osv-database"]');
+  if (stop) stop.hidden = !stats.running;
+  updateLocalDatabaseDetails('osv', stats);
+}
+
+function osvDatabaseSettingsHTML() {
+  const suggested = suggestedOSVEcosystems();
+  const selected = state.settings.osv_ecosystems ?? suggested;
+  const options = [...new Set([...(state.osv_ecosystem_options || []), ...suggested, ...selected])].sort();
+
+  return localDatabaseSettingsHTML('osv', `<details class="database-ecosystem-settings"><summary><span>${t('osvDBEcosystems')}</span><small data-osv-selection-summary>${esc(t('databaseEcosystemsSelected').replace('{count}', cacheNumber(new Set(selected).size)))}</small></summary>
+    <div class="osv-ecosystem-controls"><button type="button" class="button secondary small" data-action="suggest-osv-ecosystems">${t('osvDBSuggest')}</button><p class="form-note">${t('osvDBSaveFirst')}</p></div>
+    <div class="osv-ecosystems-grid">${options.map(value => `<label class="check-row"><input type="checkbox" data-osv-ecosystem value="${esc(value)}" ${selected.includes(value) ? 'checked' : ''}><span>${esc(value)}</span></label>`).join('')}</div>
+    </details>`);
+}
+
+function updateOSVEcosystemSelectionSummary() {
+  const summary = $('[data-osv-selection-summary]');
+  if (summary) summary.textContent = t('databaseEcosystemsSelected').replace('{count}', cacheNumber($$('[data-osv-ecosystem]:checked').length));
+}
+
 function cacheSettingsHTML(){
   const stats=state.cache_stats||{},settings=state.settings,locale=formatLocale(),number=n=>Number(n||0).toLocaleString(locale);
   const entries=settings.cache_max_entries||10000,mib=settings.cache_max_mib||512;
   const capacity=t('cacheCapacity').replace('{entries}',number(entries)).replace('{mib}',number(mib));
-  return `<section class="settings-section"><h3>${t('cacheSettings')}</h3><p>${t('cacheHint')}</p><div class="form-grid"><label><span>${t('cacheHours')}</span><input name="cache_hours" type="number" min="1" max="168" step="1" required value="${esc(settings.cache_hours||6)}"></label><label><span>${t('cacheMaxEntries')}</span><input name="cache_max_entries" type="number" min="100" max="1000000" step="1" required value="${esc(entries)}"></label><label><span>${t('cacheMaxMiB')}</span><input name="cache_max_mib" type="number" min="16" max="4096" step="1" required value="${esc(mib)}"></label><div class="cache-stats" id="cache-usage">${cacheUsageHTML(stats)}</div></div><div class="cache-metrics" id="cache-metrics">${cacheMetricsHTML(stats)}</div><p class="form-note">${t('cacheStatsHint')}</p><p class="form-note">${esc(capacity)}</p><p class="form-note">${t('cacheLimitsHint')}</p></section>`;
+  return `<section class="api-cache-settings"><h3>${t('cacheSettings')}</h3><p>${t('cacheHint')}</p><p>${t('cacheScopeHint')}</p><div class="form-grid"><label><span>${t('cacheHours')}</span><input name="cache_hours" type="number" min="1" max="168" step="1" required value="${esc(settings.cache_hours||6)}"></label><label><span>${t('cacheMaxEntries')}</span><input name="cache_max_entries" type="number" min="100" max="1000000" step="1" required value="${esc(entries)}"></label><label><span>${t('cacheMaxMiB')}</span><input name="cache_max_mib" type="number" min="16" max="4096" step="1" required value="${esc(mib)}"></label><div class="cache-stats" id="cache-usage">${cacheUsageHTML(stats)}</div></div><div class="cache-metrics" id="cache-metrics">${cacheMetricsHTML(stats)}</div><p class="form-note">${t('cacheStatsHint')}</p><p class="form-note">${esc(capacity)}</p><p class="form-note">${t('cacheLimitsHint')}</p><div class="api-cache-actions"><button type="button" class="button danger small" data-action="clear-api-response-cache">${t('clearAPIResponseCache')}</button></div><p class="form-note">${t('apiCacheClearHint')}</p></section>`;
 }
-function storagePathsHTML(){const paths=state.storage_paths||{};return `<dl class="storage-paths"><div><dt>${t('databaseFile')}</dt><dd><code>${esc(paths.database||'—')}</code></dd></div><div><dt>${t('keyFile')}</dt><dd><code>${esc(paths.key||'—')}</code></dd></div></dl>`;}
+async function clearAPIResponseCache(button) {
+  if (button.disabled) return false;
+  button.disabled = true;
+  try {
+    if (!(await confirmAction(t('clearAPIResponseCacheConfirm')))) return false;
+    const directory = state.data_directory;
+    const workspace = state.version?.split(':', 1)[0];
+    const stats = await invoke('ClearAPIResponseCache');
+    if (state.data_directory === directory && state.version?.split(':', 1)[0] === workspace) {
+      state.cache_stats = stats;
+      updateCacheMetrics(stats);
+      toast(t('apiResponseCacheCleared'));
+    }
+    return true;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function advancedSettingsHTML() {
+  return `<details class="settings-section advanced-settings" id="advanced-settings"><summary>${t('advancedSettings')}</summary><div class="advanced-settings-content">${cacheSettingsHTML()}</div></details>`;
+}
+
+function revealInvalidAdvancedSetting(event) {
+  const section = event.target.closest('.advanced-settings');
+  if (section) section.open = true;
+}
+
+function storagePathsHTML() {
+  const paths = state.storage_paths || {};
+  const files = [
+    ['databaseFile', paths.database],
+    ...Object.entries(localDatabaseSettings).map(([source, settings]) => [settings.file, state[source + '_database']?.path, source]),
+    ['keyFile', paths.key],
+  ];
+
+  return `<dl class="storage-paths">${files.map(([label, path, source]) => `<div><dt>${esc(t(label))}</dt><dd><code${source ? ` data-catalog-path="${source}"` : ''}>${esc(path || '—')}</code></dd></div>`).join('')}</dl>`;
+}
 async function browseFolder(input, title, directory = input.value) {
   const chosen = await invoke('ChooseFolder', t(title), directory);
-  if (chosen && input.isConnected) input.value = chosen;
+  if (chosen && input.isConnected) {
+    input.value = chosen;
+    if (input.name === 'local_path') updateRepositoryProfileVisibility(input);
+  }
 }
 function storageDirectoryHTML() {
   const warning = state.storage_warning;
@@ -490,7 +1131,7 @@ async function changeDataDirectory(directory) {
     else render();
     toast(t(state.storage_warning || 'dataDirectoryChanged'), Boolean(state.storage_warning));
   } catch (err) {
-    status.textContent = err.message;
+    status.textContent = formatError(err);
   } finally {
     changingDataDirectory = false;
     for (const button of buttons) button.disabled = false;
@@ -542,9 +1183,10 @@ const scannerInstallations = {
   },
 };
 const scannerStatusKeys = {ready:'scannerReady',missing:'scannerMissing',permission:'scannerPermission',path:'scannerPath',failed:'scannerFailed',timeout:'scannerTimeout'};
+const scannerCheckResults = new Map();
 
 function snykSetupHTML() {
-  return `<div class="scanner-check snyk-setup">
+  return `<div class="snyk-setup">
     <p>${t('scannerSnykInstall')} <a href="${snykInstall}" target="_blank" rel="noreferrer">${t('scannerInstallGuide')} ↗</a></p>
     <p>${t('scannerSnykSetup')} <a href="${snykAuth}" target="_blank" rel="noreferrer">${t('scannerSnykTokenGuide')} ↗</a></p>
     <p>${t('scannerSnykProject')}</p>
@@ -552,15 +1194,181 @@ function snykSetupHTML() {
   </div>`;
 }
 
+function scannerDefinitions() {
+  return state?.scanner_definitions || Object.entries(scannerLabels).map(([id,label]) => ({id,label,scope:['trivy','snyk'].includes(id)?'repository':'manifest'}));
+}
+function scannerLabel(id) {
+  return scannerDefinitions().find(tool => tool.id === id)?.label || id;
+}
+function defaultScannerProfile(project, target) {
+  const saved = project.scanner_profiles?.[target];
+  return {
+    mode:saved?.mode || 'auto', tools:[...(saved?.tools || [])],
+    additional_tools:[...(saved ? saved.additional_tools || [] : scannerDefinitions().filter(tool => tool.scope === 'repository' && state?.settings?.scanners?.[tool.id]).map(tool => tool.id))],
+    needs_scan:Boolean(saved?.needs_scan),
+  };
+}
+function globalScannerEnabled(id) {
+  return Boolean(state?.settings?.scanners?.[id]);
+}
+function scannerJobKey(tool, target, repository, path) {
+  return JSON.stringify([tool, target === 'local' ? 'local' : 'remote', repository || '', path || '']);
+}
+function newestScannerJobs(jobs, logs = []) {
+  const events = new Set(['scanning','scanner_completed','scanner_failed','scanner_interrupted','scanner_blocked','scanner_missing_token','scanner_skipped']);
+  const recorded = new Map();
+  for (const [index, entry] of (logs || []).entries()) {
+    if (entry.step_id === 'scanner' && entry.tool && events.has(entry.event)) {
+      recorded.set(scannerJobKey(entry.tool, entry.scan_target, entry.scan_repository, entry.scan_path), index + 1);
+    }
+  }
+
+  return jobs.map((job, index) => ({
+    job, index, sequence:Number.isSafeInteger(job.update_sequence) && job.update_sequence > 0 ? job.update_sequence : 0,
+    recorded:recorded.get(scannerJobKey(job.tool, job.target, job.repository, job.path)) || 0,
+  })).sort((a, b) => b.sequence - a.sequence || b.recorded - a.recorded || b.index - a.index).map(item => item.job);
+}
+function scannerJobCounts(logs, jobs = []) {
+  const seen = new Set(), ambiguous = new Set();
+  for (const job of jobs) {
+    const key = scannerJobKey(job.tool, job.target, job.repository, job.path);
+    if (seen.has(key)) ambiguous.add(key);
+    seen.add(key);
+  }
+  const counts = new Map();
+  for (const entry of logs || []) {
+    if (entry.step_id === 'scanner' && entry.event === 'scanner_completed' && entry.tool && Number.isSafeInteger(entry.findings) && entry.findings >= 0) {
+      const key = scannerJobKey(entry.tool, entry.scan_target, entry.scan_repository, entry.scan_path);
+      if (!ambiguous.has(key)) counts.set(key, entry.findings);
+    }
+  }
+  return counts;
+}
+function scannerJobFindings(job, recorded) {
+  if (job.status !== 'complete') return null;
+  if (Number.isSafeInteger(job.findings) && job.findings >= 0) return job.findings;
+  return recorded.get(scannerJobKey(job.tool, job.target, job.repository, job.path)) ?? null;
+}
+function scannerJobHTML(jobs, logs = []) {
+  const ordered = newestScannerJobs(jobs, logs), counts = scannerJobCounts(logs, jobs);
+  return `<div class="scanner-job-list" tabindex="0"><table><thead><tr><th>${t('scannerRepository')}</th><th>${t('scannerTool')}</th><th>${t('scannerProjectFolder')}</th><th>${t('scannerJobStatus')}</th><th class="scanner-job-findings" title="${esc(t('scannerJobFindingsHint'))}">${t('scannerJobFindings')}</th><th>${t('scannerReason')}</th></tr></thead><tbody>${ordered.map(job => {
+    const count = scannerJobFindings(job, counts);
+    return `<tr><td>${esc(job.repository || (job.target === 'local' ? t('scanTarget_local') : ''))}</td><td>${esc(scannerLabel(job.tool))}</td><td><code>${esc(job.path || '.')}</code></td><td>${esc(t('scannerJob_' + job.status))}</td><td class="scanner-job-findings" ${count === null ? `title="${esc(t('scannerJobFindingsUnavailable'))}"` : ''}>${count === null ? '—' : formatResultNumber(count)}</td><td>${esc(job.reason ? t('scannerReason_' + job.reason) : '')}</td></tr>`;
+  }).join('')}</tbody></table></div><p class="form-note">${t('scannerJobFindingsHint')}</p>`;
+}
+
+function githubScannerProfile(profile, registered = true) {
+  if (!profile || !profile.mode || profile.mode === 'auto') {
+    return {mode:registered?'disabled':'custom', tools:[], additional_tools:[], selection_required:registered};
+  }
+  return {...profile, additional_tools:[]};
+}
+function repositoryProfileFor(project, repository) {
+  const draft = project?.repository_scanners?.find(input => !input.local && input.repository?.trim() === repository.trim());
+  if (draft) return githubScannerProfile(draft.profile);
+  const target = state?.scan_repositories?.[project?.id]?.find(target => target.url === repository.trim());
+  return target ? githubScannerProfile(project?.scanner_profiles?.[target.key]) : githubScannerProfile(null, false);
+}
+function localRepositoryProfileFor(project) {
+  const draft = project?.repository_scanners?.find(input => input.local);
+  return draft ? {...draft.profile} : defaultScannerProfile(project || {}, 'local');
+}
+function scannerModeHint(mode, local) {
+  return t(!local && mode === 'custom' ? 'scannerGitHubCustomHint' : !local && mode === 'disabled' ? 'scannerGitHubDisabledHint' : 'scannerModeHint_' + mode);
+}
+function projectScannerProfileHTML(profile, local = false) {
+  if (!local) profile = githubScannerProfile(profile);
+  const modes = local ? ['auto','custom','disabled'] : ['custom','disabled'];
+  // Draft modes can come from DOM values, so only known modes may select hint keys.
+  const requestedMode = profile.mode ?? 'auto';
+  const mode = modes.includes(requestedMode) ? requestedMode : 'disabled';
+
+  const definitions = scannerDefinitions();
+  const enabledTools = definitions.filter(tool => globalScannerEnabled(tool.id));
+  const languageTools = enabledTools.filter(tool => tool.scope !== 'repository');
+  const repositoryTools = enabledTools.filter(tool => tool.scope === 'repository');
+  const preservedTools = (profile.tools || []).filter(id => !globalScannerEnabled(id));
+  const preservedAdditionalTools = (profile.additional_tools || []).filter(id => !globalScannerEnabled(id));
+  const choice = (tool, additional) => {
+    const enabled = globalScannerEnabled(tool.id);
+    const checked = (additional ? profile.additional_tools || [] : profile.tools || []).includes(tool.id);
+    const hint = !enabled ? t('scannerGloballyDisabled') : tool.detect?.join(', ') || t(tool.scope === 'repository' ? 'scannerRepositoryWide' : 'scannerAutomaticDetection');
+    return `<label class="check-row scanner-profile-tool ${enabled?'':'scanner-tool-disabled'}" title="${esc(hint)}"><input type="checkbox" data-project-scanner-tool="${esc(tool.id)}" data-profile-additional="${additional}" ${checked?'checked':''} ${enabled?'':'disabled'}><span>${esc(tool.label)}</span></label>`;
+  };
+  return `<div class="repository-scanner-profile" data-repository-profile data-scanner-location="${local?'local':'github'}">
+    <div class="scanner-profile-header"><strong>${t('repositoryScannerProfile')}</strong><label class="scanner-profile-mode"><span>${t('scannerMode')}</span><select data-project-scanner-mode>${modes.map(value => `<option value="${value}" ${mode === value?'selected':''}>${t('scannerMode_' + value)}</option>`).join('')}</select></label></div>
+    <p class="scanner-profile-hint" data-profile-mode-hint>${esc(scannerModeHint(mode, local))}</p>
+    <div class="scanner-profile-tools" data-profile-custom ${mode === 'custom'?'':'hidden'}>${enabledTools.length ? enabledTools.map(tool => choice(tool, false)).join('') : `<p class="form-note">${t('scannerCustomNoTools')}</p>`}</div>
+    ${preservedTools.map(id => `<input type="hidden" data-profile-preserved-tool="${esc(id)}" data-profile-additional="false">`).join('')}
+    ${preservedAdditionalTools.map(id => `<input type="hidden" data-profile-preserved-tool="${esc(id)}" data-profile-additional="true">`).join('')}
+    ${local && languageTools.length ? `<details class="scanner-detection-rules" data-profile-auto ${mode === 'auto'?'':'hidden'}><summary>${t('scannerAutomaticRules')}</summary><ul class="scanner-auto-tools">${languageTools.map(tool => {
+      const hint = tool.detect?.join(', ') || t('scannerAutomaticDetection');
+      return `<li class="scanner-auto-tool" tabindex="0" title="${esc(hint)}" aria-label="${esc(tool.label + ' · ' + hint)}">${esc(tool.label)}</li>`;
+    }).join('')}</ul></details>` : ''}
+    ${local && repositoryTools.length ? `<div data-profile-extras ${mode === 'auto'?'':'hidden'}><h4>${t('scannerAdditionalTools')}</h4><div class="scanner-profile-tools">${repositoryTools.map(tool => choice(tool, true)).join('')}</div></div>` : ''}
+    ${local && !enabledTools.length ? `<p class="form-note" data-profile-auto ${mode === 'auto'?'':'hidden'}>${t('scannerCustomNoTools')}</p>` : ''}
+    ${profile.selection_required ? `<p class="scanner-profile-migration" role="status">${t('scannerGitHubAutomaticRemoved')}</p>` : ''}
+    ${profile.needs_scan && mode !== 'disabled' ? `<p class="scanner-policy-notice">${t('scannerProfileNeedsScan')}</p>` : ''}
+  </div>`;
+}
+function readProjectScannerProfile(card) {
+  const selected = additional => {
+    const checked = $$('[data-project-scanner-tool]:checked', card)
+      .filter(input => input.dataset.profileAdditional === String(additional)).map(input => input.dataset.projectScannerTool);
+    const preserved = $$('[data-profile-preserved-tool]', card)
+      .filter(input => input.dataset.profilePreservedTool && input.dataset.profileAdditional === String(additional)).map(input => input.dataset.profilePreservedTool);
+    return [...new Set([...checked, ...preserved])];
+  };
+  return {mode:$('[data-project-scanner-mode]', card).value, tools:selected(false), additional_tools:selected(true)};
+}
+function changeProjectScannerMode(select) {
+  const card = select.closest('[data-repository-profile]');
+  const local = card.dataset.scannerLocation === 'local';
+  $('[data-profile-custom]', card).hidden = select.value !== 'custom';
+  const automatic = $('[data-profile-auto]', card), extras = $('[data-profile-extras]', card);
+  if (automatic) automatic.hidden = select.value !== 'auto';
+  if (extras) extras.hidden = select.value !== 'auto';
+  $('[data-profile-mode-hint]', card).textContent = scannerModeHint(select.value, local);
+}
+function updateRepositoryProfileVisibility(input) {
+  if (input.matches('[data-repository-url]')) {
+    $('[data-repository-profile]', input.closest('.project-repository')).hidden = !input.value.trim();
+  } else if (input.name === 'local_path') {
+    const panel = $('[data-local-scanner-profile]', input.closest('form'));
+    if (panel) panel.hidden = !input.value.trim();
+  }
+}
+
+function projectNeedsCodeScan(project) {
+  return Object.values(project.scanner_profiles || {}).some(profile => profile.mode !== 'disabled' && profile.needs_scan);
+}
+function scannerCoverageNotice(project) {
+  return projectNeedsCodeScan(project) ? `<p class="scanner-policy-notice" role="status">${t('scannerProfileNeedsScan')}</p>` : '';
+}
+function scannerRunSummary(run) {
+  if (!run.scanner_jobs?.length) return '';
+  let html = '';
+  if (canDismissWorkflow(run) && !run.scanners_completed) html += `<p class="scanner-policy-notice">${t('scannerNoWork')}</p>`;
+  if (run.retained_scanner_findings) html += `<p class="scanner-policy-notice">${esc(t('scannerRetained').replace('{count}', formatResultNumber(run.retained_scanner_findings)))}</p>`;
+  return html;
+}
+
 function scannerSettingsHTML(names) {
-  return Object.entries(scannerLabels).map(([name,label]) => {
-    const checkable = Object.hasOwn(scannerInstallations, name);
-    const id = 'scanner-status-' + name;
-    const row = `<label class="check-row"><input type="checkbox" name="scanner_${name}" ${names[name]?'checked':''} ${checkable?`data-scanner-check="${name}" aria-describedby="${id}"`:''}><span><strong>${label}</strong></span></label>`;
-    return checkable ? `<div class="scanner-option">${row}${name === 'snyk' ? snykSetupHTML() : ''}<div class="scanner-check" id="${id}" aria-live="polite" hidden></div></div>` : row;
+  return scannerDefinitions().map(({id:name,label}) => {
+    const key = esc(name), id = 'scanner-status-' + key;
+    return `<div class="scanner-option">
+      <div class="scanner-option-heading">
+        <label class="check-row"><input type="checkbox" name="scanner_${key}" ${names[name]?'checked':''} data-scanner-check="${key}" aria-describedby="${id}"><span><strong>${esc(label)}</strong></span></label>
+        <div class="scanner-option-actions">
+          <button type="button" class="button secondary small scanner-recheck" id="scanner-recheck-${key}" data-action="check-scanner" data-scanner="${key}" ${names[name]?'':'hidden'}>${t('scannerCheckAgain')}</button>
+          <button type="button" class="button small scanner-more-info" data-action="scanner-info" data-scanner="${key}" aria-haspopup="dialog" aria-controls="scanner-info-dialog" aria-label="${esc(label + ': ' + t('scannerMoreInfo'))}">${icon('info')}${t('scannerMoreInfo')}</button>
+        </div>
+      </div>
+      <div class="scanner-check" id="${id}" aria-live="polite" hidden></div>
+    </div>`;
   }).join('');
 }
-function scannerResultHTML(name, result) {
+function scannerGuidanceHTML(name, result) {
   const {platform,status} = result;
   let guidance = '';
   if (status === 'permission') {
@@ -569,12 +1377,41 @@ function scannerResultHTML(name, result) {
     if (platform === 'windows') guidance += `<a href="https://learn.microsoft.com/windows/security/identity-protection/access-control/access-control" target="_blank" rel="noreferrer">${t('scannerPermissionGuide')} ↗</a>`;
   } else if (platform && status !== 'ready') {
     const installs = scannerInstallations[name];
-    const [hint,command,url] = installs[platform] || installs.common;
+    const [hint,command,url] = installs ? installs[platform] || installs.common : ['scannerFutureInstall', '', safeURL(scannerDefinitions().find(tool => tool.id === name)?.docs_url)];
     const pathHint = {darwin:'scannerPathDarwin',windows:'scannerPathWindows'}[platform] || 'scannerPathLinux';
     guidance = `<p>${t(hint)}</p>${command?`<code class="scanner-command">${esc(command)}</code>`:''}<p>${t(pathHint)}</p><a href="${url}" target="_blank" rel="noreferrer">${t('scannerInstallGuide')} ↗</a>`;
   }
-  const statusKey = name === 'snyk' && status === 'ready' ? 'scannerSnykReady' : scannerStatusKeys[status] || 'scannerFailed';
-  return `<p class="scanner-status ${status === 'ready' ? 'ready' : 'warning'}">${t(statusKey)}</p>${result.path?`<code class="scanner-path">${esc(result.path)}</code>`:''}${result.detail?`<p>${esc(result.detail)}</p>`:''}${guidance}<button type="button" class="button secondary small scanner-recheck" data-action="check-scanner" data-scanner="${name}">${t('scannerCheckAgain')}</button>`;
+  return guidance;
+}
+function scannerResultHTML(name, result) {
+  const status = result.status;
+  const statusKey = status === 'checking' ? 'scannerChecking' : scannerStatusKeys[status] || 'scannerFailed';
+  return `<p class="scanner-status ${status === 'ready' ? 'ready' : status === 'checking' ? '' : 'warning'}">${t(statusKey)}</p>`;
+}
+function scannerInfoHTML(name, result) {
+  let details = `<p>${t('scannerCheckFirst')}</p>`;
+  if (result) {
+    details = scannerResultHTML(name, result);
+    if (name === 'snyk' && result.status === 'ready') details += `<p>${t('scannerSnykReady')}</p>`;
+    if (result.path) details += `<code class="scanner-path">${esc(result.path)}</code>`;
+    if (result.message || result.detail) details += `<p>${esc(messageText(result.message || result.detail))}</p>`;
+    if (result.status !== 'checking') details += scannerGuidanceHTML(name, result);
+  }
+  return details + (name === 'snyk' ? snykSetupHTML() : '');
+}
+function updateScannerInfo(name) {
+  const dialog = $('#scanner-info-dialog');
+  if (dialog.open && dialog.dataset.scanner === name) $('#scanner-info-body').innerHTML = scannerInfoHTML(name, scannerCheckResults.get(name));
+}
+function openScannerInfo(name) {
+  if (!scannerDefinitions().some(tool => tool.id === name)) return;
+  const dialog = $('#scanner-info-dialog');
+  dialog.dataset.scanner = name;
+  $('#scanner-info-title').textContent = t('scannerInfoTitle').replace('{tool}', scannerLabel(name));
+  $('[data-scanner-info-close]', dialog).setAttribute('aria-label', t('close'));
+  $('#scanner-info-body').innerHTML = scannerInfoHTML(name, scannerCheckResults.get(name));
+  localize(dialog);
+  dialog.showModal();
 }
 async function checkScanner(input) {
   const name = input.dataset.scannerCheck;
@@ -583,18 +1420,30 @@ async function checkScanner(input) {
   const request = String(Number(panel.dataset.request || 0) + 1);
   panel.dataset.request = request;
   panel.hidden = !input.checked;
+  const recheck = $('#scanner-recheck-' + name);
+  recheck.hidden = !input.checked;
+  recheck.disabled = input.checked;
   if (!input.checked) {
+    scannerCheckResults.delete(name);
     panel.textContent = '';
+    updateScannerInfo(name);
     return;
   }
+  scannerCheckResults.set(name, {status:'checking'});
   panel.textContent = t('scannerChecking');
+  updateScannerInfo(name);
   let result;
   try {
     result = await invoke('CheckScanner', name);
   } catch {
     result = {status:'failed'};
   }
-  if (panel.isConnected && panel.dataset.request === request) panel.innerHTML = scannerResultHTML(name,result);
+  if (panel.isConnected && panel.dataset.request === request) {
+    scannerCheckResults.set(name, result);
+    panel.innerHTML = scannerResultHTML(name, result);
+    recheck.disabled = false;
+    updateScannerInfo(name);
+  }
 }
 const credentialLabels = {nvd:'NVD API key', openai:'OpenAI API key', claude:'Claude API key', snyk:'snykTokenLabel', github:'githubTokenLabel'};
 const credentialDots = '••••••';
@@ -720,17 +1569,19 @@ function credentialSettingsHTML() {
   return `<section class="settings-section"><h3>${t('tokens')}</h3><p>${t('tokensHint')}</p><div class="form-grid">${fields}</div>${back}</section>`;
 }
 
-function renderSettings(){const s=state.settings;clearing=new Set();$('#main').innerHTML=heading(t('settings'),t('settingsSub'))+`<form id="settings-form" class="settings-layout panel"><section class="settings-section"><h3>${t('general')}</h3><div class="form-grid"><label><span>${t('uiLanguage')}</span><select name="language">${languageOptions()}</select></label></div></section><section class="settings-section"><h3>${t('sourceSettings')}</h3><p>${t('sourceSettingsHint')}</p>${['nvd','cve','osv'].map(n=>`<label class="check-row"><input type="checkbox" name="source_${n}" ${s.sources[n]?'checked':''}><span><strong>${{nvd:'NIST NVD',cve:'CVE Program',osv:'OSV.dev'}[n]}</strong><small>${t({nvd:'discovery',cve:'enrichment',osv:'packageMatching'}[n])}</small></span></label>`).join('')}<div class="form-grid">${field('nvd_url','nvdEndpoint',s.nvd_url,'url','required')}${field('cve_url','cveEndpoint',s.cve_url,'url','required')}${field('osv_url','osvEndpoint',s.osv_url,'url','required')}</div></section>${cacheSettingsHTML()}${credentialSettingsHTML()}<section class="settings-section"><h3>${t('aiSettings')}</h3><p>${t('aiSettingsHint')}</p><div class="form-grid"><label><span>${t('defaultProvider')}</span><select name="ai_provider">${providerOptions(s.ai_provider)}</select></label><div></div>${field('openai_model','openaiModel',s.openai_model,'text','placeholder="e.g. a model ID enabled for your API account"')}${field('claude_model','claudeModel',s.claude_model,'text','placeholder="e.g. a model ID enabled for your API account"')}</div></section><section class="settings-section"><h3>${t('scannerSettings')}</h3><p>${t('scannerSettingsHint')}</p><div class="form-grid">${scannerSettingsHTML(s.scanners)}</div></section><section class="settings-section"><p class="storage-note">${t('storageNote')}</p>${storageDirectoryHTML()}${storagePathsHTML()}</section><div class="settings-actions"><button class="button primary" type="submit">${t('saveSettings')}</button><span class="form-error" id="settings-error"></span></div></form>`;$('#settings-form').addEventListener('submit',saveSettings);$$('[data-scanner-check]:checked').forEach(checkScanner);}
+function renderSettings(){const s=state.settings;clearing=new Set();scannerCheckResults.clear();$('#main').innerHTML=heading(t('settings'),t('settingsSub'))+`<form id="settings-form" class="settings-layout panel"><section class="settings-section"><h3>${t('general')}</h3><div class="form-grid"><label><span>${t('uiLanguage')}</span><select name="language">${languageOptions()}</select></label></div></section>${sourceSettingsHTML(s)}${cveDatabaseSettingsHTML()}${nvdDatabaseSettingsHTML()}${osvDatabaseSettingsHTML()}${credentialSettingsHTML()}<section class="settings-section"><h3>${t('aiSettings')}</h3><p>${t('aiSettingsHint')}</p><div class="form-grid"><label><span>${t('defaultProvider')}</span><select name="ai_provider">${providerOptions(s.ai_provider)}</select></label><div></div>${field('openai_model','openaiModel',s.openai_model,'text','placeholder="e.g. a model ID enabled for your API account"')}${field('claude_model','claudeModel',s.claude_model,'text','placeholder="e.g. a model ID enabled for your API account"')}</div></section><section class="settings-section"><h3>${t('scannerSettings')}</h3><p>${t('scannerSettingsHint')}</p><div class="form-grid scanner-settings-grid">${scannerSettingsHTML(s.scanners)}</div></section><section class="settings-section"><h3>${esc(t('fileDatabases'))}</h3><p class="storage-note">${t('storageNote')}</p>${storageDirectoryHTML()}${storagePathsHTML()}</section>${advancedSettingsHTML()}<div class="settings-actions"><button class="button primary" type="submit">${t('saveSettings')}</button><span class="form-error" id="settings-error"></span></div></form>`;$('#settings-form').addEventListener('submit',saveSettings);$('#settings-form').addEventListener('invalid',revealInvalidAdvancedSetting,true);$$('[data-scanner-check]:checked').forEach(checkScanner);}
 function render(){if(pendingPageRender)return;renderNav();const [page,id,view]=route();if(location.hash===newProjectHash)renderProjectEditor();else if(page==='projects')$('#main').innerHTML=heading(t('projects'),t('projectsSub'),button('addProject','new-project',true,'plus'))+`<div class="panel"><div class="panel-head"><h2>${t('yourProjects')} <span class="muted">(${state.projects.length})</span></h2></div>${projectList(state.projects, true)}</div>`;else if(page==='vulnerabilities'){$('#main').innerHTML=heading(t('vulnerabilities'),t('vulnsSub'),state.projects.length?syncAllControls(true):'')+filtersHTML(true)+`<div class="panel" id="finding-results">${findingsTable()}</div>`;bindFilters();}else if(page==='activity')$('#main').innerHTML=heading(t('activity'),t('activitySub'))+`<div class="panel">${activityList()}</div>`;else if(page==='settings')renderSettings();else if(page==='project'){if(view==='edit')renderProjectEditor(id);else if(view==='delete')renderProjectDeletion(id);else renderProject(id);}else renderOverview();mountActiveSyncs();}
 function componentFields(a={},removable=true){const el=document.createElement('div');el.className='asset-field';el.dataset.id=a.id||'';el.innerHTML=`<div class="asset-top"><label><span>${t('category')}</span><select data-field="kind">${['language','database','container','docker','webserver','ai','library','other'].map(k=>`<option value="${k}" ${(a.kind||'library')===k?'selected':''}>${t(k)}</option>`).join('')}</select></label><label><span>${t('name')}</span><input data-field="name" value="${esc(a.name)}" required placeholder="org.apache.logging.log4j:log4j-core" maxlength="300"></label><label><span>${t('version')}</span><input data-field="version" value="${esc(a.version)}" required placeholder="2.14.1" maxlength="100"></label>${removable?`<button type="button" class="icon-button asset-remove" aria-label="${t('removeComponent')}">×</button>`:''}</div><div class="asset-bottom"><label><span>${t('ecosystem')}</span><select data-field="ecosystem"><option value="">—</option>${['Go','npm','PyPI','Maven','Packagist','crates.io','RubyGems','NuGet','Hex','Pub','Debian','Alpine','GIT'].map(e=>`<option ${a.ecosystem===e?'selected':''}>${e}</option>`).join('')}</select></label><label><span>${t('cpeLabel')}</span><input data-field="cpe" value="${esc(a.cpe)}" placeholder="cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"></label></div>`;return el;}
 function openComponent(id){const p=state.projects.find(p=>p.id===id);if(!p||p.syncing)return false;componentDraft={...p,assets:p.assets.map(a=>({...a}))};$('#component-form').reset();$('#component-error').textContent='';$('#component-project').textContent=t('componentProject').replace('{project}',p.name);const fields=$('#component-fields');fields.innerHTML='';const el=componentFields({},false);fields.append(el);localize($('#component-dialog'));$('#component-dialog').showModal();el.querySelector('[data-field="name"]').focus();return true;}
-async function saveComponent(e){e.preventDefault();if(!componentDraft)return;const submit=$('#save-component');submit.disabled=true;const p=componentDraft,asset={};$$('[data-field]',$('#component-fields')).forEach(input=>asset[input.dataset.field]=input.value.trim());const body={};for(const key of ['name','description','repository','repository_urls','local_path','schedule','scan_code','revision'])body[key]=p[key];body.assets=[...p.assets,asset];try{await invoke('UpdateProject',p.id,body);$('#component-dialog').close();componentDraft=null;await refresh(false);projectTab='techStack';render();toast(t('saved'));}catch(err){$('#component-error').textContent=err.message;}finally{submit.disabled=false;}}
+async function saveComponent(e){e.preventDefault();if(!componentDraft)return;const submit=$('#save-component');submit.disabled=true;const p=componentDraft,asset={};$$('[data-field]',$('#component-fields')).forEach(input=>asset[input.dataset.field]=input.value.trim());const body={};for(const key of ['name','description','repository','repository_urls','local_path','schedule','scan_code','revision'])body[key]=p[key];body.assets=[...p.assets,asset];try{await invoke('UpdateProject',p.id,body);$('#component-dialog').close();componentDraft=null;await refresh(false);projectTab='techStack';render();toast(t('saved'));}catch(err){$('#component-error').textContent=formatError(err);}finally{submit.disabled=false;}}
 const projectTextFields = ['name', 'description', 'local_path', 'schedule'];
 
-function repositoryField(url = '') {
+function repositoryField(url = '', profile = githubScannerProfile(null, false)) {
   const row = document.createElement('div');
   row.className = 'project-repository';
-  row.innerHTML = `<input type="url" data-repository-url value="${esc(url)}" aria-label="${esc(t('repository'))}" placeholder="https://github.com/your-org/project"><button type="button" class="icon-button" data-action="remove-repository" aria-label="${esc(t('removeRepositoryURL'))}">×</button>`;
+  row.innerHTML = `<input type="url" data-repository-url value="${esc(url)}" aria-label="${esc(t('repository'))}" placeholder="https://github.com/your-org/project"><button type="button" class="icon-button" data-action="remove-repository" aria-label="${esc(t('removeRepositoryURL'))}">×</button>${projectScannerProfileHTML(profile)}`;
+  const card = $('[data-repository-profile]', row);
+  if (card) card.hidden = !url.trim();
   return row;
 }
 
@@ -738,8 +1589,17 @@ function projectFormValues(form, trim = false) {
   const value = input => trim ? input.value.trim() : input.value;
   const body = {scan_code: form.elements.scan_code.checked};
   for (const key of projectTextFields) body[key] = value(form.elements[key]);
-  const repositories = $$('[data-repository-url]', form).map(value);
+  const repositoryInputs = $$('[data-repository-url]', form);
+  const repositories = repositoryInputs.map(value);
   body.repository_urls = trim ? repositories.filter(Boolean) : repositories;
+  if (form.dataset.scannerProfiles === 'true') {
+    body.repository_scanners = repositoryInputs.filter(input => input.value.trim()).map(input => ({
+      repository:value(input), profile:readProjectScannerProfile($('[data-repository-profile]', input.closest('.project-repository'))),
+    }));
+    if (body.local_path.trim()) {
+      body.repository_scanners.push({local:true, profile:readProjectScannerProfile($('[data-repository-profile]', $('[data-local-scanner-profile]', form)))});
+    }
+  }
   body.assets = $$('.asset-field', form).map(row => {
     const asset = {id: row.dataset.id};
     for (const field of $$('[data-field]', row)) asset[field.dataset.field] = value(field);
@@ -751,6 +1611,7 @@ function projectFormValues(form, trim = false) {
 function mountProjectForm(container, project) {
   const form = $('#project-form-template').content.firstElementChild.cloneNode(true);
   form.dataset.language = lang;
+  form.dataset.scannerProfiles = 'true';
   if (project?.id) {
     form.dataset.projectId = project.id;
     form.dataset.revision = project.revision;
@@ -761,7 +1622,10 @@ function mountProjectForm(container, project) {
   form.elements.scan_code.checked = !!project?.scan_code;
   const repositories = projectRepositories(project);
   const list = $('[data-project-repositories]', form);
-  for (const url of repositories.length ? repositories : ['']) list.append(repositoryField(url));
+  for (const url of repositories.length ? repositories : ['']) list.append(repositoryField(url, repositoryProfileFor(project, url)));
+  const localProfile = $('[data-local-scanner-profile]', form);
+  localProfile.innerHTML = projectScannerProfileHTML(localRepositoryProfileFor(project), true);
+  localProfile.hidden = !form.elements.local_path.value.trim();
   const assets = $('[data-project-assets]', form);
   for (const asset of project?.assets ?? [{}]) assets.append(componentFields(asset));
   form.addEventListener('submit', saveProject);
@@ -867,7 +1731,7 @@ async function deleteProject(event) {
   try {
     await invoke('DeleteProject', id, confirmation);
   } catch (err) {
-    error.textContent = err.message;
+    error.textContent = formatError(err);
     form.dataset.pending = 'false';
     input.disabled = cancel.disabled = false;
     updateProjectDeletionForm(form, state.projects.find(p => p.id === id) ?? project);
@@ -919,9 +1783,9 @@ async function saveProject(e) {
     } else {
       render();
     }
-    toast(t('saved'));
+    toast(t(projectNeedsAssessment(project) ? 'projectSavedResyncNeeded' : projectNeedsCodeScan(project) ? 'projectSavedScanNeeded' : 'saved'));
   } catch (err) {
-    error.textContent = err.message;
+    error.textContent = formatError(err);
   } finally {
     submit.disabled = false;
   }
@@ -934,9 +1798,16 @@ async function saveSettings(e) {
   submit.disabled = true;
   const body = {...state.settings, sources:{}, scanners:{}, tokens:{}, clear_tokens:[...clearing]};
   for (const key of ['language','nvd_url','cve_url','osv_url','ai_provider','openai_model','claude_model']) body[key] = form.elements[key].value.trim();
+  if (form.elements.osv_update_schedule) {
+    body.osv_update_schedule = form.elements.osv_update_schedule.value;
+    body.osv_ecosystems = $$('[data-osv-ecosystem]:checked', form).map(input => input.value);
+  }
+
+  if (form.elements.nvd_update_schedule) body.nvd_update_schedule = form.elements.nvd_update_schedule.value;
+  if (form.elements.cve_update_schedule) body.cve_update_schedule = form.elements.cve_update_schedule.value;
   for (const key of ['cache_hours','cache_max_entries','cache_max_mib']) body[key] = Number(form.elements[key].value);
   for (const key of ['nvd','cve','osv']) body.sources[key] = form.elements['source_'+key].checked;
-  for (const key of Object.keys(scannerLabels)) body.scanners[key] = form.elements['scanner_'+key].checked;
+  for (const {id} of scannerDefinitions()) body.scanners[id] = form.elements['scanner_'+id].checked;
   for (const key of Object.keys(credentialLabels)) body.tokens[key] = form.elements['token_'+key].value.trim();
   for (const field of $$('.credential-field', form)) setCredentialVisibility(field, false);
   try {
@@ -949,8 +1820,8 @@ async function saveSettings(e) {
     toast(t('saved'));
   } catch (err) {
     const error = $('#settings-error');
-    if (error) error.textContent = err.message;
-    else toast(err.message, true);
+    if (error) error.textContent = formatError(err);
+    else toast(formatError(err), true);
   } finally {
     submit.disabled = false;
   }
@@ -967,7 +1838,37 @@ async function scanProjectCode(id) {
   await refresh();
   toast(t('codeScanStarted'));
 }
-async function syncProject(id,assetID='',mode='auto',severity=''){const options=assetID?{asset_id:assetID}:{};if(mode!=='auto')options.mode=mode;if(severity)options.severity=severity;await invoke('Sync',id,options);await refresh();toast(t('syncStarted'));}
+async function syncProject(id, selection = '', mode = 'auto', severity = '') {
+  const project = state?.projects?.find(project => project.id === id);
+  const options = {};
+  let repositories = false;
+  let components = false;
+  if (Array.isArray(selection)) {
+    if (!selection.length) throw new Error(t('assessmentChooseItems'));
+    const available = assessmentOptions(project);
+    const selected = [...new Set(selection)].map(key => available.find(option => option.key === key));
+    if (selected.some(option => !option)) throw new Error(t('assessmentSelectionChanged'));
+    options.asset_ids = selected.filter(option => !option.target).map(option => option.key);
+    options.scan_targets = selected.filter(option => option.target).map(option => option.target);
+    repositories = options.scan_targets.length > 0;
+    components = options.asset_ids.length > 0;
+  } else if (selection) {
+    const repository = project && scanLocations(project).find(location => location.key === selection);
+    if (repository) options.scan_target = repository.target;
+    else options.asset_id = selection;
+    repositories = Boolean(repository);
+    components = !repository;
+  }
+  if (!repositories && mode !== 'auto') options.mode = mode;
+  if (severity) options.severity = severity;
+
+  await invoke('Sync', id, options);
+  await refresh();
+
+  const run = state?.projects?.find(project => project.id === id)?.runs?.[0];
+  toast(t(run && queuedWorkflow(run) ? 'syncQueued' : repositories && !components ? 'codeScanStarted' : 'syncStarted'));
+}
+
 async function sample(){const p=await invoke('CreateProject',{name:'Sample · Java service',description:t('sampleDescription'),repository:'',local_path:'',scan_code:false,schedule:'off',assets:[{id:'',kind:'library',name:'org.apache.logging.log4j:log4j-core',version:'2.14.1',ecosystem:'Maven',cpe:'cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*'}]});await refresh(false);location.hash='project/'+p.id;projectTab='techStack';render();toast(t('sampleAdded'));}
 function showFinding(id,asset,project){
   const p = state.projects.find(p => p.id === project);
@@ -975,8 +1876,8 @@ function showFinding(id,asset,project){
   if (!finding) return;
   const f = {...finding, project_id:p.id, project_name:p.name};
   currentFinding=f;$('#detail-body').innerHTML=`<div class="detail-tags">${pill(t(severityKey(f.severity)),severityKey(f.severity))}${pill(f.id)}${pill(t(f.match),f.match==='review'?'review':'')}${f.score?pill(t('score')+' '+f.score):''}</div><h2 class="detail-title">${esc(f.title||f.id)}</h2><p class="subtitle">${esc(f.component)} ${esc(findingVersionLabel(f))} · ${esc(f.project_name)} · ${esc(f.sources.join(' + '))}</p>${f.match==='review'?`<div class="notice">${t('reviewWarning')}</div>`:f.match==='cpe'?`<div class="notice info">${t('cpeWarning')}</div>`:''}<p class="detail-description">${esc(f.description)}</p><div class="detail-section"><h3>${t('remediation')}</h3><div id="advice-result"></div><div class="advice-actions"><select id="advice-provider" aria-label="${t('defaultProvider')}">${providerOptions(state.settings.ai_provider)}</select><button class="button primary small" data-action="advice">${t('getAdvice')}</button></div><p class="form-note">${t('aiDisclosure')}</p></div><div class="detail-section"><h3>${t('references')}</h3><ul class="reference-list">${f.references?.length?f.references.map(u=>safeURL(u)?`<li><a href="${safeURL(u)}" target="_blank" rel="noreferrer">${esc(u)} ↗</a></li>`:'').join(''):`<li class="muted">${t('noReferences')}</li>`}</ul></div>`;$('#detail-dialog').showModal();getAdvice('public');}
-async function getAdvice(provider){const f=currentFinding,container=$('#advice-result');container.innerHTML=`<div class="advice-box"><p>${t('generating')}</p></div>`;const btn=$('[data-action="advice"]');if(btn)btn.disabled=true;try{const a=await invoke('Advice',f.project_id,{finding_id:f.id,asset_id:f.asset_id,provider});if(currentFinding!==f)return;container.innerHTML=`<div class="advice-box"><h3>${t(a.provider)}</h3><p>${esc(a.text)}</p>${a.warning?`<p class="form-error">${esc(a.warning)}</p>`:''}${a.provider!=='public'?`<p class="form-note">${t('aiReview')}</p>`:''}</div>`;}catch(err){container.innerHTML=`<p class="form-error">${esc(err.message)}</p>`;}finally{if(btn)btn.disabled=false;}}
-document.addEventListener('click',async e=>{if(changingDataDirectory)return;const pageButton=e.target.closest('[data-finding-page]');if(pageButton){if(!pageButton.disabled)turnFindingPage(pageButton.dataset.findingPage);return;}const close=e.target.closest('.close-dialog');if(close){close.closest('dialog').close();return;}if(e.target.closest('.asset-remove')){e.target.closest('.asset-field').remove();return;}const clear=e.target.closest('[data-clear-token]');if(clear){clearCredential(clear);return;}const dismiss=e.target.closest('[data-dismiss-workflow]');if(dismiss){dismissWorkflow(dismiss.dataset.projectId,dismiss.dataset.dismissWorkflow);return;}const toggle=e.target.closest('[data-toggle-workflow]');if(toggle){toggleWorkflow(toggle.dataset.toggleWorkflow);return;}const tab=e.target.closest('[data-tab]');if(tab){if(projectTab!==tab.dataset.tab)expandedRuns.clear();projectTab=tab.dataset.tab;render();return;}const row=e.target.closest('[data-finding]');if(row){showFinding(row.dataset.finding,row.dataset.asset,row.dataset.project);return;}const target=e.target.closest('[data-action]');if(!target)return;try{switch(target.dataset.action){case'new-project':openNewProject();break;case'edit-project':location.hash='project/'+target.dataset.id+'/edit';break;case'cancel-project':cancelProject(target.closest('form'));break;case'add-project-asset':{const asset=componentFields();$('[data-project-assets]',target.closest('form')).append(asset);$('[data-field="name"]',asset).focus();break;}case'add-component':openComponent(target.dataset.id);break;case'scan-code':target.disabled=true;await scanProjectCode(target.dataset.id);break;case'sync':target.disabled=true;await syncProject(target.dataset.id,$('#sync-asset')?.value||'', $('#sync-mode')?.value||'auto',$('#sync-severity')?.value||'');break;case'sync-asset':target.disabled=true;await syncProject(target.dataset.id,target.dataset.asset,'auto',componentSyncSeveritySelection.get(stackKey(target.dataset.id,target.dataset.asset))||'');break;case'sync-all':{const severity=syncAllSeverity;target.disabled=true;for(const p of state.projects)if(!p.syncing)await invoke('Sync',p.id,severity?{severity}:{});await refresh();toast(t('syncStarted'));break;}case'sample':target.disabled=true;await sample();break;case'delete-project':openProjectDeletion(target.dataset.id);break;
+async function getAdvice(provider){const f=currentFinding,container=$('#advice-result');container.innerHTML=`<div class="advice-box"><p>${t('generating')}</p></div>`;const btn=$('[data-action="advice"]');if(btn)btn.disabled=true;try{const a=await invoke('Advice',f.project_id,{finding_id:f.id,asset_id:f.asset_id,provider});if(currentFinding!==f)return;container.innerHTML=`<div class="advice-box"><h3>${t(a.provider)}</h3><p>${esc(a.text)}</p>${a.warning_message || a.warning?`<p class="form-error">${esc(messageText(a.warning_message || a.warning))}</p>`:''}${a.provider!=='public'?`<p class="form-note">${t('aiReview')}</p>`:''}</div>`;}catch(err){container.innerHTML=`<p class="form-error">${esc(formatError(err))}</p>`;}finally{if(btn)btn.disabled=false;}}
+document.addEventListener('click',async e=>{if(changingDataDirectory)return;const pageButton=e.target.closest('[data-finding-page]');if(pageButton){if(!pageButton.disabled)turnFindingPage(pageButton.dataset.findingPage);return;}const close=e.target.closest('.close-dialog');if(close){close.closest('dialog').close();return;}if(e.target.closest('.asset-remove')){e.target.closest('.asset-field').remove();return;}const clear=e.target.closest('[data-clear-token]');if(clear){clearCredential(clear);return;}const dismiss=e.target.closest('[data-dismiss-workflow]');if(dismiss){dismissWorkflow(dismiss.dataset.projectId,dismiss.dataset.dismissWorkflow);return;}const toggle=e.target.closest('[data-toggle-workflow]');if(toggle){toggleWorkflow(toggle.dataset.toggleWorkflow);return;}const tab=e.target.closest('[data-tab]');if(tab){if(projectTab!==tab.dataset.tab)expandedRuns.clear();projectTab=tab.dataset.tab;render();return;}const row=e.target.closest('[data-finding]');if(row){showFinding(row.dataset.finding,row.dataset.asset,row.dataset.project);return;}const target=e.target.closest('[data-action]');if(!target)return;try{switch(target.dataset.action){case'clear-scope-search':clearScopeSearch(target);break;case'new-project':openNewProject();break;case'edit-project':location.hash='project/'+target.dataset.id+'/edit';break;case'cancel-project':cancelProject(target.closest('form'));break;case'add-project-asset':{const asset=componentFields();$('[data-project-assets]',target.closest('form')).append(asset);$('[data-field="name"]',asset).focus();break;}case'add-component':openComponent(target.dataset.id);break;case'scan-code':target.disabled=true;await scanProjectCode(target.dataset.id);break;case'sync':target.disabled=true;await syncProject(target.dataset.id,syncSelection[target.dataset.id]||'', $('#sync-mode')?.value||'auto',$('#sync-severity')?.value||'');break;case'sync-asset':target.disabled=true;await syncProject(target.dataset.id,target.dataset.asset,'auto',componentSyncSeveritySelection.get(stackKey(target.dataset.id,target.dataset.asset))||'');break;case'sync-all':{const severity=syncAllSeverity;target.disabled=true;for(const p of state.projects)if(!p.syncing)await invoke('Sync',p.id,severity?{severity}:{});await refresh();toast(t(state.projects.some(p=>p.runs?.[0]&&queuedWorkflow(p.runs[0]))?'syncRequestsSubmitted':'syncStarted'));break;}case'sample':target.disabled=true;await sample();break;case'delete-project':openProjectDeletion(target.dataset.id);break;
 case'cancel-project-deletion':location.hash='project/'+target.closest('form').dataset.projectId+'/edit';break;
 case'control-sync':target.disabled=true;try{await controlWorkflow(target.dataset.id,target.dataset.run,target.dataset.control);}finally{target.disabled=false;}break;case'delete-activity':target.disabled=true;try{await deleteActivity(target.dataset.id,target.dataset.run);}finally{target.disabled=false;}break;case'browse-data-directory':await browseFolder($('#data-directory'),'chooseDataDirectory',state.data_directory);break;case'add-repository': {
   const row = repositoryField();
@@ -992,18 +1893,72 @@ case'remove-repository': {
   break;
 }
 case'configure-github-token':configureGitHubToken(target.closest('form'));break;
+case'scanner-info':openScannerInfo(target.dataset.scanner);break;
+case'database-info':openDatabaseInfo(target.dataset.database);break;
 case'focus-snyk-token': {
-  const token = $('#credential-snyk', target.closest('form'));
+  const token = $('#credential-snyk');
+  if (!token) break;
+  const dialog = $('#scanner-info-dialog');
+  if (dialog.open) dialog.close();
   token.scrollIntoView({block:'center'});
   token.focus({preventScroll:true});
   break;
 }
 case'return-to-project-form':if(projectTokenSetup)location.hash=projectTokenSetup.returnHash;break;
 case'toggle-credential':await toggleCredential(target);break;
-case'browse-local-repository':await browseFolder(target.closest('form').elements.local_path,'chooseRepositoryFolder');break;case'use-data-directory':{const input=$('#data-directory');if(!input.value.trim()){input.focus();return;}await changeDataDirectory(input.value);break;}case'reset-data-directory':await changeDataDirectory('');break;case'check-scanner':{const input=$('[data-scanner-check="'+target.dataset.scanner+'"]');if(input)await checkScanner(input);break;}case'advice':await getAdvice($('#advice-provider').value);break;}}catch(err){toast(err.message,true);target.disabled=false;}});
-document.addEventListener('change',e=>{if(e.target.matches('[data-scanner-check]'))checkScanner(e.target);if(e.target.matches('[data-sync-project]'))syncSelection[e.target.dataset.syncProject]=e.target.value;if(e.target.matches('[data-sync-mode-project]'))syncModeSelection[e.target.dataset.syncModeProject]=e.target.value;if(e.target.matches('[data-sync-severity-project]'))syncSeveritySelection[e.target.dataset.syncSeverityProject]=e.target.value;if(e.target.matches('[data-sync-all-severity]'))syncAllSeverity=e.target.value;if(e.target.matches('[data-sync-component-severity]'))componentSyncSeveritySelection.set(stackKey(e.target.dataset.projectId,e.target.dataset.assetId),e.target.value);});
+case'suggest-osv-ecosystems': {
+    const selected = suggestedOSVEcosystems();
+    $$('[data-osv-ecosystem]').forEach(input => {input.checked = selected.includes(input.value);});
+    updateOSVEcosystemSelectionSummary();
+    break;
+  }
+case'clear-api-response-cache':await clearAPIResponseCache(target);break;
+case'update-osv-database':case'stop-osv-database':case'rebuild-osv-database': {
+    const action = target.dataset.action;
+    if (action !== 'stop-osv-database') {
+      const saved = state.settings.osv_ecosystems ?? suggestedOSVEcosystems();
+      const selected = $$('[data-osv-ecosystem]:checked').map(input => input.value);
+      if (JSON.stringify([...saved].sort()) !== JSON.stringify([...selected].sort())) throw new Error(t('osvDBSaveFirst'));
+    }
+    if (action === 'rebuild-osv-database' && !(await confirmAction(t('osvDBRebuildConfirm')))) break;
+    target.disabled = true;
+    try {
+      await invoke({'update-osv-database':'UpdateOSVDatabase','stop-osv-database':'StopOSVDatabaseUpdate','rebuild-osv-database':'RebuildOSVDatabase'}[action]);
+      applyPollingState(await invoke('StateSince', state.version || ''));
+    } finally {
+      target.disabled = Boolean(state.osv_database?.running) && action !== 'stop-osv-database';
+    }
+    break;
+  }
+case'update-nvd-database':case'stop-nvd-database':case'rebuild-nvd-database':{
+  const action=target.dataset.action;
+  if(action==='rebuild-nvd-database'&&!(await confirmAction(t('nvdDBRebuildConfirm'))))break;
+  target.disabled=true;
+  try{
+    await invoke({'update-nvd-database':'UpdateNVDDatabase','stop-nvd-database':'StopNVDDatabaseUpdate','rebuild-nvd-database':'RebuildNVDDatabase'}[action]);
+    const next=await invoke('StateSince',state.version||'');applyPollingState(next);
+  }finally{target.disabled=Boolean(state.nvd_database?.running)&&action!=='stop-nvd-database';}
+  break;
+}
+case'update-cve-database':case'stop-cve-database':case'rebuild-cve-database':{
+  const action=target.dataset.action;
+  if(action==='rebuild-cve-database'&&!(await confirmAction(t('cveDBRebuildConfirm'))))break;
+  target.disabled=true;
+  try{
+    await invoke({'update-cve-database':'UpdateCVEDatabase','stop-cve-database':'StopCVEDatabaseUpdate','rebuild-cve-database':'RebuildCVEDatabase'}[action]);
+    const next=await invoke('StateSince',state.version||'');applyPollingState(next);
+  }finally{target.disabled=Boolean(state.cve_database?.running)&&action!=='stop-cve-database';}
+  break;
+}
+case'browse-local-repository':await browseFolder(target.closest('form').elements.local_path,'chooseRepositoryFolder');break;case'use-data-directory':{const input=$('#data-directory');if(!input.value.trim()){input.focus();return;}await changeDataDirectory(input.value);break;}case'reset-data-directory':await changeDataDirectory('');break;case'check-scanner':{const input=$('[data-scanner-check="'+target.dataset.scanner+'"]');if(input)await checkScanner(input);break;}case'advice':await getAdvice($('#advice-provider').value);break;}}catch(err){toast(formatError(err),true);target.disabled=false;}});
+document.addEventListener('change',e=>{if(e.target.matches('[data-osv-ecosystem]'))updateOSVEcosystemSelectionSummary();if(e.target.matches('[data-project-scanner-mode]'))changeProjectScannerMode(e.target);if(e.target.matches('[data-scanner-check]'))checkScanner(e.target);if(e.target.matches('[data-sync-project]')){changeAssessmentSelection(e.target);}if(e.target.matches('[data-sync-mode-project]')){syncModeSelection[e.target.dataset.syncModeProject]=e.target.value;updateAssessmentAction(e.target.dataset.syncModeProject);}if(e.target.matches('[data-sync-severity-project]'))syncSeveritySelection[e.target.dataset.syncSeverityProject]=e.target.value;if(e.target.matches('[data-sync-all-severity]'))syncAllSeverity=e.target.value;if(e.target.matches('[data-sync-component-severity]'))componentSyncSeveritySelection.set(stackKey(e.target.dataset.projectId,e.target.dataset.assetId),e.target.value);});
 document.addEventListener('input', e => {
   const input = e.target;
+  if (input.matches('[data-repository-url]') || input.name === 'local_path') updateRepositoryProfileVisibility(input);
+  if (input.matches('[data-scope-search]')) {
+    filterScopeChoices(input);
+    return;
+  }
   if (!input.matches('[data-credential-input]')) return;
   input.placeholder = '';
   const field = input.closest('.credential-field');
@@ -1024,7 +1979,7 @@ window.addEventListener('vulman-select-all', () => {
   if (document.activeElement?.dispatchEvent(shortcut)) document.execCommand('selectAll');
 });
 $('#component-form').addEventListener('submit',saveComponent);$('#help-button').addEventListener('click',()=>$('#about-dialog').showModal());
-$('#language-select').addEventListener('change',async e=>{const select=e.target;if(!state||changingDataDirectory||select.value===lang)return;select.disabled=true;try{await invoke('SaveSettings',{...state.settings,language:select.value});await refresh();}catch(err){select.value=lang;toast(err.message,true);}finally{select.disabled=false;}});
+$('#language-select').addEventListener('change',async e=>{const select=e.target;if(!state||changingDataDirectory||select.value===lang)return;select.disabled=true;try{await invoke('SaveSettings',{...state.settings,language:select.value});await refresh();}catch(err){select.value=lang;toast(formatError(err),true);}finally{select.disabled=false;}});
 $('#confirm-action').addEventListener('click', () => $('#confirm-dialog').close('confirm'));
 const followExternalLink = async event => {
   if (event.type === 'auxclick' && event.button !== 1) return;
@@ -1034,7 +1989,7 @@ const followExternalLink = async event => {
   try {
     await invoke('OpenExternal', link.href);
   } catch (err) {
-    toast(err.message, true);
+    toast(formatError(err), true);
   }
 };
 document.addEventListener('click', followExternalLink, true);
@@ -1079,11 +2034,15 @@ function renderNavigation() {
 }
 function showPageError(err) {
   const title = Object.hasOwn(localizations, defaultLanguage) ? t('errorTitle') : 'Vulman';
-  $('#main').innerHTML = `<div class="error-page"><h1>${esc(title)}</h1><p>${esc(err.message)}</p></div>`;
+  $('#main').innerHTML = `<div class="error-page"><h1>${esc(title)}</h1><p>${esc(formatError(err))}</p></div>`;
 }
 
 history.scrollRestoration = 'manual';
 window.addEventListener('hashchange', () => {
+  const scannerInfo = $('#scanner-info-dialog');
+  if (scannerInfo.open) scannerInfo.close();
+  const databaseInfo = $('#database-info-dialog');
+  if (databaseInfo.open) databaseInfo.close();
   expandedRuns.clear();
   filter = {search:'', severity:'', project:'', match:'', stack:''};
   const [page, id, view] = route();
@@ -1130,4 +2089,92 @@ async function boot() {
     showPageError(err);
   }
 }
+
+function scopeSearchHTML(disabled = false) {
+  return `<div class="scope-search" role="search">${icon('search')}<input type="search" data-scope-search aria-label="${esc(t('scopeSearch'))}" placeholder="${esc(t('scopeSearch'))}" autocomplete="off" spellcheck="false" ${disabled ? 'disabled' : ''}><button type="button" class="icon-button" data-action="clear-scope-search" aria-label="${esc(t('scopeSearchClear'))}" title="${esc(t('scopeSearchClear'))}" hidden>×</button></div><p class="scope-search-empty" data-scope-empty role="status" aria-live="polite" hidden>${esc(t('scopeSearchEmpty'))}</p>`;
+}
+
+function filterScopeChoices(input) {
+  const menu = input.closest('.scope-picker-menu');
+  if (!menu) return;
+  const terms = input.value.normalize('NFKC').toLowerCase().trim().split(/\s+/).filter(Boolean);
+  let matches = 0;
+  for (const row of $$('.scope-group .scope-choice', menu)) {
+    const text = (row.textContent || '').normalize('NFKC').toLowerCase();
+    row.hidden = !terms.every(term => text.includes(term));
+    if (!row.hidden) matches++;
+  }
+  for (const group of $$('.scope-group', menu)) {
+    group.hidden = !$$('.scope-choice', group).some(row => !row.hidden);
+  }
+  $('[data-scope-empty]', menu).hidden = !terms.length || matches > 0;
+  $('[data-action="clear-scope-search"]', menu).hidden = !input.value.length;
+  menu.scrollTop = 0;
+  const picker = menu.closest('details.scope-picker');
+  if (picker) positionScopePicker(picker);
+}
+
+function clearScopeSearch(button) {
+  const menu = button.closest('.scope-picker-menu');
+  const input = menu && $('[data-scope-search]', menu);
+  if (!input) return;
+  input.value = '';
+  filterScopeChoices(input);
+  input.focus({preventScroll:true});
+}
+
+function scopePickerToggled(picker) {
+  const search = $('[data-scope-search]', picker);
+  if (picker.open) {
+    positionScopePicker(picker);
+    search?.focus({preventScroll:true});
+  } else if (search) {
+    search.value = '';
+    filterScopeChoices(search);
+  }
+}
+
+function positionScopePicker(picker) {
+  if (!picker.open) return;
+  const summary = $('summary', picker);
+  const menu = $('.scope-picker-menu', picker);
+  if (!summary || !menu) return;
+
+  const rect = summary.getBoundingClientRect();
+  const margin = 16, gap = 7;
+  const below = Math.max(0, window.innerHeight - rect.bottom - gap - margin);
+  const above = Math.max(0, rect.top - gap - margin);
+  const desired = Math.min(420, menu.scrollHeight);
+  const upwards = below < Math.min(200, desired) && above > below;
+  menu.style.maxHeight = Math.floor(Math.min(420, upwards ? above : below)) + 'px';
+  menu.style.top = upwards ? 'auto' : 'calc(100% + 7px)';
+  menu.style.bottom = upwards ? 'calc(100% + 7px)' : 'auto';
+
+  const width = menu.offsetWidth;
+  const left = Math.min(Math.max(rect.right - width, margin), Math.max(margin, window.innerWidth - margin - width));
+  menu.style.right = Math.round(rect.right - left - width) + 'px';
+}
+
+function positionOpenScopePickers(event) {
+  if (event?.target?.closest?.('.scope-picker-menu')) return;
+  $$('details.scope-picker[open]').forEach(positionScopePicker);
+}
+document.addEventListener('toggle', event => {
+  if (event.target.matches('details.scope-picker')) scopePickerToggled(event.target);
+}, true);
+document.addEventListener('scroll', positionOpenScopePickers, true);
+window.addEventListener('resize', positionOpenScopePickers);
+
+function closeAssessmentPicker(event) {
+  for (const picker of $$('details.scope-picker[open]')) {
+    if (event.type === 'keydown') {
+      if (event.key !== 'Escape' || !picker.contains(event.target)) continue;
+      picker.open = false;
+      $('summary', picker).focus();
+    } else if (!picker.contains(event.target)) picker.open = false;
+  }
+}
+document.addEventListener('click', closeAssessmentPicker, true);
+document.addEventListener('keydown', closeAssessmentPicker, true);
+
 boot();

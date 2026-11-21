@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"net/url"
@@ -15,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 )
 
@@ -44,7 +44,7 @@ func newPipAuditCommand(ctx context.Context, repository string, scratch *scanScr
 		mode = []string{"--disable-pip", "--no-deps", "--requirement", "requirements.txt"}
 	}
 
-	stage := filepath.Join(scratch.name, "python")
+	stage := filepath.Join(scratch.name, "python-"+model.NewID())
 	if err := scratch.root.Mkdir(stage, 0o700); err != nil {
 		return nil, "", err
 	}
@@ -53,13 +53,13 @@ func newPipAuditCommand(ctx context.Context, repository string, scratch *scanScr
 	for _, name := range inputs {
 		data, err := readPipManifest(source, name)
 		if name == "requirements.txt" && errors.Is(err, fs.ErrNotExist) {
-			return nil, "", errors.New("add a pinned requirements.txt or a pylock.toml lockfile at the repository root")
+			return nil, "", apperror.New("pip_audit_manifest_required", "add a pinned requirements.txt or a pylock.toml lockfile at the repository root")
 		}
 		if err != nil {
 			return nil, "", err
 		}
 		if name == "requirements.txt" && pipRequirementInclude.Match(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))) {
-			return nil, "", errors.New("use a pinned requirements.txt that lists all dependencies directly, without requirements or constraints includes")
+			return nil, "", apperror.New("pip_audit_manifest_includes", "use a pinned requirements.txt that lists all dependencies directly, without requirements or constraints includes")
 		}
 		if err := scratch.root.WriteFile(filepath.Join(stage, name), data, 0o600); err != nil {
 			return nil, "", err
@@ -81,7 +81,7 @@ func readPipManifest(source *os.Root, name string) ([]byte, error) {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s must be a regular file", name)
+		return nil, apperror.Newf("regular_file_required", "%s must be a regular file", name)
 	}
 	file, err := source.Open(name)
 	if err != nil {
@@ -93,7 +93,7 @@ func readPipManifest(source *os.Root, name string) ([]byte, error) {
 		return nil, err
 	}
 	if len(data) > maxManifestBytes {
-		return nil, fmt.Errorf("%s exceeds 16 MiB", name)
+		return nil, apperror.Newf("file_too_large", "%s exceeds 16 MiB", name)
 	}
 	return data, nil
 }
@@ -114,7 +114,7 @@ func parsePipAudit(data []byte) ([]model.Finding, error) {
 	}
 	data = bytes.TrimSpace(data)
 	if len(data) == 0 {
-		return nil, errors.New("no audit report was produced. Check the pip-audit version, network access, and whether the manifest pins all dependency versions")
+		return nil, apperror.New("pip_audit_report_missing", "no audit report was produced. Check the pip-audit version, network access, and whether the manifest pins all dependency versions")
 	}
 	if data[0] == '[' {
 		if err := json.Unmarshal(data, &report.Dependencies); err != nil {
@@ -124,17 +124,17 @@ func parsePipAudit(data []byte) ([]model.Finding, error) {
 		return nil, err
 	}
 	if report.Dependencies == nil {
-		return nil, errors.New("the pip-audit report has no dependencies list")
+		return nil, apperror.New("the_pip_audit_report_has_no_dependencies_list", "the pip-audit report has no dependencies list")
 	}
 
 	out := []model.Finding{}
 	for _, dep := range report.Dependencies {
 		if dep.Skipped != "" || dep.Name == "" || dep.Version == "" || dep.Vulns == nil {
-			return nil, errors.New("the pip-audit report contains an unaudited dependency")
+			return nil, apperror.New("the_pip_audit_report_contains_an_unaudited_dependency", "the pip-audit report contains an unaudited dependency")
 		}
 		for _, vuln := range dep.Vulns {
 			if vuln.ID == "" {
-				return nil, errors.New("the pip-audit report contains a vulnerability without an ID")
+				return nil, apperror.New("the_pip_audit_report_contains_a_vulnerability_without_an_id", "the pip-audit report contains a vulnerability without an ID")
 			}
 			id := vuln.ID
 			for _, alias := range vuln.Aliases {

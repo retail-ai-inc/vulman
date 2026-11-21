@@ -37,6 +37,8 @@ func TestProjectUpdateRemovesFindingsAndAffectedRuns(t *testing.T) {
 	}
 	keptRuns := []model.Run{
 		{ID: "kept-component", AssetID: "kept", Status: "complete", Count: 1},
+		{ID: "kept-multiple", Selection: &model.AssessmentSelection{Assets: []model.AssessmentItem{{ID: "kept"}}, Repositories: []model.AssessmentItem{{ID: keptKey}, {ID: "local"}}}},
+		{ID: "kept-scoped-scan", Mode: "code", ScanTarget: keptKey},
 		{ID: "kept-scan", Mode: "code", ScanTargets: []string{keptKey, "local"}, Count: 2},
 		{ID: "older-local-scan", Mode: "code", Logs: []model.SyncLog{{Event: "run_started"}, {ScanTarget: "local"}}},
 	}
@@ -46,6 +48,9 @@ func TestProjectUpdateRemovesFindingsAndAffectedRuns(t *testing.T) {
 		p.Findings = findings
 		p.Runs = append([]model.Run{
 			{ID: "removed-component", AssetID: "removed"},
+			{ID: "removed-multiple-component", Selection: &model.AssessmentSelection{Assets: []model.AssessmentItem{{ID: "removed"}, {ID: "kept"}}}},
+			{ID: "removed-multiple-repository", Selection: &model.AssessmentSelection{Repositories: []model.AssessmentItem{{ID: removedKey}, {ID: keptKey}}}},
+			{ID: "removed-scoped-scan", Mode: "code", ScanTarget: removedKey},
 			{ID: "mixed-assessment", Count: 4, Steps: []model.SyncStep{{ID: "nvd:kept"}, {ID: "osv:removed"}, {ID: "save"}}},
 			{ID: "removed-scan", Mode: "code", ScanTargets: []string{removedKey, keptKey}, Count: 2},
 			{ID: "older-remote-scan", Mode: "auto", Logs: []model.SyncLog{{StepID: "scanner", ScanTarget: "remote", ScanRepository: urlLabel}}},
@@ -130,5 +135,58 @@ func TestProjectUpdateCleansReplacedLocalFolderAndDisablesScanningAfterFinalRemo
 	if err != nil || removed.ScanCode || removed.LocalPath != "" ||
 		!reflect.DeepEqual(removed.Findings, []model.Finding{inventory}) || !reflect.DeepEqual(removed.Runs, []model.Run{inventoryRun}) {
 		t.Fatalf("unexpected project after removing final location: %+v, %v", removed, err)
+	}
+}
+
+func TestVersionEditRequiresReassessmentAndPreservesPreviousResults(t *testing.T) {
+	db := newTestStore(t)
+	desktop := &Desktop{store: db}
+	project, err := desktop.CreateProject(ProjectInput{Name: "Demo", Schedule: "off", Assets: []model.Asset{
+		{ID: "changed", Name: "demo", Version: "1.0.0", Kind: "library"},
+		{ID: "kept", Name: "other", Version: "1.0.0", Kind: "library"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	findings := []model.Finding{{ID: "CVE-old", AssetID: "changed", Component: "demo", Version: "1.0.0", Severity: "CRITICAL"}}
+	if err := db.Update(func(st *model.State) error {
+		p := &st.Projects[0]
+		for i := range p.Assets {
+			p.Assets[i].NeedsAssessment = false
+		}
+
+		p.Findings = findings
+		p.Runs = []model.Run{{ID: "prior", Status: "complete", Count: 1}}
+		p.AssessedRevision = p.Revision
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	assets := append([]model.Asset(nil), project.Assets...)
+	assets[0].Version = "2.0.0"
+	assets[0].NeedsAssessment = false
+	assets[1].NeedsAssessment = true // Incoming flags cannot override saved status.
+	input := ProjectInput{Name: project.Name, Schedule: project.Schedule, Revision: project.Revision, Assets: assets}
+	updated, err := desktop.UpdateProject(project.ID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !updated.Assets[0].NeedsAssessment || updated.Assets[1].NeedsAssessment || !reflect.DeepEqual(updated.Findings, findings) || len(updated.Runs) != 1 {
+		t.Fatal("version edit retained a current count, changed unrelated assessment status, or discarded previous results")
+	}
+
+	input.Revision = updated.Revision
+	input.Name = "Renamed project"
+	input.Assets[0].NeedsAssessment = false
+	if _, err := desktop.UpdateProject(updated.ID, input); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := db.Read()
+	if err != nil || !state.Projects[0].Assets[0].NeedsAssessment || state.Projects[0].Assets[1].NeedsAssessment {
+		t.Fatal("metadata-only save cleared the pending reassessment or marked an unchanged component")
 	}
 }

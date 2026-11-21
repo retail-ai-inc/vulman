@@ -17,7 +17,7 @@
         <strong data-t="localFirst"></strong>
         <small data-t="localDetail"></small>
       </div>
-      <button type="button" class="help-button" id="help-button"><span data-t="about"></span><small>v1.0.0</small></button>
+      <button type="button" class="help-button" id="help-button"><span data-t="about"></span><small>v1.1.0</small></button>
     </div>
   </aside>
   <div class="app-shell"><header class="topbar"><div class="breadcrumb"><span class="crumb-icon">◈</span><span data-t="workspace"></span><span>/</span><strong id="breadcrumb-page"></strong></div><div class="topbar-right"><select class="language-select" id="language-select" aria-label="Interface language" disabled></select></div></header><main id="main" tabindex="-1" autofocus><div class="loading">Starting Vulman…</div></main></div>
@@ -37,6 +37,7 @@
           </div>
           <p class="notice project-removal-warning" data-project-removal-warning data-t="repositoryRemovalWarning" hidden></p>
           <div class="project-scan-fields">
+            <div class="repository-profile-intro"><h4 data-t="repositoryScannerTitle"></h4><p class="form-note" data-t="repositoryScannerHint"></p><p class="form-note" data-t="scannerProfileGlobalHint"></p></div>
             <fieldset class="project-repositories">
               <legend data-t="repositoryURLs"></legend>
               <div class="project-repository-list" data-project-repositories></div>
@@ -49,6 +50,8 @@
               <label><span data-t="localPath"></span><input name="local_path" placeholder="/path/to/project or C:\projects\app"></label>
               <button type="button" class="button secondary" data-action="browse-local-repository" data-t="browseFolder"></button>
             </div>
+            <div data-local-scanner-profile></div>
+            <p class="form-note" data-t="scannerProfileSaveHint"></p>
             <label class="check-row scan-consent"><input type="checkbox" name="scan_code"><span><strong data-t="scanCode"></strong><small data-t="scanConsent"></small></span></label>
           </div>
         </section>
@@ -72,6 +75,16 @@
   <dialog id="component-dialog"><form id="component-form"><div class="dialog-header"><div><h2 data-t="addComponentTitle"></h2><p class="subtitle" id="component-project"></p></div><button type="button" class="icon-button close-dialog" aria-label="Close">×</button></div><div class="dialog-body"><div id="component-fields"></div><p class="form-note" data-t="matchingHint"></p><p id="component-error" class="form-error" role="alert"></p></div><div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="cancel"></button><button type="submit" class="button primary" id="save-component" data-t="saveComponent"></button></div></form></dialog>
   <dialog id="detail-dialog"><div class="dialog-header"><span class="eyebrow" data-t="advisoryDetail"></span><button class="icon-button close-dialog" aria-label="Close">×</button></div><div class="dialog-body" id="detail-body"></div></dialog>
   <dialog id="confirm-dialog" aria-labelledby="confirm-message"><div class="dialog-body"><p id="confirm-message"></p></div><div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="cancel" autofocus></button><button type="button" class="button danger" id="confirm-action" data-t="confirmAction"></button></div></dialog>
+  <dialog id="scanner-info-dialog" aria-labelledby="scanner-info-title">
+    <div class="dialog-header"><h2 id="scanner-info-title"></h2><button type="button" class="icon-button close-dialog" data-scanner-info-close aria-label="Close" autofocus>×</button></div>
+    <div class="dialog-body" id="scanner-info-body" tabindex="0"></div>
+    <div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="close"></button></div>
+  </dialog>
+  <dialog id="database-info-dialog" aria-labelledby="database-info-title">
+    <div class="dialog-header"><h2 id="database-info-title"></h2><button type="button" class="icon-button close-dialog" data-database-info-close aria-label="Close" autofocus>×</button></div>
+    <div class="dialog-body" id="database-info-body" tabindex="0"></div>
+    <div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="close"></button></div>
+  </dialog>
   <dialog id="about-dialog">
     <div class="dialog-header"><h2>Vulman</h2><button class="icon-button close-dialog" aria-label="Close">×</button></div>
     <div class="dialog-body">

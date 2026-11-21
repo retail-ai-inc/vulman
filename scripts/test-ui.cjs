@@ -11,11 +11,28 @@ const bundledLocalizations = Object.fromEntries(
   ]),
 );
 
+// Check rendered test output; this is not an HTML sanitizer.
+const unexpectedHTMLTag = /<\/?(?:script|img)\b/i;
+const htmlEscapingCases = [
+  {
+    script:'<script>unsafe</script>', escapedScript:'&lt;script&gt;unsafe&lt;/script&gt;',
+    image:'"<img>', escapedImage:'&quot;&lt;img&gt;',
+  },
+  {
+    script:'<SCRIPT SRC="data:,test">unsafe</SCRIPT>', escapedScript:'&lt;SCRIPT SRC=&quot;data:,test&quot;&gt;unsafe&lt;/SCRIPT&gt;',
+    image:'"<IMG SRC="data:,test">', escapedImage:'&quot;&lt;IMG SRC=&quot;data:,test&quot;&gt;',
+  },
+  {
+    script:'<ScRiPt data-test="mixed">unsafe</ScRiPt>', escapedScript:'&lt;ScRiPt data-test=&quot;mixed&quot;&gt;unsafe&lt;/ScRiPt&gt;',
+    image:'"<ImG data-test="mixed">', escapedImage:'&quot;&lt;ImG data-test=&quot;mixed&quot;&gt;',
+  },
+];
+
 function app(byName) {
   const elements = new Map();
   const document = {
     querySelector(selector) {
-      if (!elements.has(selector)) elements.set(selector, {listeners:{}, addEventListener(type,callback) {this.listeners[type]=callback;}, insertAdjacentHTML(position,html) {this.insertedHTML=html;}, innerHTML:''});
+      if (!elements.has(selector)) elements.set(selector, {listeners:{}, addEventListener(type,callback) {this.listeners[type]=callback;}, setAttribute(name,value) {this[name]=value;}, insertAdjacentHTML(position,html) {this.insertedHTML=html;}, innerHTML:''});
       return elements.get(selector);
     },
     querySelectorAll() {return [];},
@@ -226,6 +243,255 @@ test('idle polling sends the last version and keeps findings when cache metrics 
   assert.equal(run('state.settings.language'), 'en');
 });
 
+test('NVD catalogue progress preserves Configuration drafts and controls both datasets', async () => {
+  const run = app();
+  run(`
+    state = {version:'1', projects:[], settings:{language:'en',sources:{},scanners:{},nvd_update_schedule:'two_hourly'},token_status:{}};
+    location.hash = '#settings';
+    renderSettings();
+    const savedHTML = $('#main').innerHTML;
+    $('#settings-form').draft = 'keep this unsaved token';
+    applyPollingState({version:'1',cache_stats:{},nvd_database:{running:true,phase:'importing',records:1200,cpes:100000,imported:512,import_total:1024,feed:'2026',feeds_done:2,feeds_total:28,resumable:true}});
+  `);
+  assert.equal(run(`$('#main').innerHTML === savedHTML`), true);
+  assert.equal(run(`$('#settings-form').draft`), 'keep this unsaved token');
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /NVD advisories 1,200/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /CPE dictionary entries 100,000/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /2 of 28 feeds complete/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /Records imported: 512 \/ 1,024/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /class="database-update-progress" max="1024" value="512"/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /max="28" value="2"/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /Current feed: NVD 2026/);
+  assert.equal(run(`$('[data-action="update-nvd-database"]').disabled`), true);
+  assert.equal(run(`$('[data-action="stop-nvd-database"]').hidden`), false);
+  assert.match(run('nvdDatabaseSettingsHTML()'), /value="two_hourly" selected/);
+  run(`applyPollingState({version:'1',cache_stats:{},nvd_database:{running:true,phase:'downloading',feed:'dictionary',downloaded:1048576,download_total:4194304,feeds_done:27,feeds_total:28,resumable:true}})`);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /Downloaded 1\.0 \/ 4\.0 MiB · 25%/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /max="4194304" value="1048576"/);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /Current feed: CPE dictionary/);
+  assert.equal(run(`$('#main').innerHTML === savedHTML`), true);
+  assert.equal(run(`$('#settings-form').draft`), 'keep this unsaved token');
+  run(`
+    const requests = [];
+    var allow = false;
+    confirmAction = async () => allow;
+    invoke = async (...args) => {requests.push(args);return {version:'1',cache_stats:{},nvd_database:{running:false,phase:'interrupted'}};};
+    var action = {dataset:{action:'rebuild-nvd-database'},closest:selector => selector === '[data-action]' ? action : null};
+  `);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests.length'), 0);
+  run('allow = true');
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[0][0]'), 'RebuildNVDDatabase');
+  run(`action.dataset.action = 'update-nvd-database';`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[2][0]'), 'UpdateNVDDatabase');
+  run(`action.dataset.action = 'stop-nvd-database';`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[4][0]'), 'StopNVDDatabaseUpdate');
+  run(`updateNVDDatabaseStatus({running:false,phase:'failed',error:'<unsafe>'});lang = 'ja';`);
+  assert.match(run(`$('#nvd-database-status').innerHTML`), /&lt;unsafe&gt;/);
+  assert.doesNotMatch(run(`$('#nvd-database-status').innerHTML`), /<progress/);
+  assert.match(run('nvdDatabaseSettingsHTML()'), /ローカル NVD データベースと CPE 辞書/);
+});
+
+test('CVE database progress updates without replacing an unsaved Configuration form', () => {
+  const run = app();
+  run(`
+    state = {version:'1', projects:[], settings:{language:'en', sources:{}, scanners:{}, cve_update_schedule:'daily'}, token_status:{}};
+    location.hash = '#settings';
+    renderSettings();
+    const formHTML = $('#main').innerHTML;
+    $('#settings-form').draft = 'unsaved token';
+    applyPollingState({version:'1', cache_stats:{}, cve_database:{running:true, phase:'importing', imported:512, import_total:2048, records:1000, bytes:1048576, resumable:true}});
+  `);
+  assert.equal(run(`$('#main').innerHTML === formHTML`), true);
+  assert.equal(run(`$('#settings-form').draft`), 'unsaved token');
+  assert.match(run(`$('#cve-database-status').innerHTML`), /Importing CVE records/);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /Archive entries processed: 512 \/ 2,048/);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /class="database-update-progress" max="2048" value="512"/);
+  assert.equal(run(`$('[data-action="update-cve-database"]').disabled`), true);
+  assert.equal(run(`$('[data-action="stop-cve-database"]').hidden`), false);
+  assert.match(run('cveDatabaseSettingsHTML()'), /name="cve_update_schedule"[^]*?value="daily" selected/);
+  run(`applyPollingState({version:'1',cache_stats:{},cve_database:{running:true,phase:'downloading',downloaded:1048576,download_total:2097152}})`);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /Downloaded 1\.0 \/ 2\.0 MiB · 50%/);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /max="2097152" value="1048576"/);
+  assert.equal(run(`$('#main').innerHTML === formHTML`), true);
+  assert.equal(run(`$('#settings-form').draft`), 'unsaved token');
+  run(`updateCVEDatabaseStatus({phase:'cleaning',running:true});`);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /Cleaning previous CVE catalogue/);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /<progress class="database-update-progress"  aria-label=/);
+  run(`updateCVEDatabaseStatus({phase:'failed',error:'<private>',running:false});`);
+  assert.match(run(`$('#cve-database-status').innerHTML`), /&lt;private&gt;/);
+  assert.doesNotMatch(run(`$('#cve-database-status').innerHTML`), /<progress/);
+  assert.equal(run(`$('[data-action="update-cve-database"]').disabled`), false);
+  run(`lang='ja';`);
+  assert.match(run('cveDatabaseSettingsHTML()'), /ローカル CVE データベース/);
+});
+
+test('OSV Configuration selection and progress polling preserve drafts and localize ecosystem data', () => {
+  const run = app();
+  run(`
+    state = {version:'1',projects:[],settings:{language:'en',sources:{},scanners:{},osv_update_schedule:'daily',osv_ecosystems:['Go']},token_status:{},osv_ecosystem_options:['Go','PyPI','<unsafe>'],osv_suggested_ecosystems:['PyPI']};
+    location.hash = '#settings';
+    renderSettings();
+    const originalHTML = $('#main').innerHTML;
+    $('#settings-form').draft = 'unsaved secret';
+    applyPollingState({version:'1',cache_stats:{},osv_database:{running:true,phase:'importing',feed:'Go',feeds_done:0,feeds_total:2,resumable:true,imported:256,import_total:600,ecosystems:[{ecosystem:'Go',phase:'importing',records:0},{ecosystem:'PyPI',phase:'queued'}]}});
+  `);
+  assert.equal(run(`$('#main').innerHTML === originalHTML`), true);
+  assert.equal(run(`$('#settings-form').draft`), 'unsaved secret');
+  assert.match(run('originalHTML'), /data-osv-ecosystem value="Go" checked/);
+  assert.match(run('originalHTML'), /&lt;unsafe&gt;/);
+  assert.doesNotMatch(run('originalHTML'), /<unsafe>/);
+  assert.match(run(`$('#osv-database-status').innerHTML`), /Records imported: 256 \/ 600/);
+  assert.match(run(`$('#osv-database-status').innerHTML`), /max="600" value="256"/);
+  assert.match(run(`$('#osv-database-status').innerHTML`), /0 of 2 ecosystems complete/);
+  assert.equal(run(`$('[data-action="update-osv-database"]').disabled`), true);
+  assert.equal(run(`$('[data-action="stop-osv-database"]').hidden`), false);
+  run(`applyPollingState({version:'1',cache_stats:{},osv_database:{running:true,phase:'downloading',feed:'PyPI',downloaded:1048576,download_total:2097152}})`);
+  assert.match(run(`$('#osv-database-status').innerHTML`), /Downloaded 1\.0 \/ 2\.0 MiB · 50%/);
+  assert.match(run(`$('#osv-database-status').innerHTML`), /Current ecosystem: PyPI/);
+  run(`lang = 'ja'`);
+  assert.match(run('osvDatabaseSettingsHTML()'), /ローカルOSVデータベース/);
+});
+
+test('compact database sections keep controls and counts visible while details stay in More info', () => {
+  const run = app();
+  run(`
+    state = {settings:{},projects:[],cve_database:{initialized:true,records:1200,path:'/example/cve.db'},nvd_database:{initialized:true,records:2300,cpes:5000,path:'/example/nvd.db'},osv_database:{initialized:true,records:3400,path:'/example/osv.db',ecosystems:[{ecosystem:'Go',records:3000,phase:'complete'}]}};
+    localize = () => {};
+    Object.assign($('#database-info-dialog'), {dataset:{},querySelector:selector=>document.querySelector(selector),showModal(){this.open=true;}});
+  `);
+  for (const source of ['cve','nvd','osv']) {
+    const html = run(`localDatabaseSettingsHTML('${source}')`);
+    assert.match(html, new RegExp(`data-action="database-info" data-database="${source}"`));
+    assert.match(html, new RegExp(`data-action="update-${source}-database"`));
+    assert.match(html, new RegExp(`data-action="rebuild-${source}-database"`));
+    assert.match(html, new RegExp(`name="${source}_update_schedule"`));
+    assert.doesNotMatch(html, /\/example\/|small transactions|checksum-verified|additional disk space/);
+    run(`openDatabaseInfo('${source}')`);
+    assert.equal(run("$('#database-info-dialog').open"), true);
+    assert.doesNotMatch(run("$('#database-info-body').innerHTML"), /storage-paths|\/example\//);
+    assert.match(run('storagePathsHTML()'), new RegExp(`/example/${source}\\.db`));
+    assert.match(run("$('#database-info-body').innerHTML"), /atomically/);
+  }
+  assert.doesNotMatch(run('osvDatabaseStatusHTML(state.osv_database)'), /osv-ecosystem-status/);
+  assert.match(run("$('#database-info-body').innerHTML"), /osv-ecosystem-status[^]*Go[^]*3,000/);
+  run("lang='ja';openDatabaseInfo('nvd')");
+  assert.match(run("$('#database-info-title').textContent"), /ローカル NVD データベースと CPE 辞書/);
+});
+
+test('database detail progress refreshes independently without replacing notes or settings drafts', () => {
+  const run = app();
+  run(`
+    state={settings:{},nvd_database:{initialized:true,records:10,source_at:'2026-11-21T01:00:00Z',path:'/example/<nvd>.db'}};
+    localize=()=>{};
+    Object.assign($('#database-info-dialog'),{dataset:{},querySelector:selector=>document.querySelector(selector),showModal(){this.open=true;}});
+    openDatabaseInfo('nvd');
+    var originalNotes=$('#database-info-body').innerHTML;
+    $('#settings-form').draft='unsaved';
+    updateNVDDatabaseStatus({running:true,phase:'importing',imported:512,import_total:1024,feed:'2026',records:20,path:'/example/<nvd>.db'});
+  `);
+  assert.match(run('originalNotes'), /Source data checked/);
+  assert.doesNotMatch(run('originalNotes'), /storage-paths|nvd&gt;\.db/);
+  assert.match(run('storagePathsHTML()'), /&lt;nvd&gt;\.db/);
+  assert.equal(run("$('[data-catalog-path=\"nvd\"]').textContent"), '/example/<nvd>.db');
+  assert.equal(run("$('#database-info-body').innerHTML"), run('originalNotes'));
+  assert.match(run("$('#database-info-status').innerHTML"), /max="1024" value="512"/);
+  assert.equal(run("$('#settings-form').draft"), 'unsaved');
+  const nvdStatus = run("$('#database-info-status').innerHTML");
+  run("updateCVEDatabaseStatus({running:true,phase:'downloading'})");
+  assert.equal(run("$('#database-info-status').innerHTML"), nvdStatus);
+  run("updateNVDDatabaseStatus({phase:'failed',message:{code:'permission_denied'},error:'<error>'})");
+  assert.match(run("$('#database-info-status').innerHTML"), /&lt;error&gt;/);
+});
+
+test('collapsed OSV choices retain checked inputs and report the current selection count', () => {
+  const run = app();
+  run(`state={settings:{osv_ecosystems:['Go','PyPI']},osv_ecosystem_options:['Go','npm','PyPI'],projects:[]}`);
+  const html = run('osvDatabaseSettingsHTML()');
+  assert.match(html, /<details class="database-ecosystem-settings"><summary>/);
+  assert.match(html, /data-osv-selection-summary>2 selected/);
+  assert.match(html, /data-osv-ecosystem value="Go" checked/);
+  assert.match(html, /data-osv-ecosystem value="PyPI" checked/);
+  run(`
+    document.querySelectorAll=()=>[{checked:true},{checked:true},{checked:true}];
+    updateOSVEcosystemSelectionSummary();
+  `);
+  assert.equal(run("$('[data-osv-selection-summary]').textContent"), '3 selected');
+});
+
+test('OSV queue cards use only their ecosystem progress and refresh without page rendering', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    workflow.status='queued';
+    workflow.database_waits=[{source:'osv:Go',status:'updating'}];
+    state={projects:[{...project,runs:[workflow]}],settings:{language:'en'}};
+    const panel={dataset:{syncProjectId:'p',syncRun:'run-1'},querySelector:()=>null,innerHTML:''};
+    document.querySelectorAll=()=>[panel];
+    render=()=>{throw new Error('unexpected page render');};
+    applyPollingState({osv_database:{running:true,phase:'downloading',feed:'PyPI',downloaded:100,download_total:200,ecosystems:[{ecosystem:'Go',phase:'complete',running:false,initialized:true},{ecosystem:'PyPI',phase:'downloading',running:true}]}});
+  `);
+  assert.match(run('panel.innerHTML'), /Local OSV database · Go/);
+  assert.match(run('panel.innerHTML'), /OSV update complete/);
+  assert.doesNotMatch(run('panel.innerHTML'), /50%|Current ecosystem: PyPI/);
+});
+
+test('OSV actions require saved selections and rebuilding confirmation', async () => {
+  const run = app();
+  run(`
+    state={version:'1',projects:[],settings:{osv_ecosystems:['Go']}};
+    const inputs=[{value:'Go',checked:true},{value:'PyPI',checked:false}];
+    document.querySelectorAll=selector=>selector.includes('[data-osv-ecosystem]')?inputs.filter(input=>!selector.includes(':checked')||input.checked):[];
+    var calls=[],notice,allow=false;
+    toast=text=>notice=text;
+    confirmAction=async()=>allow;
+    invoke=async(...args)=>{calls.push(args);return {version:'1',cache_stats:{},osv_database:{running:false,phase:'complete'}};};
+    var action={dataset:{action:'rebuild-osv-database'},closest:selector=>selector==='[data-action]'?action:null};
+  `);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('calls.length'), 0);
+  run('allow=true');
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('calls[0][0]'), 'RebuildOSVDatabase');
+  run(`action.dataset.action='update-osv-database'; inputs[1].checked=true; calls=[];`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('calls.length'), 0);
+  assert.match(run('notice'), /Save configuration/);
+  run(`inputs[1].checked=false;`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('calls[0][0]'), 'UpdateOSVDatabase');
+  run(`action.dataset.action='stop-osv-database'; calls=[];`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('calls[0][0]'), 'StopOSVDatabaseUpdate');
+});
+
+test('CVE database actions call the native bridge and rebuilding requires confirmation', async () => {
+  const run = app();
+  run(`
+    state = {version:'1', projects:[], settings:{language:'en'}, cache_stats:{}};
+    location.hash = '#settings';
+    const requests = [];
+    invoke = async (...args) => { requests.push(args); return {version:'1',cache_stats:{},cve_database:{running:false,phase:'interrupted'}}; };
+    var allowRebuild = false;
+    confirmAction = async () => allowRebuild;
+    var action = {dataset:{action:'rebuild-cve-database'},closest:selector => selector === '[data-action]' ? action : null};
+  `);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests.length'), 0);
+  run('allowRebuild = true');
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[0][0]'), 'RebuildCVEDatabase');
+  run(`action.dataset.action = 'update-cve-database';`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[2][0]'), 'UpdateCVEDatabase');
+  run(`action.dataset.action = 'stop-cve-database';`);
+  await run('document.listeners.click({target:action})');
+  assert.equal(run('requests[4][0]'), 'StopCVEDatabaseUpdate');
+});
+
 test('configuration switches the data directory and shows a fallback warning', async () => {
   const requests = [];
   const run = app(async (...args) => {
@@ -277,19 +543,24 @@ test('project folder browsing fills the path and keeps it when the dialog is can
 
 test('scanner results use the reported OS and distinguish unavailable and denied tools', () => {
   const run = app();
-  const win = run(`scannerResultHTML('composer',{platform:'windows',status:'missing'})`);
+  const summary = run(`scannerResultHTML('composer',{platform:'windows',status:'missing'})`);
+  assert.match(summary, /not found on Vulman’s PATH/);
+  assert.doesNotMatch(summary, /Composer-Setup|Installation guide|scanner-command/);
+  const win = run(`scannerInfoHTML('composer',{platform:'windows',status:'missing'})`);
   assert.match(win,/Composer-Setup\.exe/);
   assert.doesNotMatch(win,/brew install|sudo apt/);
-  const debian = run(`scannerResultHTML('trivy',{platform:'debian',status:'missing'})`);
+  const debian = run(`scannerInfoHTML('trivy',{platform:'debian',status:'missing'})`);
   assert.match(debian,/signed package repository/);
   assert.match(debian,/apt-get install trivy/);
   assert.doesNotMatch(debian,/brew install|trivy\.exe/);
   const pip = run(`scannerSettingsHTML({'pip-audit':true})`);
   assert.match(pip,/name="scanner_pip-audit" checked data-scanner-check="pip-audit"/);
-  assert.match(run(`scannerResultHTML('pip-audit',{platform:'darwin',status:'missing'})`),/brew install pip-audit/);
-  assert.match(run(`lang='ja'; scannerResultHTML('pip-audit',{platform:'windows',status:'missing'})`),/pipx install pip-audit/);
+  assert.match(pip, /data-action="scanner-info" data-scanner="pip-audit" aria-haspopup="dialog"/);
+  assert.match(pip, /id="scanner-recheck-pip-audit"[^>]*>Check again/);
+  assert.match(run(`scannerInfoHTML('pip-audit',{platform:'darwin',status:'missing'})`),/brew install pip-audit/);
+  assert.match(run(`lang='ja'; scannerInfoHTML('pip-audit',{platform:'windows',status:'missing'})`),/pipx install pip-audit/);
   run(`lang='en'`);
-  const denied = run(`scannerResultHTML('npm',{platform:'darwin',status:'permission',path:'/tmp/<bin>/npm'})`);
+  const denied = run(`scannerInfoHTML('npm',{platform:'darwin',status:'permission',path:'/tmp/<bin>/npm'})`);
   assert.match(denied,/denied permission/);
   assert.match(denied,/Privacy & Security/);
   assert.match(denied,/\/tmp\/&lt;bin&gt;\/npm/);
@@ -312,35 +583,44 @@ test('selecting a scanner probes it and unchecking clears the result', async () 
   await run('checking');
   assert.deepEqual(calls,[['main.Desktop.CheckScanner','trivy']]);
   assert.match(run('panel.innerHTML'), /Vulman can run this tool/);
+  assert.doesNotMatch(run('panel.innerHTML'), /\/usr\/local\/bin/);
+  assert.match(run("scannerInfoHTML('trivy',scannerCheckResults.get('trivy'))"), /\/usr\/local\/bin\/trivy/);
+  assert.equal(run("$('#scanner-recheck-trivy').disabled"), false);
   run('scanner.checked = false; checkScanner(scanner)');
   assert.equal(run('panel.hidden'), true);
   assert.equal(run('panel.textContent'), '');
+  assert.equal(run("$('#scanner-recheck-trivy').hidden"), true);
+  assert.equal(run("scannerCheckResults.has('trivy')"), false);
 });
 
-test('Snyk setup is visible before enabling the scanner and links to its credential without leaving Configuration', async () => {
+test('Snyk setup is available in More info before enabling and links to its credential without leaving Configuration', async () => {
   const run = app();
-  const setup = run('scannerSettingsHTML({})');
-  assert.match(setup, /name="scanner_snyk"\s+data-scanner-check="snyk"/);
+  const cards = run('scannerSettingsHTML({})');
+  assert.match(cards, /name="scanner_snyk"\s+data-scanner-check="snyk"/);
+  assert.match(cards, /data-action="scanner-info" data-scanner="snyk"/);
+  assert.doesNotMatch(cards, /API credentials → Snyk token|authenticate-to-use-the-cli/);
+  const setup = run("scannerInfoHTML('snyk')");
   assert.match(setup, /API credentials → Snyk token/);
   assert.match(setup, /Run configured code scanners.*Scan code/);
   assert.match(setup, /authenticate-to-use-the-cli/);
-  assert.match(run(`scannerResultHTML('snyk',{platform:'darwin',status:'missing'})`), /brew install snyk\/tap\/snyk/);
-  assert.match(run(`scannerResultHTML('snyk',{platform:'windows',status:'missing'})`), /snyk\.exe/);
-  assert.match(run(`scannerResultHTML('snyk',{platform:'debian',status:'missing'})`), /standalone Linux CLI/);
-  assert.match(run(`scannerResultHTML('snyk',{status:'ready'})`), /checks the token during a scan/);
+  assert.match(run(`scannerInfoHTML('snyk',{platform:'darwin',status:'missing'})`), /brew install snyk\/tap\/snyk/);
+  assert.match(run(`scannerInfoHTML('snyk',{platform:'windows',status:'missing'})`), /snyk\.exe/);
+  assert.match(run(`scannerInfoHTML('snyk',{platform:'debian',status:'missing'})`), /standalone Linux CLI/);
+  assert.match(run(`scannerInfoHTML('snyk',{status:'ready'})`), /checks the token during a scan/);
   run(`lang='ja'; state={token_status:{}}; location.hash='#settings';`);
-  assert.match(run('scannerSettingsHTML({})'), /Snyk トークン欄へ移動/);
+  assert.match(run("scannerInfoHTML('snyk')"), /Snyk トークン欄へ移動/);
   const credentials = run('credentialSettingsHTML()');
   assert.match(credentials, /id="credential-snyk"[^>]*aria-describedby="credential-snyk-hint"/);
   assert.match(credentials, /SNYK_TOKEN として Snyk CLI に渡します/);
   await run(`
     var calls = [];
-    const input = {value:'draft', scrollIntoView(){ calls.push('scroll'); }, focus(){ calls.push('focus'); }};
-    const form = {querySelector(selector){ return selector === '#credential-snyk' ? input : null; }};
-    const snykButton = {dataset:{action:'focus-snyk-token'}, closest(selector){ return selector === 'form' ? form : null; }};
+    const input = $('#credential-snyk');
+    Object.assign(input, {value:'draft', scrollIntoView(){ calls.push('scroll'); }, focus(){ calls.push('focus'); }});
+    Object.assign($('#scanner-info-dialog'), {open:true,close(){this.open=false;calls.push('close');}});
+    const snykButton = {dataset:{action:'focus-snyk-token'}};
     document.listeners.click({target:{closest:selector => selector === '[data-action]' ? snykButton : null}});
   `);
-  assert.equal(run("calls.join(',')"), 'scroll,focus');
+  assert.equal(run("calls.join(',')"), 'close,scroll,focus');
   assert.equal(run('location.hash'), '#settings');
   assert.equal(run('input.value'), 'draft');
 });
@@ -349,22 +629,49 @@ test('sync defaults to everything and keeps a selected component on redraw', () 
   const run = app();
   run(`var p={id:'p',assets:[{id:'a',kind:'database',name:'PostgreSQL',version:'16'}]};`);
   let html = run('syncControls(p)');
-  assert.match(html, /<option value="">Everything<\/option>/);
-  assert.doesNotMatch(html.match(/<select id="sync-asset"[\s\S]*?<\/select>/)[0], / selected/);
+  assert.match(html, /data-action="sync"[^>]*>[^]*?Match VDBs &amp; Scan Code<\/button>/);
+  assert.match(html, /data-assessment-everything[^>]*checked/);
+  assert.doesNotMatch(html, /data-assessment-item[^>]*checked/);
   assert.match(html, /Database · PostgreSQL 16/);
   run(`syncSelection.p='a'`);
-  assert.match(run('syncControls(p)'), /value="a" selected/);
+  assert.match(run('syncControls(p)'), /value="a" checked/);
+  assert.match(run('syncControls(p)'), /data-action="sync"[^>]*>[^]*?Match VDBs<\/button>/);
   run('p.assets=[]');
-  assert.doesNotMatch(run('syncControls(p)').match(/<select id="sync-asset"[\s\S]*?<\/select>/)[0], / selected/);
+  assert.doesNotMatch(run('syncControls(p)'), /data-assessment-item/);
+  assert.match(run('syncControls(p)'), /data-action="sync"[^>]*disabled/);
+});
+
+test('assessment action wording follows component and local-data selections without changing request modes', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const selection={value:'shared',checked:true,dataset:{syncProject:'p'},matches:selector=>selector==='[data-sync-project]'};
+    document.listeners.change({target:selection});
+  `);
+  assert.match(run(`$('#project-assessment-action').innerHTML`), /Match VDBs$/);
+  assert.doesNotMatch(run(`componentSyncControls(state.projects[0],state.projects[0].assets[0])`), /Scan Code<\/button>/);
+  run(`changeAssessmentSelection({checked:true,dataset:{syncProject:'p'},matches:selector=>selector==='[data-assessment-everything]'})`);
+  assert.match(run(`$('#project-assessment-action').innerHTML`), /Match VDBs &amp; Scan Code$/);
+  run(`
+    const modeSelection={value:'local',dataset:{syncModeProject:'p'},matches:selector=>selector==='[data-sync-mode-project]'};
+    document.listeners.change({target:modeSelection});
+  `);
+  assert.match(run(`$('#project-assessment-action').innerHTML`), /Match VDBs$/);
+  assert.equal(run('syncModeSelection.p'), 'local');
+  run(`modeSelection.value='auto';lang='ja';document.listeners.change({target:modeSelection})`);
+  assert.match(run(`$('#project-assessment-action').innerHTML`), /VDB照合・コードスキャン$/);
+  assert.match(run(`componentSyncControls(state.projects[0],state.projects[0].assets[0])`), />VDB照合<\/button>/);
 });
 
 test('sync selection is localized and component names are escaped', () => {
   const run=app();
-  const html=run(`lang='ja';syncControls({id:'p',assets:[{id:'a',kind:'library',name:'<script>',version:'1'}]})`);
-  assert.match(html,/技術スタック別の同期/);
-  assert.match(html,/すべて/);
-  assert.match(html,/&lt;script&gt;/);
-  assert.doesNotMatch(html,/<script>/);
+  for (const {script, escapedScript} of htmlEscapingCases) {
+    const html=run(`lang='ja';syncControls({id:'p',assets:[{id:'a',kind:'library',name:${JSON.stringify(script)},version:'1'}]})`);
+    assert.match(html,/照合する技術スタック/);
+    assert.match(html,/すべて/);
+    assert.ok(html.includes(escapedScript));
+    assert.doesNotMatch(html,unexpectedHTMLTag);
+  }
 });
 
 test('sync requests distinguish everything from one component',async()=>{
@@ -376,6 +683,369 @@ test('sync requests distinguish everything from one component',async()=>{
     ['Sync','p',{}],
     ['Sync','p',{asset_id:'a'}]
   ]);
+});
+
+test('assessment selection scans one registered repository and restores component modes', async () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const target='remote:'+'a'.repeat(64);
+    state.scan_repositories={p:[{key:target,label:'github.com/owner/registered'}]};
+    const project=state.projects[0];
+    syncModeSelection.p='local';
+    const selection={value:scanLocationKey('p',target),checked:true,dataset:{syncProject:'p'},matches:selector=>selector==='[data-sync-project]'};
+    document.listeners.change({target:selection});
+  `);
+  assert.match(run('syncControls(project)'), /Match by tech stack &amp; repository/);
+  assert.match(run('syncControls(project)'), /Code scanner · github\.com\/owner\/registered/);
+  assert.match(run('syncControls(project)'), /checked[^>]*><span>Code scanner · github\.com\/owner\/registered/);
+  assert.match(run('syncControls(project)'), /id="sync-mode"[^>]*disabled/);
+  assert.match(run('syncControls(project)'), /value="auto" selected/);
+  assert.match(run('syncControls(project)'), /data-action="sync"[^>]*>[^]*?Scan code<\/button>/);
+  assert.equal(run(`$('#sync-mode').disabled`), true);
+  assert.equal(run(`$('#sync-mode').value`), 'auto');
+  run(`var calls=[];invoke=async(...args)=>calls.push(args);refresh=async()=>{};toast=()=>{};`);
+  await run(`syncProject('p',selection.value,'local','HIGH')`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls)')), [
+    ['Sync','p',{scan_target:'remote:'+'a'.repeat(64),severity:'HIGH'}],
+  ]);
+  run(`selection.checked=false;document.listeners.change({target:selection});selection.value='shared';selection.checked=true;document.listeners.change({target:selection})`);
+  assert.equal(run(`$('#sync-mode').disabled`), false);
+  assert.equal(run(`$('#sync-mode').value`), 'local');
+  run(`lang='ja'`);
+  assert.match(run('syncControls(project)'), /照合する技術スタック・リポジトリ/);
+  run(`delete state.scan_repositories.p;syncSelection.p=scanLocationKey('p',target)`);
+  assert.doesNotMatch(run('syncControls(project)'), /value="[^\"]*remote/);
+  assert.doesNotMatch(run('syncControls(project)'), /技術スタック・リポジトリ/);
+});
+
+test('repository labels follow the vulnerability filter project scope in both languages', () => {
+  const run = app();
+  inventory(run);
+  run(`state.scan_repositories={p:[{key:'remote:'+'a'.repeat(64),label:'github.com/owner/<repo>'}]};`);
+  assert.match(run('techStackFilterHTML()'), /All tech stacks &amp; repositories/);
+  assert.match(run(`techStackFilterHTML('p')`), /All tech stacks &amp; repositories/);
+  assert.match(run(`techStackFilterHTML('q')`), />All tech stacks<\/span>/);
+  assert.match(run(`syncControls(state.projects[0])`), /github.com\/owner\/&lt;repo&gt;/);
+  assert.doesNotMatch(run(`syncControls(state.projects[0])`), /<repo>/);
+  run(`bindFilters();document.querySelector('#project-filter').listeners.change({target:{value:'q'}})`);
+  assert.match(run(`$('#tech-stack-filter-options').innerHTML`), />All tech stacks<\/span>/);
+  assert.equal(run(`$('#tech-stack-filter')['aria-label']`), 'All tech stacks');
+  run(`lang='ja';filter.project='p'`);
+  assert.match(run('techStackFilterHTML()'), /すべての技術スタック・リポジトリ/);
+  run(`state.projects[1].local_path='/checkout'`);
+  assert.match(run(`syncControls(state.projects[1])`), /コードスキャナー · ローカルフォルダー/);
+});
+
+test('repository-only workflow and activity identify the selected repository', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`Object.assign(workflow,{mode:'code',scan_target:'remote:'+'a'.repeat(64),scan_repository:'github.com/owner/<repo>',project_id:'p',project_name:'Project One'});`);
+  assert.match(run('workflowRun(project,workflow)'), /github.com\/owner\/&lt;repo&gt; · All severities/);
+  assert.match(run('activityList([workflow])'), /github.com\/owner\/&lt;repo&gt; ·  All severities/);
+  run(`workflow.scan_target='local';workflow.scan_repository='';lang='ja';`);
+  assert.match(run('workflowRun(project,workflow)'), /ローカルフォルダー · すべての深刻度/);
+});
+
+test('checkbox dropdown submits mixed multiple selection and never turns an empty selection into Everything', async () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const firstTarget='remote:'+'a'.repeat(64), secondTarget='remote:'+'b'.repeat(64);
+    state.scan_repositories={p:[{key:firstTarget,label:'github.com/owner/first'},{key:secondTarget,label:'github.com/owner/second'}]};
+    const project=state.projects[0];
+    const checkboxes=assessmentOptions(project).map(option=>({
+      value:option.key,checked:false,dataset:{syncProject:'p'},
+      matches:selector=>selector==='[data-sync-project]'||selector==='[data-assessment-item]',
+    }));
+    document.querySelectorAll=selector=>selector==='[data-assessment-item]'?checkboxes:[];
+    const everything=$('[data-assessment-everything]');
+    everything.dataset={syncProject:'p'};
+    everything.matches=selector=>selector==='[data-assessment-everything]'||selector==='[data-sync-project]';
+    function choose(key,checked=true) {
+      const input=checkboxes.find(input=>input.value===key);
+      input.checked=checked;
+      document.listeners.change({target:input});
+    }
+    choose('shared');
+    choose('no-findings');
+  `);
+  assert.equal(run(`$('#assessment-scope-summary').textContent`), '2 items selected');
+  assert.equal(run('everything.checked'), false);
+  assert.equal(run(`$('#sync-mode').disabled`), false);
+  run(`choose(scanLocationKey('p',firstTarget));choose(scanLocationKey('p',secondTarget));`);
+  assert.equal(run(`$('#assessment-scope-summary').textContent`), '4 items selected');
+  assert.match(run(`$('#project-assessment-action').innerHTML`), /Match VDBs &amp; Scan Code$/);
+  assert.equal(run(`$('#sync-mode').disabled`), true);
+  assert.equal(run('checkboxes.filter(input=>input.checked).length'), 4);
+  assert.match(run('syncControls(project)'), /4 items selected/);
+  run(`var calls=[];invoke=async(...args)=>calls.push(args);refresh=async()=>{};toast=()=>{};$('#sync-severity').value='HIGH';`);
+  await run(`
+    const target={dataset:{action:'sync',id:'p'},closest:selector=>selector==='[data-action]'?target:null};
+    document.listeners.click({target});
+  `);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls)')), [
+    ['Sync','p',{asset_ids:['shared','no-findings'],scan_targets:['remote:'+'a'.repeat(64),'remote:'+'b'.repeat(64)],severity:'HIGH'}],
+  ]);
+  run(`checkboxes.forEach(input=>choose(input.value,false));`);
+  assert.equal(run(`$('#project-assessment-action').disabled`), true);
+  assert.equal(run(`$('#assessment-scope-summary').textContent`), 'Select at least one item');
+  assert.equal(run('everything.checked'), false);
+  await assert.rejects(run(`syncProject('p',[])`), /Select at least one item/);
+  assert.equal(run('calls.length'), 1);
+  run(`everything.checked=true;document.listeners.change({target:everything});`);
+  assert.equal(run(`$('#project-assessment-action').disabled`), false);
+  assert.equal(run(`$('#assessment-scope-summary').textContent`), 'Everything');
+  assert.equal(run('assessmentSelection(project)'), null);
+  await run(`syncProject('p',syncSelection.p||'')`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls[1])')), ['Sync','p',{}]);
+  run(`lang='ja';choose('shared');choose('no-findings');`);
+  assert.equal(run(`$('#assessment-scope-summary').textContent`), '2件を選択中');
+  run(`project.syncing=true;choose('shared',false);`);
+  assert.equal(run('syncSelection.p.length'), 2);
+  assert.match(run('syncControls(project)'), /aria-disabled="true" tabindex="-1"/);
+});
+
+test('multiple assessment requests deduplicate items and reject stale selections', async () => {
+  const run = app();
+  inventory(run);
+  run(`var calls=[];invoke=async(...args)=>calls.push(args);refresh=async()=>{};toast=()=>{};`);
+  await run(`syncProject('p',['shared','no-findings','shared'],'local','CRITICAL')`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls[0])')), ['Sync','p',{
+    asset_ids:['shared','no-findings'],scan_targets:[],mode:'local',severity:'CRITICAL',
+  }]);
+  await assert.rejects(run(`syncProject('p',['shared','deleted'])`), /no longer registered/);
+  assert.equal(run('calls.length'), 1);
+});
+
+test('selection dropdown closes with Escape or an outside click', () => {
+  const run = app();
+  run(`
+    var focused=false;
+    const picker={open:true,contains:target=>target==='inside',querySelector:()=>({focus(){focused=true;}})};
+    document.querySelectorAll=()=>[picker];
+    const query=document.querySelector.bind(document);
+    document.querySelector=(selector,root)=>root===picker?picker.querySelector():query(selector);
+    closeAssessmentPicker({type:'click',target:'inside'});
+  `);
+  assert.equal(run('picker.open'), true);
+  run(`closeAssessmentPicker({type:'keydown',key:'Escape',target:'inside'})`);
+  assert.equal(run('picker.open'), false);
+  assert.equal(run('focused'), true);
+  run(`picker.open=true;focused=false;closeAssessmentPicker({type:'click',target:'outside'})`);
+  assert.equal(run('picker.open'), false);
+  assert.equal(run('focused'), false);
+});
+
+test('selection menus stay within the window and open upward when space below is limited', () => {
+  const run = app();
+  run(`
+    window.innerHeight=768;window.innerWidth=1024;
+    let rect={top:680,bottom:718,right:600};
+    const menu={scrollHeight:2000,offsetWidth:420,style:{}};
+    const summary={getBoundingClientRect:()=>rect};
+    const picker={open:true,querySelector:selector=>selector==='summary'?summary:menu};
+    positionScopePicker(picker);
+  `);
+  assert.equal(run('menu.style.top'), 'auto');
+  assert.equal(run('menu.style.bottom'), 'calc(100% + 7px)');
+  assert.equal(run('menu.style.maxHeight'), '420px');
+  assert.equal(run('menu.style.right'), '0px');
+  run(`rect={top:100,bottom:140,right:1040};positionScopePicker(picker);`);
+  assert.equal(run('menu.style.top'), 'calc(100% + 7px)');
+  assert.equal(run('menu.style.bottom'), 'auto');
+  assert.equal(run('menu.style.right'), '32px');
+  run(`window.innerHeight=300;window.innerWidth=320;menu.offsetWidth=288;rect={top:70,bottom:110,right:300};positionScopePicker(picker);`);
+  assert.equal(run('menu.style.maxHeight'), '167px');
+  assert.equal(run('menu.style.right'), '-4px');
+  run(`picker.open=false;summary.getBoundingClientRect=()=>{throw new Error('measured hidden menu');};positionScopePicker(picker);`);
+});
+
+test('selection menus reposition on resize and outer scrolling without disturbing internal scrolling', () => {
+  const run = app();
+  run(`
+    window.innerHeight=800;window.innerWidth=1200;
+    let measurements=0;
+    const summary={getBoundingClientRect(){measurements++;return {top:100,bottom:138,right:600};}};
+    const menu={scrollHeight:2000,offsetWidth:420,style:{}};
+    const picker={open:true,querySelector:selector=>selector==='summary'?summary:menu};
+    document.querySelectorAll=()=>[picker];
+    positionOpenScopePickers({target:{closest:()=>menu}});
+  `);
+  assert.equal(run('measurements'), 0);
+  run(`positionOpenScopePickers({target:{closest:()=>null}})`);
+  assert.equal(run('measurements'), 1);
+  run(`window.innerHeight=380;window.listeners.resize({});`);
+  assert.equal(run('measurements'), 2);
+  assert.equal(run('menu.style.maxHeight'), '219px');
+});
+
+test('both selection menus expose a keyboard-focusable scroll region with full item names', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    state.projects[0].assets.push(...Array.from({length:150},(_,i)=>({id:'long-'+i,kind:'library',name:'org.example.'+'long-name.'.repeat(25)+i,version:'1'})));
+  `);
+  const pattern = /class="scope-picker-menu"[^>]*tabindex="0"[^>]*role="region"[^>]*aria-label="Components and repositories"/;
+  assert.match(run('assessmentPicker(state.projects[0],t("syncScope"))'), pattern);
+  assert.match(run(`techStackFilterHTML('p')`), pattern);
+  assert.match(run(`techStackFilterHTML('p')`), /long-name\.149 1/);
+  run(`lang='ja'`);
+  assert.match(run(`techStackFilterHTML('p')`), /aria-label="コンポーネントとリポジトリ"/);
+});
+
+function scopeSearchFixture(run, labels) {
+  run(`
+    var scopeGroups=${JSON.stringify(labels)}.map(labels=>({
+      hidden:false,rows:labels.map(textContent=>({textContent,hidden:false})),
+      querySelectorAll(){return this.rows;},
+    }));
+    var scopeEmpty={hidden:true};
+    var scopeSearch={value:'',focusCount:0,focus(){this.focusCount++;},
+      matches:selector=>selector==='[data-scope-search]',
+      closest:selector=>selector==='.scope-picker-menu'?scopeMenu:null,
+    };
+    var scopeClear={hidden:true,dataset:{action:'clear-scope-search'},closest:selector=>
+      selector==='[data-action]'?scopeClear:selector==='.scope-picker-menu'?scopeMenu:null};
+    var scopeMenu={scrollTop:200,scrollHeight:1200,offsetWidth:420,style:{},
+      closest:selector=>selector==='details.scope-picker'?scopePicker:null,
+      querySelector:selector=>({'[data-scope-empty]':scopeEmpty,'[data-scope-search]':scopeSearch,'[data-action="clear-scope-search"]':scopeClear})[selector],
+      querySelectorAll:selector=>selector==='.scope-group'?scopeGroups:selector==='.scope-group .scope-choice'?scopeGroups.flatMap(group=>group.rows):[],
+    };
+    var scopeSummary={getBoundingClientRect:()=>({top:100,bottom:138,right:600})};
+    var scopePicker={open:false,querySelector:selector=>({'summary':scopeSummary,'.scope-picker-menu':scopeMenu,'[data-scope-search]':scopeSearch})[selector]};
+    window.innerWidth=1200;window.innerHeight=800;
+    var typeScopeSearch=value=>{scopeSearch.value=value;document.listeners.input({target:scopeSearch});};
+    var visibleScopeLabels=()=>scopeGroups.flatMap(group=>group.rows).filter(row=>!row.hidden).map(row=>row.textContent);
+  `);
+}
+
+test('dropdown search matches names, versions, multiple terms, and Japanese without changing selection', async () => {
+  const run = app();
+  scopeSearchFixture(run, [
+    ['Language / runtime · Go 1.26.3','Database · PostgreSQL 16','OSS library · acme/core 2.0'],
+    ['Code scanner · github.com/Acme/payments','Code scanner · 日本語リポジトリ'],
+  ]);
+  run(`syncSelection.p=['selected-hidden-item'];filter.stack=['selected-hidden-repository'];`);
+  run(`typeScopeSearch(' ＧＯ １．２６ ');`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(visibleScopeLabels())')), ['Language / runtime · Go 1.26.3']);
+  assert.equal(run('scopeGroups[0].hidden'), false);
+  assert.equal(run('scopeGroups[1].hidden'), true);
+  assert.equal(run('scopeMenu.scrollTop'), 0);
+  run(`typeScopeSearch('github   ACME');`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(visibleScopeLabels())')), ['Code scanner · github.com/Acme/payments']);
+  run(`typeScopeSearch('日本語 リポジトリ');`);
+  assert.equal(run('visibleScopeLabels().length'), 1);
+  assert.match(run('visibleScopeLabels()[0]'), /日本語リポジトリ/);
+  run(`typeScopeSearch('does-not-exist');`);
+  assert.equal(run('visibleScopeLabels().length'), 0);
+  assert.equal(run('scopeEmpty.hidden'), false);
+  assert.equal(run('scopeClear.hidden'), false);
+  assert.equal(run('scopeGroups.every(group=>group.hidden)'), true);
+  assert.equal(run('syncSelection.p.join()'), 'selected-hidden-item');
+  assert.equal(run('filter.stack.join()'), 'selected-hidden-repository');
+  await run(`document.listeners.click({target:scopeClear})`);
+  assert.equal(run('scopeSearch.value'), '');
+  assert.equal(run('visibleScopeLabels().length'), 5);
+  assert.equal(run('scopeEmpty.hidden'), true);
+  assert.equal(run('scopeClear.hidden'), true);
+  assert.equal(run('scopeSearch.focusCount'), 1);
+  run(`typeScopeSearch('   ')`);
+  assert.equal(run('visibleScopeLabels().length'), 5);
+  assert.equal(run('scopeEmpty.hidden'), true);
+});
+
+test('searching assessment choices preserves hidden checked components and repositories in the request', async () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const repository='remote:'+'a'.repeat(64);
+    state.scan_repositories={p:[{key:repository,label:'github.com/owner/demo'}]};
+    syncSelection.p=['shared',scanLocationKey('p',repository)];
+    var calls=[];invoke=async(...args)=>calls.push(args);refresh=async()=>{};toast=()=>{};
+  `);
+  const options = JSON.parse(run('JSON.stringify(assessmentOptions(state.projects[0]))'));
+  scopeSearchFixture(run, [options.filter(option => !option.target).map(option => option.label), options.filter(option => option.target).map(option => option.label)]);
+  run(`typeScopeSearch('postgresql');`);
+  assert.equal(run('visibleScopeLabels().length'), 1);
+  assert.equal(run('syncSelection.p.length'), 2);
+  assert.equal(run('calls.length'), 0);
+  run(`changeAssessmentSelection({value:'no-findings',checked:true,dataset:{syncProject:'p'},matches:()=>false})`);
+  assert.equal(run('syncSelection.p.length'), 3);
+  await run(`syncProject('p',syncSelection.p)`);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls)')), [
+    ['Sync','p',{asset_ids:['shared','no-findings'],scan_targets:['remote:'+'a'.repeat(64)]}],
+  ]);
+});
+
+test('searching vulnerability filter choices preserves result counts and the active filters', () => {
+  const run = app();
+  repositoryFilterInventory(run);
+  run(`filter.stack=[stackKey('p','shared'),scanLocationKey('p',firstRepo)];bindFilters('p');`);
+  const options = JSON.parse(run(`JSON.stringify(techStackOptions('p'))`));
+  scopeSearchFixture(run, [options.filter(option => !option.repository).map(option => option.label), options.filter(option => option.repository).map(option => option.label)]);
+  run(`typeScopeSearch('postgresql')`);
+  assert.equal(run('visibleScopeLabels().length'), 1);
+  assert.match(run(`findingsTable('p')`), /Showing 5 matches \(9 total\)/);
+  chooseStackFilter(run, run(`stackKey('p','no-findings')`));
+  assert.equal(run('techStackFilterSelection().length'), 3);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 5 matches \(9 total\)/);
+  assert.equal(run('filter.search'), '');
+  run(`typeScopeSearch('no-such-repository')`);
+  assert.equal(run('scopeEmpty.hidden'), false);
+  assert.match(run(`findingsTable('p')`), /Showing 5 matches \(9 total\)/);
+});
+
+test('dropdown search focuses on opening, resets on closing, and stays separate from refreshed choices', () => {
+  const run = app();
+  inventory(run);
+  scopeSearchFixture(run, [['Project One · demo','Project Two · demo'], ['Code scanner · github.com/owner/demo']]);
+  run(`scopePicker.open=true;scopePickerToggled(scopePicker);typeScopeSearch('Project One');`);
+  assert.equal(run('scopeSearch.focusCount'), 1);
+  assert.equal(run('visibleScopeLabels().length'), 1);
+  run(`scopePicker.open=false;scopePickerToggled(scopePicker);`);
+  assert.equal(run('scopeSearch.value'), '');
+  assert.equal(run('visibleScopeLabels().length'), 3);
+  run(`
+    scopePicker.open=true;scopePickerToggled(scopePicker);typeScopeSearch('Project Two');
+    const query=document.querySelector.bind(document);
+    document.querySelector=selector=>selector==='#tech-stack-filter [data-scope-search]'?scopeSearch:query(selector);
+    bindFilters();$('#project-filter').listeners.change({target:{value:'q'}});
+  `);
+  assert.equal(run('scopeSearch.value'), 'Project Two');
+  assert.equal(run('visibleScopeLabels().length'), 1);
+  assert.match(run(`$('#tech-stack-filter-options').innerHTML`), /Project Two/);
+  assert.doesNotMatch(run(`$('#tech-stack-filter-options').innerHTML`), /data-scope-search/);
+});
+
+test('both dropdown searches include localized accessible labels and empty-result messages', () => {
+  const run = app();
+  inventory(run);
+  const assessment = run(`assessmentPicker(state.projects[0],t('syncScope'))`);
+  const filter = run(`techStackFilterHTML('p')`);
+  for (const html of [assessment, filter]) {
+    assert.match(html, /type="search" data-scope-search aria-label="Search components and repositories…"/);
+    assert.match(html, /data-action="clear-scope-search" aria-label="Clear dropdown search"/);
+    assert.match(html, /data-scope-empty role="status" aria-live="polite" hidden>No components or repositories match this search/);
+  }
+  run(`lang='ja'`);
+  assert.match(run(`techStackFilterHTML('p')`), /コンポーネント・リポジトリを検索…/);
+  assert.match(run(`techStackFilterHTML('p')`), /検索条件に一致するコンポーネントやリポジトリはありません/);
+});
+
+test('multiple assessment history names every chosen item without marking the full project assessed', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    workflow.selection={assets:[{id:'a',label:'Go 1.26.3'},{id:'b',label:'<PHP> 8.3'}],repositories:[{id:'remote:first',label:'github.com/owner/first'},{id:'local',label:''}]};
+    workflow.status='complete';workflow.project_id='p';workflow.project_name='Project One';
+  `);
+  assert.match(run('workflowRun(project,workflow)'), /data-sync-scope="scoped"/);
+  assert.match(run('workflowRun(project,workflow)'), /Go 1.26.3, &lt;PHP&gt; 8.3, github.com\/owner\/first, Local folder/);
+  assert.match(run('activityList([workflow])'), /Go 1.26.3, &lt;PHP&gt; 8.3, github.com\/owner\/first, Local folder/);
+  assert.equal(run('latestFullRun({...project,runs:[workflow]})'), undefined);
+  run(`lang='ja';workflow.mode='code';workflow.selection.assets=[];`);
+  assert.match(run('workflowRun(project,workflow)'), /github.com\/owner\/first, ローカルフォルダー/);
 });
 
 test('successful component sync does not mark a project fully assessed',()=>{
@@ -417,11 +1087,18 @@ function inventory(run) {
 
 const findingIDs = html => [...html.matchAll(/data-finding="([^"]+)"/g)].map(m=>m[1]);
 
+function chooseStackFilter(run, key, checked = true) {
+  const attribute = key === null ? '[data-stack-filter-all]' : '[data-stack-filter-item]';
+  run(`$('#tech-stack-filter').listeners.change({target:{
+    value:${JSON.stringify(key || '')}, checked:${checked}, matches:selector=>selector.includes('${attribute}'),
+  }})`);
+}
+
 test('both vulnerability views default to all tech stacks with correctly scoped options',()=>{
   const run=app();inventory(run);
   const local=run(`filtersHTML(false,'p')`);
   assert.match(local,/id="tech-stack-filter"/);
-  assert.match(local,/<option value="">All tech stacks<\/option>/);
+  assert.match(local,/data-stack-filter-all checked><span>All tech stacks<\/span>/);
   assert.match(local,/Database · PostgreSQL 16/);
   assert.doesNotMatch(local,/Project Two|demo 2/);
   assert.deepEqual(findingIDs(run(`findingsTable('p')`)).sort(),['CVE-A','CVE-CODE','CVE-M','CVE-OLD']);
@@ -436,7 +1113,7 @@ test('tech stack filtering isolates the chosen project even with duplicate compo
   run(`filter.stack=stackKey('p','shared')`);
   assert.deepEqual(findingIDs(run(`findingsTable('p')`)),['CVE-A','CVE-M']);
   assert.deepEqual(findingIDs(run('findingsTable()')),['CVE-A','CVE-M']);
-  assert.match(run('filtersHTML(true)'),/selected/);
+  assert.match(run('filtersHTML(true)'),/data-stack-filter-item[^>]*checked/);
   run(`filter.stack=stackKey('q','shared')`);
   assert.deepEqual(findingIDs(run('findingsTable()')),['CVE-Q']);
 });
@@ -455,34 +1132,248 @@ test('changing project narrows the stack options and clears incompatible selecti
   const run=app();inventory(run);
   run(`filter.stack=stackKey('p','shared');bindFilters();document.querySelector('#project-filter').listeners.change({target:{value:'q'}})`);
   assert.equal(run('filter.stack'),'');
-  const options=run(`document.querySelector('#tech-stack-filter').innerHTML`);
+  const options=run(`document.querySelector('#tech-stack-filter-options').innerHTML`);
   assert.match(options,/Project Two · OSS library · demo 2/);
   assert.doesNotMatch(options,/Project One|PostgreSQL/);
   assert.deepEqual(findingIDs(run(`document.querySelector('#finding-results').innerHTML`)),['CVE-Q']);
-  run(`document.querySelector('#tech-stack-filter').listeners.change({target:{value:stackKey('q','shared')}})`);
-  assert.equal(run('filter.stack'),run(`stackKey('q','shared')`));
+  chooseStackFilter(run, run(`stackKey('q','shared')`));
+  assert.deepEqual(JSON.parse(run('JSON.stringify(filter.stack)')), [run(`stackKey('q','shared')`)]);
 });
 
-test('scanner components and removed inventory remain filterable',()=>{
+test('older inventory remains filterable and unattributed scanner findings stay in the Code scanner match filter',()=>{
   const run=app();inventory(run);
   const options=run(`techStackFilterHTML('p')`);
-  assert.match(options,/Code scanner · indirect 2/);
+  assert.doesNotMatch(options,/Code scanner · indirect 2/);
   assert.match(options,/Previous inventory · retired-library 0.1/);
-  run(`filter.stack=stackKey('p','code:indirect')`);
+  run(`filter.match='scanner'`);
   assert.deepEqual(findingIDs(run(`findingsTable('p')`)),['CVE-CODE']);
-  run(`filter.stack=stackKey('p','retired')`);
+  run(`filter.match=''; filter.stack=stackKey('p','retired')`);
   assert.deepEqual(findingIDs(run(`findingsTable('p')`)),['CVE-OLD']);
+});
+
+test('scanner findings are grouped under registered repositories and use location-specific severity counts', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const firstRepo = 'remote:' + 'a'.repeat(64);
+    const secondRepo = 'remote:' + 'b'.repeat(64);
+    const unregisteredRepo = 'remote:' + 'c'.repeat(64);
+    const repoLabel = 'github.com/owner/main';
+    const [first, second] = state.projects;
+    first.local_path = '/checkout';
+    state.scan_repositories = {
+      p:[{key:firstRepo,label:repoLabel},{key:secondRepo,label:'github.com/owner/empty'}],
+      q:[{key:firstRepo,label:repoLabel}],
+    };
+    const codeFinding = (id, asset_id, component, severity, repository=repoLabel) =>
+      ({id, asset_id, component, severity, title:id, match:'scanner', scan_repository:repository, sources:['Trivy']});
+    first.findings.push(
+      codeFinding('CVE-R1','code:'+firstRepo+':dependency-one','dependency-one','CRITICAL'),
+      codeFinding('CVE-R2','code:'+firstRepo+':dependency-two','dependency-two','HIGH'),
+      codeFinding('CVE-LEGACY','code:legacy-package','legacy-package','LOW'),
+      codeFinding('CVE-REMOVED','code:'+unregisteredRepo+':old','old','CRITICAL','github.com/owner/removed'),
+      {...codeFinding('CVE-LOCAL','code:local:dependency-three','dependency-three','MEDIUM',''), scan_target:'local'},
+    );
+    second.findings.push(codeFinding('CVE-OTHER-PROJECT','code:'+firstRepo+':dependency-one','dependency-one','CRITICAL'));
+  `);
+  const global = run('techStackFilterHTML()');
+  assert.match(global, /Project One · Code scanner · github\.com\/owner\/main/);
+  assert.match(global, /Project Two · Code scanner · github\.com\/owner\/main/);
+  assert.match(global, /Project One · Code scanner · Local folder/);
+  const local = run(`techStackFilterHTML('p')`);
+  assert.equal((local.match(/Code scanner · github\.com\/owner\/main/g) || []).length, 1);
+  assert.match(local, /Code scanner · github\.com\/owner\/empty/);
+  assert.doesNotMatch(local, /dependency-|legacy-package|indirect|owner\/removed|Project Two/);
+
+  run(`filter.stack=scanLocationKey('p', firstRepo);`);
+  let table = run('findingsTable()');
+  assert.deepEqual(findingIDs(table), ['CVE-R1','CVE-R2','CVE-LEGACY']);
+  assert.match(table, /Critical <strong>1<\/strong>/);
+  assert.match(table, /High <strong>1<\/strong>/);
+  assert.match(table, /Medium <strong>0<\/strong>/);
+  assert.match(table, /Low <strong>1<\/strong>/);
+  assert.match(table, /Unrated <strong>0<\/strong>/);
+  run(`filter.severity='HIGH';`);
+  table = run(`findingsTable('p')`);
+  assert.deepEqual(findingIDs(table), ['CVE-R2']);
+  assert.match(table, /Showing 1 match /);
+  assert.match(table, /Critical <strong>1<\/strong>/);
+  run(`filter.search='dependency-two';`);
+  assert.match(run(`findingsTable('p')`), /Critical <strong>0<\/strong>/);
+  run(`filter.search=''; filter.severity=''; filter.stack=scanLocationKey('p', secondRepo);`);
+  table = run(`findingsTable('p')`);
+  assert.match(table, /Showing 0 matches /);
+  assert.equal([...table.matchAll(/<strong>0<\/strong>/g)].length, 5);
+  run(`filter.stack=scanLocationKey('p','local');`);
+  assert.deepEqual(findingIDs(run(`findingsTable('p')`)), ['CVE-LOCAL']);
+});
+
+test('repositories sharing a display label keep their scanner findings separate', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const first = 'remote:' + 'a'.repeat(64), second = 'remote:' + 'b'.repeat(64);
+    const label = 'github.com/owner/demo';
+    state.scan_repositories = {p:[{key:first,label},{key:second,label}]};
+    state.projects[0].findings = [first, second, 'legacy'].map((target, i) => ({
+      id:'CVE-'+i, asset_id:'code:'+target+':demo', scan_repository:label, match:'scanner', severity:'HIGH', sources:['Trivy'],
+    }));
+    filter.stack = scanLocationKey('p', second);
+  `);
+  const options = run(`techStackFilterHTML('p')`);
+  assert.match(options, /github\.com\/owner\/demo \(1\)/);
+  assert.match(options, /github\.com\/owner\/demo \(2\)/);
+  assert.deepEqual(findingIDs(run(`findingsTable('p')`)), ['CVE-1']);
+  run(`filter.stack=[scanLocationKey('p',first),scanLocationKey('p',second)]`);
+  assert.deepEqual(findingIDs(run(`findingsTable('p')`)), ['CVE-0','CVE-1']);
+});
+
+function repositoryFilterInventory(run) {
+  inventory(run);
+  run(`
+    const firstRepo='remote:'+'a'.repeat(64), secondRepo='remote:'+'b'.repeat(64);
+    const firstLabel='github.com/owner/first', secondLabel='github.com/owner/second';
+    state.scan_repositories={p:[{key:firstRepo,label:firstLabel},{key:secondRepo,label:secondLabel}],q:[{key:firstRepo,label:firstLabel}]};
+    state.projects[0].local_path='/checkout';
+    const code=(id,asset_id,severity,scan_repository,scan_target='remote')=>({
+      id,asset_id,severity,scan_repository,scan_target,component:'dependency',title:id,match:'scanner',sources:['Trivy'],
+    });
+    state.projects[0].findings.push(
+      code('CVE-R1','code:'+firstRepo+':dependency','CRITICAL',firstLabel),
+      code('CVE-R2','code:'+secondRepo+':dependency','HIGH',secondLabel),
+      code('CVE-LEGACY','code:legacy-package','LOW',firstLabel),
+      code('CVE-LOCAL','code:local:dependency','MEDIUM','','local'),
+      code('CVE-OVERLAP','code:legacy-overlap','LOW',firstLabel,'local'),
+    );
+    state.projects[1].findings.push(code('CVE-Q-REPO','code:'+firstRepo+':dependency','CRITICAL',firstLabel));
+  `);
+}
+
+test('both vulnerability views combine multiple components and repositories without duplicate rows', () => {
+  const run = app();
+  repositoryFilterInventory(run);
+  run(`filter.stack=[stackKey('p','shared'),scanLocationKey('p',firstRepo),scanLocationKey('p',secondRepo),scanLocationKey('p','local'),stackKey('p','shared')]`);
+  const projectTable = run(`findingsTable('p')`);
+  const globalTable = run('findingsTable()');
+  const expected = ['CVE-A','CVE-M','CVE-R1','CVE-R2','CVE-LEGACY','CVE-LOCAL','CVE-OVERLAP'].sort();
+  assert.deepEqual(findingIDs(projectTable).sort(), expected);
+  assert.deepEqual(findingIDs(globalTable).sort(), expected);
+  assert.match(projectTable, /Showing 7 matches \(9 total\)/);
+  assert.match(globalTable, /Showing 7 matches \(11 total\)/);
+  assert.match(projectTable, /Critical <strong>1<\/strong>/);
+  assert.match(projectTable, /High <strong>2<\/strong>/);
+  assert.match(projectTable, /Medium <strong>2<\/strong>/);
+  assert.match(projectTable, /Low <strong>2<\/strong>/);
+  assert.match(projectTable, /Unrated <strong>0<\/strong>/);
+  assert.match(run(`techStackFilterHTML('p')`), /4 items selected/);
+  assert.equal(run('techStackFilterSelection().length'), 4);
+  run(`filter.stack.push(stackKey('q','shared'),scanLocationKey('q',firstRepo))`);
+  assert.match(run('findingsTable()'), /Showing 9 matches \(11 total\)/);
+  assert.match(run('findingsTable()'), /Critical <strong>2<\/strong>/);
+  assert.match(run('findingsTable()'), /High <strong>3<\/strong>/);
+  run(`filter.severity='HIGH'`);
+  assert.deepEqual(findingIDs(run('findingsTable()')).sort(), ['CVE-A','CVE-R2','CVE-Q'].sort());
+  assert.match(run('findingsTable()'), /Critical <strong>2<\/strong>/);
+  run(`filter.search='dependency';filter.match='scanner'`);
+  assert.deepEqual(findingIDs(run('findingsTable()')), ['CVE-R2']);
+  assert.match(run('findingsTable()'), /High <strong>1<\/strong>/);
+  assert.match(run('findingsTable()'), /Medium <strong>1<\/strong>/);
+});
+
+test('checkbox filter updates counts, keeps the menu open, and distinguishes no selection from All', () => {
+  const run = app();
+  repositoryFilterInventory(run);
+  run(`
+    bindFilters('p');
+    const picker=$('#tech-stack-filter');picker.open=true;
+    const checks=techStackOptions('p').map(option=>({value:option.key,checked:false}));
+    document.querySelectorAll=selector=>selector==='[data-stack-filter-item]'?checks:[];
+    syncSelection.p=['shared'];findingsPage=4;
+  `);
+  chooseStackFilter(run, run(`stackKey('p','shared')`));
+  chooseStackFilter(run, run(`scanLocationKey('p',firstRepo)`));
+  assert.equal(run(`$('#tech-stack-filter-summary').textContent`), '2 items selected');
+  assert.equal(run(`$('[data-stack-filter-all]').checked`), false);
+  assert.equal(run('checks.filter(input=>input.checked).length'), 2);
+  assert.equal(run('picker.open'), true);
+  assert.equal(run('findingsPage'), 1);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 5 matches \(9 total\)/);
+  assert.match(run(`techStackFilterHTML('p')`), /2 items selected/);
+  assert.equal(run('syncSelection.p.join()'), 'shared');
+  chooseStackFilter(run, run(`stackKey('p','shared')`), false);
+  chooseStackFilter(run, run(`scanLocationKey('p',firstRepo)`), false);
+  assert.equal(run(`$('#tech-stack-filter-summary').textContent`), 'No items selected');
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 0 matches \(9 total\)/);
+  assert.equal((run(`$('#finding-results').innerHTML`).match(/<strong>0<\/strong>/g) || []).length, 5);
+  assert.equal(run(`$('[data-stack-filter-all]').checked`), false);
+  assert.match(run(`techStackFilterHTML('p')`), /No items selected/);
+  chooseStackFilter(run, null);
+  assert.equal(run(`$('[data-stack-filter-all]').checked`), true);
+  assert.equal(run('techStackFilterSelection()'), null);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 9 of 9 vulnerabilities/);
+  assert.equal(run('checks.filter(input=>input.checked).length'), 0);
+  run(`lang='ja'`);
+  chooseStackFilter(run, run(`stackKey('p','shared')`));
+  chooseStackFilter(run, run(`scanLocationKey('p',firstRepo)`));
+  assert.equal(run(`$('#tech-stack-filter-summary').textContent`), '2件を選択中');
+  assert.match(run(`$('#finding-results').innerHTML`), /一致する結果を 5 件表示（全 9 件）/);
+});
+
+test('project filtering retains compatible multiple selections and resets All when none remain', () => {
+  const run = app();
+  repositoryFilterInventory(run);
+  run(`filter.stack=[stackKey('p','shared'),stackKey('q','shared'),scanLocationKey('q',firstRepo)];bindFilters();`);
+  run(`$('#project-filter').listeners.change({target:{value:'q'}})`);
+  assert.equal(run('techStackFilterSelection().length'), 2);
+  assert.match(run(`$('#tech-stack-filter-summary').textContent`), /2 items selected/);
+  assert.match(run(`$('#tech-stack-filter-options').innerHTML`), /Project Two · Code scanner/);
+  assert.doesNotMatch(run(`$('#tech-stack-filter-options').innerHTML`), /Project One/);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 2 matches \(11 total\)/);
+  assert.equal(run(`$('#tech-stack-filter > summary')['aria-label']`), 'All tech stacks & repositories');
+  run(`$('#project-filter').listeners.change({target:{value:''}})`);
+  assert.equal(run('techStackFilterSelection().length'), 2);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 2 matches \(11 total\)/);
+  run(`$('#project-filter').listeners.change({target:{value:'p'}})`);
+  assert.equal(run('techStackFilterSelection()'), null);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 9 matches \(11 total\)/);
+  assert.equal(run(`$('[data-stack-filter-all]').checked`), true);
+});
+
+test('multiple stack filters retain pagination and severity ordering for 30000 findings', () => {
+  const run = app();
+  repositoryFilterInventory(run);
+  run(`
+    state.projects[0].findings=Array.from({length:30000},(_,i)=>({
+      id:'CVE-large-'+i,title:i>=29990?'Tail advisory':'Advisory',component:'demo',
+      asset_id:i%3===0?'shared':'code:'+(i%3===1?firstRepo:secondRepo)+':dependency',
+      match:i%3===0?'cpe':'scanner',severity:i===29998?'CRITICAL':'HIGH',sources:['NVD'],
+    }));
+    filter.stack=[stackKey('p','shared'),scanLocationKey('p',firstRepo)];bindFilters('p');
+  `);
+  const html = run(`findingsTable('p')`);
+  assert.equal(findingIDs(html).length, 100);
+  assert.equal(findingIDs(html)[0], 'CVE-large-29998');
+  assert.match(html, /Showing 1–100 of 20,000 matches \(30,000 total\)/);
+  assert.match(html, /Page 1 of 200/);
+  run(`findingsPage=100`);
+  chooseStackFilter(run, run(`scanLocationKey('p',firstRepo)`), false);
+  assert.equal(run('findingsPage'), 1);
+  assert.equal(findingIDs(run(`$('#finding-results').innerHTML`)).length, 100);
+  assert.match(run(`$('#finding-results').innerHTML`), /Showing 1–100 of 10,000 matches \(30,000 total\)/);
+  assert.match(run(`$('#finding-results').innerHTML`), /Critical <strong>0<\/strong>/);
 });
 
 test('stack filters localize labels and escape component and project names',()=>{
   const run=app();inventory(run);
-  run(`lang='ja';state.projects[0].name='<script>';state.projects[0].assets[0].name='"<img>'`);
-  const html=run('techStackFilterHTML()');
-  assert.match(html,/すべての技術スタック/);
-  assert.match(html,/aria-label="技術スタック"/);
-  assert.match(html,/&lt;script&gt;/);
-  assert.match(html,/&quot;&lt;img&gt;/);
-  assert.doesNotMatch(html,/<script>|<img>/);
+  for (const {script, escapedScript, image, escapedImage} of htmlEscapingCases) {
+    run(`lang='ja';state.projects[0].name=${JSON.stringify(script)};state.projects[0].assets[0].name=${JSON.stringify(image)}`);
+    const html=run('techStackFilterHTML()');
+    assert.match(html,/すべての技術スタック/);
+    assert.match(html,/aria-label="すべての技術スタック"/);
+    assert.ok(html.includes(escapedScript));
+    assert.ok(html.includes(escapedImage));
+    assert.doesNotMatch(html,unexpectedHTMLTag);
+  }
 });
 
 test('result counts use project totals in its tab and all-project totals in the global view',()=>{
@@ -496,7 +1387,8 @@ test('result counts use project totals in its tab and all-project totals in the 
 
 test('counts update on component, severity, search, and match changes including zero matches',()=>{
   const run=app();inventory(run);
-  run(`bindFilters('p');document.querySelector('#tech-stack-filter').listeners.change({target:{value:stackKey('p','shared')}})`);
+  run(`bindFilters('p')`);
+  chooseStackFilter(run, run(`stackKey('p','shared')`));
   assert.match(run(`document.querySelector('#finding-results').innerHTML`),/Showing 2 matches \(4 total\)/);
   run(`document.querySelector('#severity-filter').listeners.change({target:{value:'HIGH'}})`);
   assert.match(run(`document.querySelector('#finding-results').innerHTML`),/Showing 1 match \(4 total\)/);
@@ -506,7 +1398,8 @@ test('counts update on component, severity, search, and match changes including 
   const empty=run(`document.querySelector('#finding-results').innerHTML`);
   assert.match(empty,/Showing 0 matches \(4 total\)/);
   assert.match(empty,/No findings match these filters/);
-  run(`document.querySelector('#finding-search').listeners.input({target:{value:''}});document.querySelector('#severity-filter').listeners.change({target:{value:''}});document.querySelector('#tech-stack-filter').listeners.change({target:{value:''}})`);
+  run(`document.querySelector('#finding-search').listeners.input({target:{value:''}});document.querySelector('#severity-filter').listeners.change({target:{value:''}})`);
+  chooseStackFilter(run, null);
   assert.match(run(`document.querySelector('#finding-results').innerHTML`),/Showing 4 of 4 vulnerabilities/);
 });
 
@@ -572,7 +1465,7 @@ test('Scan code uses its own action and reports a separate workflow and activity
 test('compact sync panel shows actual steps, active source, and rate-limit wait',()=>{
   const run=app();workflowFixture(run);
   const html=run('workflowRun(project,workflow)');
-  assert.match(html,/Sync workflow · Project One/);
+  assert.match(html,/Assessment workflow · Project One/);
   assert.match(html,/0 of 3 steps finished/);
   assert.match(html,/NIST NVD · demo 1/);
   assert.match(html,/Waiting for API rate limit/);
@@ -641,6 +1534,7 @@ test('show more expands vertical steps and timestamped logs and show less shrink
   assert.match(html,/workflow-stepper/);
   assert.match(html,/CVE Program/);
   assert.match(html,/Workflow run logs/);
+  assert.match(html,/<ol class="workflow-logs" tabindex="0" aria-label="Workflow run logs">/);
   assert.match(html,/<time>/);
   run(`workflow.steps[0].progress.phase='page'`);
   assert.match(run('workflowBody(project,workflow)'),/Show less/);
@@ -686,7 +1580,7 @@ test('workflow logs distinguish configured scanners, findings, errors, and skipp
     workflow.asset_id = 'a';
     expandedRuns.add('run-1');
   `);
-  assert.match(run('workflowBody(project,workflow)'),/Code scanners · Skipped for a component-only sync/);
+  assert.match(run('workflowBody(project,workflow)'),/Code scanners · Skipped for a component-only assessment/);
   run(`
     const at = workflow.started_at;
     workflow.logs.push(
@@ -704,7 +1598,7 @@ test('workflow logs distinguish configured scanners, findings, errors, and skipp
   assert.match(html,/Scanner completed · npm audit · 0 findings reported/);
   assert.match(html,/Scanner completed · govulncheck · 1 finding reported/);
   assert.match(html,/class="workflow-log-error"[^]*?Scanner failed · composer audit · &lt;failed&gt;/);
-  assert.match(html,/Code scanners · Snyk skipped because its token is missing\./);
+  assert.match(html,/Code scanners · Scanner requires an API token\.[^]*?Snyk/);
   run(`lang='ja'`);
   assert.match(run('workflowBody(project,workflow)'),/スキャナーが完了 · npm audit · 検出結果 0 件/);
 });
@@ -741,19 +1635,25 @@ test('code scanner findings and workflow logs identify each repository location'
     const locations = ['local', 'remote'];
     workflow.logs = locations.map(scan_target => ({at:workflow.started_at, step_id:'scanner', event:'scanner_completed', detail:'trivy', scan_target, findings:1}));
     workflow.logs.push({at:workflow.started_at, step_id:'scanner', event:'scanner_target_failed', detail:'repository folder is unavailable', scan_target:'local'});
+    workflow.logs.push(
+      {at:workflow.started_at, step_id:'scanner', event:'scanner_cleanup_completed', scan_target:'remote', scan_repository:'github.com/owner/repo'},
+      {at:workflow.started_at, step_id:'scanner', event:'scanner_cleanup_failed', scan_target:'local', detail:'<permission denied>'},
+    );
     const findings = locations.map((scan_target, i) => ({id:'CVE-both', asset_id:'code:'+scan_target+':demo', scan_target, component:'demo', version:String(i+1), title:'Advisory', match:'scanner', severity:'HIGH', sources:['Trivy']}));
-    state = {projects:[{...project, assets:[], findings}]};
+    state = {projects:[{...project, assets:[], findings, local_path:'/checkout'}]};
     expandedRuns.add(workflow.id);
   `);
   const logs = run('workflowBody(project,workflow)');
   assert.match(logs,/Local folder · Scanner completed · Trivy/);
   assert.match(logs,/Remote repository · Scanner completed · Trivy/);
   assert.match(logs,/class="workflow-log-error"[^]*?Local folder · Could not open scan target/);
+  assert.match(logs,/<strong>Code scanners · github\.com\/owner\/repo · Temporary scan files removed<\/strong>/);
+  assert.match(logs,/class="workflow-log-error"><time>[^<]+<\/time><span><strong>Code scanners · Local folder · Could not remove temporary scan files · &lt;permission denied&gt;<\/strong>/);
   const table = run(`findingsTable('p')`);
   assert.equal(findingIDs(table).length,2);
   assert.match(table,/1 · Local folder/);
   assert.match(table,/2 · Remote repository/);
-  run(`filter.stack=stackKey('p','code:remote:demo')`);
+  run(`filter.stack=scanLocationKey('p','local')`);
   assert.equal(findingIDs(run(`findingsTable('p')`)).length,1);
 });
 
@@ -785,7 +1685,7 @@ test('a completed scoped workflow identifies where the earlier full-project sync
     renderProject('p');
   `);
   const html = run(`$('#main').innerHTML`);
-  assert.match(html, /<span class="pill interrupted full-sync-interruption">Full-project sync interrupted during CVE Program<\/span>/);
+  assert.match(html, /<span class="pill interrupted full-sync-interruption">Full-project assessment interrupted during CVE Program<\/span>/);
   assert.match(html, /class="sync-workflow complete"[^>]+data-sync-scope="scoped"/);
   assert.match(html, /Go 1\.26\.3 · Critical/);
   assert.match(html, /The latest full-project assessment is incomplete/);
@@ -806,13 +1706,15 @@ test('interrupted workflow summaries report the recorded step or explicitly say 
 
 test('workflow localizes interface and escapes external error details',()=>{
   const run=app();workflowFixture(run);
-  run(`lang='ja';expandedRuns.add('run-1');workflow.logs.push({at:new Date().toISOString(),event:'failed',detail:'<script>unsafe</script>'})`);
-  const html=run('workflowBody(project,workflow)');
-  assert.match(html,/同期ワークフロー/);
-  assert.match(html,/詳細を閉じる/);
-  assert.match(html,/実行ログ/);
-  assert.match(html,/&lt;script&gt;unsafe&lt;\/script&gt;/);
-  assert.doesNotMatch(html,/<script>/);
+  for (const {script, escapedScript} of htmlEscapingCases) {
+    run(`lang='ja';expandedRuns.add('run-1');workflow.logs.push({at:new Date().toISOString(),event:'failed',detail:${JSON.stringify(script)}})`);
+    const html=run('workflowBody(project,workflow)');
+    assert.match(html,/評価ワークフロー/);
+    assert.match(html,/詳細を閉じる/);
+    assert.match(html,/実行ログ/);
+    assert.ok(html.includes(escapedScript));
+    assert.doesNotMatch(html,unexpectedHTMLTag);
+  }
 });
 
 test('polling progress updates panels without resetting active filters or rebuilding the page',()=>{
@@ -847,7 +1749,7 @@ test('project workflow can be closed only after the run finishes',()=>{
   }
   assert.doesNotMatch(run('workflowRun(project,workflow)'),/data-dismiss-workflow/);
   run(`lang='ja'`);
-  assert.match(run('workflowRun(project,workflow,true)'),/aria-label="同期ワークフローを閉じる"/);
+  assert.match(run('workflowRun(project,workflow,true)'),/aria-label="評価ワークフローを閉じる"/);
 });
 
 test('closing a workflow removes only its project panel and preserves filters and history',()=>{
@@ -872,12 +1774,17 @@ test('dismissed project panel stays closed on redraw and a new run displays norm
   assert.doesNotMatch(run(`document.querySelector('#main').innerHTML`),/data-dismiss-workflow/);
 });
 
-test('Configuration shows runtime database and key paths beneath the storage note',()=>{
+test('Configuration groups workspace, key and catalog database paths under File & Databases',()=>{
   const run=app();
-  run(`state={settings:{language:'en',sources:{},scanners:{}},token_status:{github:true,snyk:true},saved_token_status:{github:true},storage_paths:{database:'/custom data/vulman.db',key:'/custom data/vulman.key'}};renderSettings()`);
+  run(`state={settings:{language:'en',sources:{},scanners:{}},token_status:{github:true,snyk:true},saved_token_status:{github:true},storage_paths:{database:'/custom data/vulman.db',key:'/custom data/vulman.key'},cve_database:{path:'/custom data/vulman-cve.db'},nvd_database:{path:'/custom data/vulman-nvd.db'},osv_database:{path:'/custom data/vulman-osv.db'}};renderSettings()`);
   const html=run(`document.querySelector('#main').innerHTML`);
   assert.match(html,/<code>\/custom data\/vulman.db<\/code>/);
   assert.match(html,/<code>\/custom data\/vulman.key<\/code>/);
+  for (const source of ['cve','nvd','osv']) {
+    assert.match(html, new RegExp(`<dt>${source.toUpperCase()} catalog database</dt><dd><code data-catalog-path="${source}">/custom data/vulman-${source}\\.db</code>`));
+    assert.ok(html.indexOf('File &amp; Databases') < html.indexOf(`data-catalog-path="${source}"`));
+    assert.ok(html.indexOf(`data-catalog-path="${source}"`) < html.indexOf('id="advanced-settings"'));
+  }
   assert.match(html,/GitHub personal access token[^]*?type="password" name="token_github"/);
   assert.match(html, /<input[^>]+name="token_github"[^>]*placeholder="••••••"/);
   assert.match(html, /<input[^>]+name="token_snyk"[^>]*placeholder=""/);
@@ -885,6 +1792,9 @@ test('Configuration shows runtime database and key paths beneath the storage not
   assert.ok(html.indexOf('Local storage uses AES-GCM')<html.indexOf('class="storage-paths"'));
   run(`lang='ja'`);
   assert.match(run('storagePathsHTML()'),/暗号化キーファイル/);
+  assert.match(run('storagePathsHTML()'),/CVE カタログデータベース/);
+  assert.match(run('storagePathsHTML()'),/NVD カタログデータベース/);
+  assert.match(run('storagePathsHTML()'),/OSVカタログデータベース/);
   const windowsPath=String.raw`C:\Users\Example\Vulman\vulman.db`;
   run(`state.storage_paths.database=${JSON.stringify(windowsPath)}`);
   assert.ok(run('storagePathsHTML()').includes(windowsPath));
@@ -895,7 +1805,7 @@ test('Configuration shows runtime database and key paths beneath the storage not
 test('sync modes are explicit and keep the selected mode after redraw',async()=>{
   const run=app();run(`var p={id:'p',assets:[]};syncModeSelection.p='local'`);
   const html=run('syncControls(p)');
-  assert.match(html,/value="local" selected>Reassess from cache/);
+  assert.match(html,/value="local" selected>Reassess from local data/);
   assert.match(html,/Force refresh/);
   run(`var calls=[];invoke=async(_method,_id,body)=>calls.push(body);refresh=async()=>{};toast=()=>{}`);
   await run(`syncProject('p','','local')`);await run(`syncProject('p','a','refresh')`);
@@ -908,14 +1818,33 @@ test('cache settings expose configurable freshness and runtime cache usage',()=>
   assert.match(html,/name="cache_hours"[^>]*value="12"/);
   assert.match(html,/Cached queries and records: <strong>5/);
   assert.match(html,/1.00 MiB/);
-  run(`lang='ja'`);assert.match(run('cacheSettingsHTML()'),/共有ローカルキャッシュ/);
+  run(`lang='ja'`);assert.match(run('cacheSettingsHTML()'),/APIレスポンスキャッシュ/);
+});
+
+test('Advanced settings contains the cache controls and opens to reveal invalid input', () => {
+  const run = app();
+  run(`state={settings:{language:'en',sources:{},scanners:{},cache_hours:12},token_status:{}};renderSettings()`);
+  const html = run(`$('#main').innerHTML`);
+  const advanced = html.match(/<details class="settings-section advanced-settings"[^>]*>[\s\S]*?<\/details>/)?.[0];
+  assert.ok(advanced);
+  assert.doesNotMatch(advanced, /<details[^>]*\bopen\b/);
+  assert.match(advanced, /<summary>Advanced settings<\/summary>/);
+  assert.match(advanced, /<h3>API response cache<\/h3>/);
+  for (const name of ['cache_hours','cache_max_entries','cache_max_mib']) {
+    assert.match(advanced, new RegExp('name="' + name + '"'));
+    assert.doesNotMatch(html.replace(advanced, ''), new RegExp('name="' + name + '"'));
+  }
+  run(`const section = {open:false}; $('#settings-form').listeners.invalid({target:{closest:() => section}})`);
+  assert.equal(run('section.open'), true);
+  run(`lang='ja'`);
+  assert.match(run('advancedSettingsHTML()'), /詳細設定.*APIレスポンスキャッシュ/s);
 });
 
 test('workflow distinguishes assessment time from cached source freshness',()=>{
   const run=app();workflowFixture(run);
   run(`workflow.mode='local';workflow.data_checked_at='2026-01-01T01:00:00Z';workflow.steps[0].progress={phase:'stale_cache',cache_status:'stale',checked_at:workflow.data_checked_at}`);
   const html=run('workflowBody(project,workflow)');
-  assert.match(html,/Reassess from cache/);
+  assert.match(html,/Reassess from local data/);
   assert.match(html,/Source data checked/);
   assert.match(html,/freshness could not be verified/);
   assert.match(html,/Stale cached data/);
@@ -978,7 +1907,7 @@ test('the credential eye reveals drafts and displays saved previews inside the f
       };
     };
     var form = {querySelector: () => ({disabled:false})};
-    var input = {type:'password', value:'draft key', placeholder:'••••••', dataset:{credentialSaved:'true'}, form, matches: () => true, focus(){},
+    var input = {type:'password', value:'draft key', placeholder:'••••••', dataset:{credentialSaved:'true'}, form, matches: selector => selector === '[data-credential-input]', focus(){},
       closest: selector => selector === '.credential-field' ? field : input};
     var preview = {textContent:'', classList:classes()};
     var attrs = {'aria-pressed':'false'};
@@ -1061,7 +1990,7 @@ test('project sync controls default to all severities and preserve the selected 
   run(`syncSeveritySelection.p='CRITICAL'`);select=run('syncControls(p)').match(/<select id="sync-severity"[\s\S]*?<\/select>/)[0];
   assert.match(select,/value="CRITICAL" selected>Critical/);
   assert.match(select,/value="UNKNOWN"[^>]*>Unrated/);
-  run(`lang='ja'`);assert.match(run('syncControls(p)'),/深刻度別の同期/);
+  run(`lang='ja'`);assert.match(run('syncControls(p)'),/評価する深刻度/);
 });
 
 test('severity sync requests combine with a tech stack and refresh mode',async()=>{
@@ -1080,7 +2009,7 @@ test('global sync controls offer severity selection independently of display fil
 
 test('severity-scoped workflows identify their scope without claiming full-project completion',()=>{
   const run=app();workflowFixture(run);run(`workflow.severity='CRITICAL'`);
-  assert.match(run('workflowBody(project,workflow)'),/Everything · Critical · Normal sync/);
+  assert.match(run('workflowBody(project,workflow)'),/Everything · Critical · Normal assessment/);
   const html=run(`projectStatus({revision:1,assessed_revision:0,last_sync:'0001-01-01T00:00:00Z',runs:[{severity:'CRITICAL',status:'complete'}]})`);
   assert.match(html,/Full-project assessment needed/);
   const partial=run(`projectStatus({revision:1,assessed_revision:1,last_sync:'2026-01-01',runs:[{severity:'HIGH',status:'complete'},{status:'partial'}]})`);
@@ -1401,7 +2330,7 @@ test('Projects list opens the editor directly and polling leaves its draft mount
   assert.equal(run('mounts.length'), 1);
 });
 
-test('Projects list shows configured URL counts and each project’s Critical findings', () => {
+test('Overview and Projects show the same repository URL and Critical finding counts', () => {
   const run = app();
   inventory(run);
   run(`
@@ -1411,19 +2340,21 @@ test('Projects list shows configured URL counts and each project’s Critical fi
     first.findings[0].severity = first.findings[2].severity = 'CRITICAL';
     first.runs = [{status:'complete', count:99}];
     second.repository = 'https://github.com/owner/legacy';
+    state.settings = {language:'en', sources:{}};
     filter.severity = 'LOW';
-    location.hash = '#projects';
-    render();
   `);
-  const projectRows = run(`$('#main').innerHTML`).split('<div class="project-list-row">').slice(1);
-  assert.match(projectRows[0], /<span>2 components<\/span><span>2 repository URLs<\/span><span class="pill critical">Critical 2<\/span>/);
-  assert.match(projectRows[1], /<span>1 repository URL<\/span><span class="pill ">Critical 0<\/span>/);
+  for (const page of ['projects', 'overview']) {
+    run(`location.hash = '#${page}'; render();`);
+    const summaries = run(`$('#main').innerHTML`).match(/<p class="project-list-summary">.*?<\/p>/g) || [];
+    assert.equal(summaries.length, 2);
+    assert.match(summaries[0], /<span>2 components<\/span><span>2 repository URLs<\/span><span class="pill critical">Critical 2<\/span>/);
+    assert.match(summaries[1], /<span>1 repository URL<\/span><span class="pill ">Critical 0<\/span>/);
+  }
 
   run(`second.repository_urls = []; second.local_path = '/checkout';`);
-  assert.doesNotMatch(run('projectList([second], true)'), /repository URL/);
-  assert.doesNotMatch(run('projectList([first])'), /project-list-summary/);
+  assert.doesNotMatch(run('projectList([second])'), /repository URL/);
   run(`lang = 'ja'; first.findings = Array.from({length:1001}, () => ({severity:'CRITICAL'}));`);
-  assert.match(run('projectList([first], true)'), /リポジトリ URL 2 件<\/span><span class="pill critical">緊急 1,001<\/span>/);
+  assert.match(run('projectList([first])'), /リポジトリ URL 2 件<\/span><span class="pill critical">緊急 1,001<\/span>/);
 });
 
 test('Edit project opens a dedicated deletion page and cancelling restores the draft', async () => {
@@ -1525,6 +2456,59 @@ test('component Critical counts isolate project and asset IDs from duplicate nam
   assert.match(run(`document.querySelector('#project-tab-content').innerHTML`),/class="stack-critical-count"><span>Critical<\/span><span class="pill critical">1<\/span>/);
 });
 
+test('changed components show Reassessment needed and warn about retained project totals until reassessment', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const project = state.projects[0];
+    project.assets[0].needs_assessment = true;
+    project.assets[0].version = '2.0.0';
+    project.findings.push({id:'CVE-previous',asset_id:project.assets[0].id,version:'1.0.0',severity:'CRITICAL'});
+    project.assessed_revision = 0;
+    projectTab = 'techStack';
+    renderProject('p');
+  `);
+  assert.match(run(`$('#main').innerHTML`), /Saved findings and project totals may refer to previous versions/);
+  assert.match(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), />Reassessment needed<\/span>/);
+  assert.doesNotMatch(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), /class="pill critical">1/);
+  assert.match(run(`projectListSummary(state.projects[0], '2 components')`), /Severity counts need refresh/);
+  assert.match(run(`projectStatus(state.projects[0])`), /Inventory changed · reassessment needed/);
+
+  run(`lang = 'ja'`);
+  assert.match(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), /要再評価/);
+  run(`state.projects[0].assets[0].needs_assessment = false`);
+  assert.doesNotMatch(run(`componentCriticalCount(state.projects[0], state.projects[0].assets[0])`), /要再評価/);
+});
+
+test('saving a version change prompts reassessment without starting a sync', async () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const submit = {disabled:false}, formError = {};
+    const form = {
+      dataset:{projectId:'p',revision:'1'}, isConnected:true,
+      querySelector:selector => ({'button[type="submit"]':submit, '[data-project-error]':formError})[selector],
+    };
+    const requests = [], messages = [];
+    projectFormValues = () => ({assets:[{id:'a',version:'2.0.0'}]});
+    invoke = async (...args) => {
+      requests.push(args);
+      return {id:'p',assets:[{id:'a',version:'2.0.0',needs_assessment:true}]};
+    };
+    refresh = async () => {};
+    toast = message => messages.push(message);
+    location.hash = '#project/p/edit';
+  `);
+  await run('saveProject({preventDefault(){},target:form})');
+  assert.equal(run('requests.length'), 1);
+  assert.equal(run('requests[0][0]'), 'UpdateProject');
+  assert.equal(run('requests[0][2].revision'), 1);
+  assert.match(run('messages[0]'), /Reassess the changed tech stack to refresh severity counts/);
+  assert.equal(run('location.hash'), 'project/p');
+  assert.equal(run('projectTab'), 'techStack');
+  assert.equal(run('submit.disabled'), false);
+});
+
 test('component Critical counts handle missing findings, Japanese labels, and refreshed assessments',()=>{
   const run=app();inventory(run);
   run(`projectTab='techStack';delete state.projects[0].findings;renderProject('p')`);
@@ -1559,7 +2543,7 @@ test('component severity changes survive redraws and stay isolated across compon
   assert.doesNotMatch(run(`componentSyncControls(state.projects[0],state.projects[0].assets[0])`),/<option[^>]* selected/);
 });
 
-test('component Sync now sends that card severity and resetting to all omits the severity restriction',async()=>{
+test('component Match VDBs sends that card severity and resetting to all omits the severity restriction',async()=>{
   const run=app();inventory(run);
   run(`var calls=[];invoke=async(...args)=>calls.push(args);refresh=async()=>{};toast=()=>{};syncSeveritySelection.p='HIGH';componentSyncSeveritySelection.set(stackKey('p','shared'),'CRITICAL');var target={dataset:{action:'sync-asset',id:'p',asset:'shared'},closest:selector=>selector==='[data-action]'?target:null}`);
   await run(`document.listeners.click({target})`);
@@ -1574,10 +2558,182 @@ test('component Sync now sends that card severity and resetting to all omits the
 test('component severity controls localize, escape identifiers, and disable while the project syncs',()=>{
   const run=app();inventory(run);run(`lang='ja';state.projects[0].syncing=true;state.projects[0].assets[0].id='\"<asset>'`);
   const html=run(`componentSyncControls(state.projects[0],state.projects[0].assets[0])`);
-  assert.match(html,/深刻度別の同期/);assert.match(html,/value="">すべての深刻度/);
+  assert.match(html,/評価する深刻度/);assert.match(html,/value="">すべての深刻度/);
   assert.match(html,/data-asset-id="&quot;&lt;asset&gt;"/);
   assert.match(html,/<select[^>]+ disabled>/);assert.match(html,/<button[^>]+ disabled>/);
   assert.doesNotMatch(html,/<asset>/);
+});
+
+test('queued workflows name required databases and expose recovery only after an update fails', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    workflow.status = 'queued';
+    workflow.paused_at = workflow.started_at;
+    workflow.database_waits = [{source:'nvd',status:'updating'},{source:'cve',status:'complete'}];
+    project.syncing = true;
+    project.runs = [workflow];
+  `);
+
+  let html = run('workflowBody(project, workflow)');
+  assert.match(html, /will start automatically when the required updates finish/);
+  assert.match(html, /NVD database and CPE dictionary/);
+  assert.match(html, /CVE database/);
+  assert.match(html, /data-control="cancel-queued"/);
+  assert.doesNotMatch(html, /data-control="pause"|data-control="resume"|data-control="retry-databases"/);
+  assert.equal(run('workflowElapsed(workflow)'), '0m 0s');
+  assert.match(run('projectStatus(project)'), />Queued<\/span>/);
+  assert.equal(run('canDismissWorkflow(workflow)'), false);
+
+  run(`workflow.status = 'waiting_databases'`);
+  for (const {script, escapedScript} of htmlEscapingCases) {
+    run(`workflow.database_waits[0] = {source:'nvd',status:'failed',detail:${JSON.stringify('HTTP 403 ' + script)}}`);
+    html = run('workflowBody(project, workflow)');
+    assert.match(html, /Retry database updates/);
+    assert.match(html, /data-control="use-available"/);
+    assert.ok(html.includes('HTTP 403 ' + escapedScript));
+    assert.doesNotMatch(html, unexpectedHTMLTag);
+  }
+  run(`lang = 'ja'`);
+  html = run('workflowBody(project, workflow)');
+  assert.match(html, /NVDデータベースとCPE辞書/);
+  assert.match(html, /待機中の評価をキャンセル/);
+});
+
+test('queued workflows show separate live download and committed import progress', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    workflow.status = 'queued';
+    workflow.database_waits = [{source:'nvd',status:'updating'},{source:'cve',status:'updating'}];
+    state = {
+      projects:[{...project,runs:[workflow]}],
+      nvd_database:{running:true,phase:'downloading',feed:'2026',resumable:true,feeds_done:3,feeds_total:26,downloaded:1048576,download_total:4194304},
+      cve_database:{running:true,phase:'importing',imported:256,import_total:1000},
+    };
+  `);
+
+  let html = run('workflowBody(project, workflow)');
+  assert.match(html, /Downloaded 1\.0 \/ 4\.0 MiB · 25%/);
+  assert.match(html, /max="4194304" value="1048576"/);
+  assert.match(html, /Current feed: NVD 2026/);
+  assert.match(html, /3 of 26 feeds complete/);
+  assert.match(html, /Archive entries processed: 256 \/ 1,000/);
+  assert.match(html, /max="1000" value="256"/);
+  assert.doesNotMatch(html, /workflow-stepper/);
+
+  run(`state.nvd_database = {running:true,phase:'importing',feed:'dictionary',resumable:true,feeds_done:25,feeds_total:26,imported:4096,import_total:1879483}`);
+  html = run('workflowBody(project, workflow)');
+  assert.match(html, /Current feed: CPE dictionary/);
+  assert.match(html, /Records imported: 4,096 \/ 1,879,483/);
+  assert.match(html, /max="1879483" value="4096"/);
+
+  run(`lang='ja'`);
+  html = run('workflowBody(project, workflow)');
+  assert.match(html, /現在のフィード: CPE辞書/);
+  assert.match(html, /インポート済みレコード: 4,096 \/ 1,879,483/);
+});
+
+test('queued database progress handles unknown totals, verification, completion, and unsafe details', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`state={nvd_database:{running:true,phase:'verifying',downloaded:500,download_total:500}}`);
+
+  let html = run(`databaseWaitProgress({source:'nvd',status:'updating'})`);
+  assert.match(html, /Verifying NVD feed checksum/);
+  assert.match(html, /<progress class="database-update-progress"  aria-label=/);
+  assert.doesNotMatch(html, /100%|value="500"/);
+
+  run(`state.nvd_database={running:true,phase:'importing',imported:256,import_total:0}`);
+  html = run(`databaseWaitProgress({source:'nvd',status:'updating'})`);
+  assert.match(html, /Records imported: 256/);
+  assert.doesNotMatch(html, /max="0"|value="256"|NaN/);
+
+  run(`state.nvd_database={running:false,phase:'complete'}`);
+  html = run(`databaseWaitProgress({source:'nvd',status:'updating'})`);
+  assert.match(html, /NVD update complete/);
+  assert.doesNotMatch(html, /<progress/);
+
+  for (const {script, escapedScript} of htmlEscapingCases) {
+    run(`state.nvd_database={running:true,phase:'downloading',feed:${JSON.stringify(script)},downloaded:NaN,download_total:-1}`);
+    html = run(`databaseWaitProgress({source:'nvd',status:'updating'})`);
+    assert.match(html, /Downloaded 0\.0 MiB/);
+    assert.ok(html.includes(escapedScript));
+    assert.doesNotMatch(html, unexpectedHTMLTag);
+    assert.doesNotMatch(html, /NaN|value="-/);
+  }
+});
+
+test('database-only polling refreshes queued panels without rendering the page or replacing the request', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    workflow.status='queued';
+    workflow.database_waits=[{source:'nvd',status:'updating'},{source:'cve',status:'updating'}];
+    state={settings:{language:'en'},projects:[{...project,runs:[workflow]}]};
+    expandedRuns.add(workflow.id);
+    filter.search='keep my filter';
+    const originalRuns=state.projects[0].runs;
+    const panel={dataset:{syncProjectId:'p',syncRun:'run-1'},innerHTML:'',querySelector:()=>null};
+    document.querySelectorAll=()=>[panel];
+    render=()=>{throw new Error('database progress rebuilt the page');};
+    applyPollingState({nvd_database:{running:true,phase:'downloading',downloaded:1048576,download_total:2097152},cve_database:{running:true,phase:'importing',imported:256,import_total:512}});
+  `);
+  assert.match(run('panel.innerHTML'), /Downloaded 1\.0 \/ 2\.0 MiB · 50%/);
+  assert.match(run('panel.innerHTML'), /Archive entries processed: 256 \/ 512/);
+  assert.equal(run('state.projects[0].runs === originalRuns'), true);
+  assert.equal(run('filter.search'), 'keep my filter');
+  assert.match(run('panel.innerHTML'), /Show less/);
+
+  run(`applyPollingState({nvd_database:{running:true,phase:'importing',feed:'dictionary',imported:4096,import_total:8192},cve_database:{running:true,phase:'cleaning'}})`);
+  assert.match(run('panel.innerHTML'), /Records imported: 4,096 \/ 8,192/);
+  assert.match(run('panel.innerHTML'), /Cleaning previous CVE catalogue/);
+});
+
+test('queued workflow actions target the exact run and cache-only fallback requires confirmation', async () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    var calls = [], notices = [];
+    invoke = async (...args) => calls.push(args);
+    refresh = async () => {};
+    toast = text => notices.push(text);
+    confirmAction = () => false;
+  `);
+
+  assert.equal(await run(`controlWorkflow('p','queued-id','use-available')`), false);
+  assert.equal(run('calls.length'), 0);
+  await run(`controlWorkflow('p','queued-id','retry-databases')`);
+  await run(`controlWorkflow('p','queued-id','cancel-queued')`);
+  run(`confirmAction = () => true`);
+  await run(`controlWorkflow('p','queued-id','use-available')`);
+
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls)')), [
+    ['ControlRun','p','queued-id','retry-databases'],
+    ['ControlRun','p','queued-id','cancel-queued'],
+    ['ControlRun','p','queued-id','use-available'],
+  ]);
+  assert.match(run('notices[1]'), /Database updates continue independently/);
+});
+
+test('queued sync requests keep their selected scope and show a queued notification', async () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    state = {projects:[project],settings:{language:'en'}};
+    project.runs = [{id:'queued',status:'queued'}];
+    var calls = [], notice;
+    invoke = async (...args) => calls.push(args);
+    refresh = async () => {};
+    toast = text => notice = text;
+  `);
+
+  await run(`syncProject(project.id, 'component', 'refresh', 'CRITICAL')`);
+  assert.match(run('notice'), /assessment queued/);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(calls[0][2])')), {asset_id:'component', mode:'refresh', severity:'CRITICAL'});
+
+  run(`workflow.status = 'interrupted'; workflow.logs = [{event:'queue_interrupted'}]`);
+  assert.equal(run('interruptionMessage(workflow)'), 'Application closed before queued assessment started');
 });
 
 test('workflow controls offer Pause and Stop while running and Resume while paused or pausing',()=>{
@@ -1657,9 +2813,523 @@ test('partial workflows keep the short badge and show a localized completion mes
 test('polling preserves paused and finished workflow panels until their details are toggled',()=>{
   for (const status of ['paused', 'partial']) {
     const run=app();workflowFixture(run);
-    run(`workflow.status=${JSON.stringify(status)};state={projects:[{...project,runs:[workflow]}]};var panel={dataset:{syncProjectId:'p',syncRun:'run-1'},innerHTML:'existing DOM'};document.querySelectorAll=()=>[panel];updateSyncPanels()`);
+    run(`workflow.status=${JSON.stringify(status)};state={projects:[{...project,runs:[workflow]}]};var panel={dataset:{syncProjectId:'p',syncRun:'run-1'},innerHTML:'existing DOM',querySelector:()=>null};document.querySelectorAll=()=>[panel];updateSyncPanels()`);
     assert.equal(run('panel.innerHTML'),'existing DOM');
     run(`toggleWorkflow('run-1')`);
     assert.match(run('panel.innerHTML'),/Show less/);
   }
+});
+
+test('live workflow updates preserve the log scroll position and keyboard focus', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`
+    state = {projects:[{...project,runs:[workflow]}]};
+    const originalLogs = {scrollTop:148};
+    const updatedLogs = {scrollTop:0,focus(options){this.focusOptions = options;}};
+    let refreshed = false;
+    const panel = {
+      dataset:{syncProjectId:'p',syncRun:'run-1'},
+      set innerHTML(value) {refreshed = true;},
+      querySelector(selector) {
+        if (selector === '.workflow-logs') return refreshed ? updatedLogs : originalLogs;
+        return null;
+      },
+    };
+    document.activeElement = originalLogs;
+    document.querySelectorAll = () => [panel];
+    updateSyncPanels();
+  `);
+  assert.equal(run('updatedLogs.scrollTop'), 148);
+  assert.equal(run('updatedLogs.focusOptions.preventScroll'), true);
+});
+
+test('structured errors translate at display time and preserve parameter values and fallback messages', () => {
+  const run = app();
+  run(`const failure = {cause:{code:'project_name_invalid',fallback:'project name must contain 1–120 characters'}}`);
+  assert.match(run('formatError(failure)'), /1–120/);
+  run(`lang='ja'`);
+  assert.equal(run('formatError(failure)'), 'プロジェクト名は1〜120文字で入力してください。');
+  assert.equal(run(`formatError({cause:{code:'upstream_http',params:{arg0:'429'}}})`), '接続先からHTTP 429が返されました。');
+  assert.equal(run(`messageText({code:'context',params:{arg0:'$&<script>'},causes:[{code:'permission_denied'}]})`), '$&<script>: 権限がありません。ファイルまたはツールの実行権限を確認してください。');
+  run(`localizations['fr'] = {name:'Français',messages:{}}; lang='fr'`);
+  assert.equal(run('formatError(failure)'), 'project name must contain 1–120 characters');
+  assert.equal(run(`formatError({cause:{code:'future_code',fallback:'Safe fallback'}})`), 'Safe fallback');
+  assert.match(run(`formatError({cause:{code:'future_code'}})`), /unexpected error/);
+  assert.equal(run(`formatError(new Error('Already translated client message'))`), 'Already translated client message');
+});
+
+test('saved workflow warnings and scanner logs change language without changing saved data', () => {
+  const run = app();
+  inventory(run);
+  run(`
+    const savedRun = {
+      warnings:['Legacy warning','Snyk skipped: configure a Snyk token.'],
+      warning_messages:[{code:'legacy',fallback:'Legacy warning'},{code:'scan_snyk_token'}],
+      logs:[{step_id:'scanner',event:'scanner_failed',tool:'trivy',message:{code:'scanner_exit',params:{arg0:'2'}},detail:'old English error'}],
+    };
+  `);
+  assert.match(run(`workflowLogs(savedRun, [])`), /[Ee]xit 2; no clean scan was recorded/);
+  run(`lang='ja'`);
+  assert.match(run(`workflowLogs(savedRun, [])`), /Trivy.*終了コード2/);
+  assert.doesNotMatch(run(`workflowLogs(savedRun, [])`), /old English error|exit 2/);
+  assert.equal(run(`runWarnings(savedRun)[0]`), 'Legacy warning');
+  assert.equal(run(`runWarnings(savedRun)[1]`), 'Snykをスキップしました。Snykトークンを設定してください。');
+  assert.equal(run(`savedRun.warnings[1]`), 'Snyk skipped: configure a Snyk token.');
+  assert.equal(run(`workflowLogs({logs:[{step_id:'scanner',event:'scanner_failed',detail:'Previous diagnostic'}]}, [])`).includes('Previous diagnostic'), true);
+});
+
+test('database failures, queued errors, and scanner status details use structured translations', () => {
+  const run = app();
+  inventory(run);
+  run(`lang='ja'; const failure = {phase:'failed',error:'English failure',error_message:{code:'upstream_http',params:{arg0:'403'}}};`);
+  for (const render of ['cveDatabaseStatusHTML', 'nvdDatabaseStatusHTML', 'osvDatabaseStatusHTML']) {
+    assert.match(run(`${render}(failure)`), /接続先からHTTP 403/);
+    assert.doesNotMatch(run(`${render}(failure)`), /English failure/);
+  }
+  assert.match(run(`scannerInfoHTML('trivy',{status:'failed',platform:'darwin',detail:'English failure',message:{code:'permission_denied'}})`), /権限がありません/);
+});
+
+test('clearing API responses requires confirmation and refreshes metrics without saving drafts', async () => {
+  const run = app();
+  run(`
+    state={settings:{cache_hours:12},data_directory:'/workspace',version:'0:1',cache_stats:{entries:4,bytes:1024,hits:3}};
+    const clearButton={disabled:false};
+    const calls=[],prompts=[],notices=[];
+    let allow=false;
+    confirmAction=async message=>{prompts.push(message);return allow;};
+    invoke=async method=>{calls.push(method);return {entries:0,bytes:0,hits:3,misses:1,evictions:2};};
+    toast=message=>notices.push(message);
+    refresh=()=>{throw new Error('Must preserve unsaved form fields');};
+    $('#advanced-settings').open=true;
+    $('#settings-form input[name="cache_hours"]').value='24';
+  `);
+  assert.match(run('cacheSettingsHTML()'), /type="button"[^>]*data-action="clear-api-response-cache"[^>]*>Clear API response cache/);
+  assert.equal(await run('clearAPIResponseCache(clearButton)'), false);
+  assert.equal(run('calls.length'), 0);
+  assert.equal(run('state.cache_stats.entries'), 4);
+  assert.equal(run('clearButton.disabled'), false);
+  assert.match(run('prompts[0]'), /projects, findings, credentials, activity history/);
+  assert.match(run('prompts[0]'), /CVE, NVD\/CPE, and OSV databases will be kept/);
+
+  run('allow=true');
+  const clearing=run('clearAPIResponseCache(clearButton)');
+  assert.equal(run('clearButton.disabled'), true);
+  assert.equal(await run('clearAPIResponseCache(clearButton)'), false);
+  assert.equal(await clearing, true);
+  assert.equal(run('JSON.stringify(calls)'), '["ClearAPIResponseCache"]');
+  assert.equal(run('state.cache_stats.entries'), 0);
+  assert.equal(run('state.cache_stats.hits'), 3);
+  assert.match(run(`$('#cache-usage').innerHTML`), /<strong>0<\/strong>/);
+  assert.equal(run(`$('#settings-form input[name="cache_hours"]').value`), '24');
+  assert.equal(run('state.settings.cache_hours'), 12);
+  assert.equal(run(`$('#advanced-settings').open`), true);
+  assert.equal(run('notices[0]'), 'API response cache cleared.');
+  assert.equal(run('clearButton.disabled'), false);
+});
+
+test('cache clear errors use localized notifications and retain existing metrics', async () => {
+  const run=app();
+  run(`
+    lang='ja';state={settings:{},cache_stats:{entries:7}};
+    const clearButton={dataset:{action:'clear-api-response-cache'},disabled:false,closest:selector=>selector==='[data-action]'?clearButton:null};
+    const notices=[];
+    confirmAction=async()=>true;
+    invoke=async()=>{throw {cause:{code:'api_cache_clear_failed'}};};
+    toast=(message,error)=>notices.push([message,error]);
+  `);
+  await run('document.listeners.click({target:clearButton})');
+  assert.equal(run('state.cache_stats.entries'),7);
+  assert.equal(run('clearButton.disabled'),false);
+  assert.equal(run('notices[0][0]'),'APIレスポンスキャッシュを消去できませんでした。');
+  assert.equal(run('notices[0][1]'),true);
+});
+
+test('a finished cache clear cannot overwrite metrics from another workspace', async () => {
+  const run=app();
+  run(`
+    state={settings:{},data_directory:'/first',version:'0:1',cache_stats:{entries:3}};
+    const clearButton={disabled:false};let notices=0;
+    confirmAction=async()=>true;
+    toast=()=>notices++;
+    invoke=async()=>{
+      state={...state,data_directory:'/second',version:'1:1',cache_stats:{entries:8}};
+      return {entries:0,bytes:0};
+    };
+  `);
+  assert.equal(await run('clearAPIResponseCache(clearButton)'),true);
+  assert.equal(run('state.cache_stats.entries'),8);
+  assert.equal(run('notices'),0);
+});
+
+test('project scanner profiles map saved choices to each URL and local folder', () => {
+  const run = app();
+  run(`
+    state = {settings:{scanners:{npm:true,composer:true,trivy:true}},scan_repositories:{p:[{url:'https://github.com/org/php-web',key:'remote:one'}]}};
+    const project = {id:'p',scanner_profiles:{'remote:one':{mode:'custom',tools:['composer','npm']},local:{mode:'disabled'}}};
+  `);
+  const html = run("projectScannerProfileHTML(repositoryProfileFor(project, 'https://github.com/org/php-web'))");
+  assert.match(html, /value="custom" selected/);
+  assert.doesNotMatch(html, /data-project-scanner-tool="govulncheck"/);
+  assert.match(html, /data-project-scanner-tool="npm"[^>]*checked/);
+  assert.match(html, /data-project-scanner-tool="composer"[^>]*checked/);
+  assert.match(run('projectScannerProfileHTML(localRepositoryProfileFor(project),true)'), /value="disabled" selected/);
+  const fresh = run("projectScannerProfileHTML(repositoryProfileFor(project, 'https://github.com/org/new'))");
+  assert.match(fresh, /value="custom" selected/);
+  assert.doesNotMatch(fresh, /value="auto"|data-profile-auto|data-profile-extras/);
+  assert.doesNotMatch(fresh, /type="checkbox"[^>]*checked/);
+  assert.doesNotMatch(run("renderSettings.toString()"), /repositoryScannerSettingsHTML|initializeScannerProfiles/);
+});
+
+test('scanner profile drafts cannot reinterpret an unsupported mode as HTML', () => {
+  const run = app();
+  run(`
+    state = {settings:{scanners:{npm:true,trivy:true}},scan_repositories:{}};
+    const unsafeMode = '</p><img src="data:,invalid" onerror="globalThis.profileMarkupExecuted=true">';
+    const card = {
+      querySelector:() => ({value:unsafeMode}),
+      querySelectorAll:() => [],
+    };
+    const unsafeProfile = readProjectScannerProfile(card);
+    const draft = {repository_scanners:[{local:true,profile:unsafeProfile}]};
+  `);
+  for (const local of [true, false]) {
+    const html = run(`projectScannerProfileHTML(localRepositoryProfileFor(draft), ${local})`);
+    assert.match(html, /<option value="disabled" selected>/);
+    assert.doesNotMatch(html, unexpectedHTMLTag);
+    assert.doesNotMatch(html, /onerror=|scannerModeHint_/i);
+  }
+});
+
+test('scanner profile hints encode text before it is inserted into markup', () => {
+  const run = app();
+  run(`
+    localizations = {en:{...bundledLocalizations.en,messages:{...bundledLocalizations.en.messages,scannerModeHint_custom:'Literal <profile> & "text"'}}};
+    state = {settings:{scanners:{}}};
+  `);
+  const html = run("projectScannerProfileHTML({mode:'custom',tools:[]},true)");
+  assert.match(html, /Literal &lt;profile&gt; &amp; &quot;text&quot;/);
+  assert.doesNotMatch(html, /Literal <profile>/);
+});
+
+test('project scanner modes toggle in place without replacing form contents', () => {
+  const run = app();
+  run(`
+    const controls = {'[data-profile-custom]':{},'[data-profile-auto]':{},'[data-profile-extras]':{},'[data-profile-mode-hint]':{}};
+    const card = {dataset:{scannerLocation:'local'},querySelector: selector => controls[selector]};
+    const mode = {value:'disabled',closest:() => card};
+    changeProjectScannerMode(mode);
+  `);
+  assert.equal(run("controls['[data-profile-custom]'].hidden"), true);
+  assert.equal(run("controls['[data-profile-auto]'].hidden"), true);
+  assert.equal(run("controls['[data-profile-extras]'].hidden"), true);
+  run("mode.value='custom';changeProjectScannerMode(mode)");
+  assert.equal(run("controls['[data-profile-custom]'].hidden"), false);
+  assert.match(run("controls['[data-profile-mode-hint]'].textContent"), /selected tools/);
+  run("mode.value='auto';changeProjectScannerMode(mode)");
+  assert.equal(run("controls['[data-profile-auto]'].hidden"), false);
+  assert.equal(run("controls['[data-profile-extras]'].hidden"), false);
+});
+
+test('scanner workflow shows tool paths, skip reasons and retained coverage', () => {
+  const run = app();
+  run(`state = {settings:{},projects:[]};`);
+  const html = run(`scannerJobHTML([{target:'local',tool:'npm',path:'web',status:'blocked',reason:'missing_input'},{target:'remote:one',repository:'github.com/org/app',tool:'govulncheck',path:'',status:'skipped',reason:'not_applicable'}])`);
+  assert.match(html, /web/);
+  assert.match(html, /Required manifest or lockfile missing/);
+  assert.match(html, /github.com\/org\/app/);
+  assert.match(html, /No supported project files found/);
+  assert.match(run(`scannerRunSummary({status:'complete',scanner_jobs:[{}],scanners_completed:0,retained_scanner_findings:4})`), /No scanner completed[^]*4 previous scanner findings retained/);
+  assert.equal(run(`codeScanSeverityBreakdown({}, {mode:'code',status:'complete',count:0,scanner_jobs:[{}],scanners_completed:0})`), '');
+  run("lang = 'ja'");
+  assert.match(run(`scannerJobHTML([{tool:'pip-audit',status:'skipped',reason:'not_applicable'}])`), /対応するプロジェクトファイルがありません/);
+});
+
+test('new scanner definitions populate global tools and repository profiles', () => {
+  const run = app();
+  run(`
+    state = {scanner_definitions:[{id:'new-tool',label:'Future language audit',scope:'manifest',detect:['future.lock'],docs_url:'https://example.com/install'}],settings:{scanners:{'new-tool':true}},projects:[{id:'p',name:'Future project',local_path:'/project',scan_code:true}]};
+  `);
+  assert.match(run("scannerSettingsHTML(state.settings.scanners)"), /name="scanner_new-tool"[^>]*data-scanner-check="new-tool"/);
+  assert.match(run("projectScannerProfileHTML({mode:'auto'},true)"), /Future language audit[^]*future.lock/);
+  assert.match(run("scannerInfoHTML('new-tool', {platform:'darwin',status:'missing'})"), /https:\/\/example.com\/install/);
+});
+
+test('saved Automatic profiles keep optional repository scanners turned off', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{trivy:true,snyk:true}},projects:[],scan_repositories:{}};`);
+  assert.equal(run(`defaultScannerProfile({scanner_profiles:{local:{mode:'auto'}}}, 'local').additional_tools.length`), 0);
+  assert.equal(run(`defaultScannerProfile({}, 'local').additional_tools.length`), 2);
+});
+
+test('Save project sends each repository profile with its URL and the local-folder profile in one request', async () => {
+  const run = app();
+  run(`
+    state = {projects:[],settings:{scanners:{npm:true,composer:true,'pip-audit':true}}};
+    const profileCard = (mode,tools,extras=[]) => ({
+      querySelector: () => ({value:mode}),
+      querySelectorAll: () => [
+        ...tools.map(id => ({dataset:{projectScannerTool:id,profileAdditional:'false'}})),
+        ...extras.map(id => ({dataset:{projectScannerTool:id,profileAdditional:'true'}})),
+      ],
+    });
+    const input = (url,profile) => ({value:url,closest:() => ({querySelector:() => profile})});
+    const repositoryInputs = [input(' https://github.com/org/php-web ',profileCard('custom',['composer','npm'])),input('https://github.com/org/worker',profileCard('disabled',[]))];
+    const local = {querySelector:() => profileCard('custom',['pip-audit'])};
+    const submit = {}, error = {}, requests = [];
+    const form = {
+      dataset:{projectId:'p',revision:'7',scannerProfiles:'true'},isConnected:true,
+      elements:{name:{value:'Mixed'},description:{value:''},local_path:{value:'/python'},schedule:{value:'off'},scan_code:{checked:true}},
+      querySelector:selector => ({'button[type="submit"]':submit,'[data-project-error]':error,'[data-local-scanner-profile]':local})[selector],
+      querySelectorAll:selector => selector === '[data-repository-url]' ? repositoryInputs : [],
+    };
+    invoke=async(...args)=>{requests.push(args);return {id:'p'};};refresh=async()=>{};toast=()=>{};
+  `);
+  await run('saveProject({preventDefault(){},target:form})');
+  const calls = JSON.parse(run('JSON.stringify(requests)'));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'UpdateProject');
+  assert.equal(calls[0][1], 'p');
+  assert.equal(calls[0][2].revision, 7);
+  assert.deepEqual(calls[0][2].repository_scanners, [
+    {repository:'https://github.com/org/php-web',profile:{mode:'custom',tools:['composer','npm'],additional_tools:[]}},
+    {repository:'https://github.com/org/worker',profile:{mode:'disabled',tools:[],additional_tools:[]}},
+    {local:true,profile:{mode:'custom',tools:['pip-audit'],additional_tools:[]}},
+  ]);
+  run('repositoryInputs.splice(1,1);form.elements.local_path.value="";');
+  assert.equal(run('projectFormValues(form,true).repository_scanners.length'),1);
+});
+
+test('repository profile drafts survive temporary navigation and no longer live in Configuration', () => {
+  const run = app();
+  run(`
+    state = {settings:{scanners:{trivy:true}},scan_repositories:{}};
+    const draft = {repository_scanners:[{repository:'https://github.com/org/new',profile:{mode:'disabled',tools:[],additional_tools:[]}},{local:true,profile:{mode:'custom',tools:['pip-audit'],additional_tools:[]}}]};
+  `);
+  assert.equal(run("repositoryProfileFor(draft,'https://github.com/org/new').mode"), 'disabled');
+  assert.equal(run('localRepositoryProfileFor(draft).tools[0]'), 'pip-audit');
+  assert.doesNotMatch(run('renderSettings.toString()'), /repository-scanner|repositoryScanner|initializeScannerProfiles/);
+  assert.doesNotMatch(run('saveSettings.toString()'), /repository_scanners/);
+  const html = fs.readFileSync(path.join(__dirname,'../cmd/vulman/ui/index.html'),'utf8');
+  assert.match(html, /project-form-template[^]*data-t="repositoryScannerTitle"[^]*data-local-scanner-profile/);
+});
+
+test('GitHub profiles expose two compact modes and local profiles keep all three', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{npm:true,trivy:true}}};`);
+  const github = run("projectScannerProfileHTML({mode:'custom',tools:['npm']})");
+  assert.equal((github.match(/<option /g) || []).length,2);
+  assert.doesNotMatch(github, /value="auto"|data-profile-auto|data-profile-extras|scanner-auto-tools/);
+  assert.match(github, /data-scanner-location="github"/);
+  assert.doesNotMatch(github, /<small>/);
+  const local = run("projectScannerProfileHTML({mode:'auto',tools:[],additional_tools:['trivy']},true)");
+  assert.equal((local.match(/<option /g) || []).length,3);
+  assert.match(local, /value="auto" selected/);
+  assert.match(local, /data-profile-auto/);
+  assert.match(local, /data-profile-extras/);
+});
+
+test('legacy GitHub Automatic profiles become Disabled with a notice and no tools preselected', () => {
+  const run = app();
+  run(`
+    state = {settings:{scanners:{npm:true,trivy:true}}, scan_repositories:{p:[{key:'remote:one',url:'https://github.com/org/legacy'}]}};
+    const project = {id:'p',scanner_profiles:{'remote:one':{mode:'auto',additional_tools:['trivy']}}};
+  `);
+  const html = run("projectScannerProfileHTML(repositoryProfileFor(project,'https://github.com/org/legacy'))");
+  assert.match(html, /value="disabled" selected/);
+  assert.match(html, /Previously Automatic/);
+  assert.match(html, /Previous findings are kept/);
+  assert.doesNotMatch(html, /type="checkbox"[^>]*checked/);
+  run("lang='ja'");
+  assert.match(run("projectScannerProfileHTML(repositoryProfileFor(project,'https://github.com/org/legacy'))"), /以前は自動モードでした/);
+});
+
+test('Custom selection displays only globally enabled tools for GitHub and local profiles', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{npm:true,composer:true,trivy:false}}};`);
+  for (const local of [false,true]) {
+    const html = run(`projectScannerProfileHTML({mode:'custom',tools:['npm']},${local})`);
+    const custom = html.match(/data-profile-custom[^>]*>([^]*?)<\/div>/)[1];
+    assert.deepEqual([...custom.matchAll(/data-project-scanner-tool="([^"]+)"/g)].map(match => match[1]), ['npm','composer']);
+    assert.doesNotMatch(custom, /govulncheck|pip-audit|Trivy|Snyk/);
+    assert.match(custom, /data-project-scanner-tool="npm"[^>]*checked/);
+  }
+});
+
+test('disabled saved tools are hidden, preserved on save, and restored when enabled again', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{npm:true,govulncheck:false}}};`);
+  let html = run("projectScannerProfileHTML({mode:'custom',tools:['govulncheck','npm']})");
+  assert.doesNotMatch(html, /data-project-scanner-tool="govulncheck"/);
+  assert.match(html, /type="hidden" data-profile-preserved-tool="govulncheck"/);
+  run(`
+    const card = {
+      querySelector:() => ({value:'custom'}),
+      querySelectorAll:selector => selector === '[data-project-scanner-tool]:checked'
+        ? [{dataset:{projectScannerTool:'npm',profileAdditional:'false'}}]
+        : [{dataset:{profilePreservedTool:'govulncheck',profileAdditional:'false'}}],
+    };
+    const savedProfile = readProjectScannerProfile(card);
+  `);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(savedProfile.tools)')), ['npm','govulncheck']);
+  run('state.settings.scanners.govulncheck=true');
+  html = run('projectScannerProfileHTML(savedProfile)');
+  assert.match(html, /data-project-scanner-tool="govulncheck"[^>]*checked/);
+  assert.doesNotMatch(html, /data-profile-preserved-tool="govulncheck"/);
+});
+
+test('Custom selection explains how to enable tools when none are enabled', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{}}};`);
+  let html = run("projectScannerProfileHTML({mode:'custom',tools:[]})");
+  assert.doesNotMatch(html, /data-project-scanner-tool=/);
+  assert.match(html, /No scanner tools are enabled\. Enable tools in Configuration → Code scanners\./);
+  run("lang='ja'");
+  html = run("projectScannerProfileHTML({mode:'custom',tools:[]},true)");
+  assert.match(html, /有効なスキャナがありません/);
+});
+
+test('local Automatic lists only enabled language rules and additional scanners', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{npm:true,trivy:true,govulncheck:false,snyk:false}}};`);
+  const html = run("projectScannerProfileHTML({mode:'auto',tools:[],additional_tools:['trivy']},true)");
+  const automatic = html.match(/class="scanner-auto-tools">([^]*?)<\/details>/)[1];
+  assert.match(automatic,/npm audit/);
+  assert.doesNotMatch(automatic,/govulncheck|pip-audit|composer audit|Snyk/);
+  const extras = html.match(/<div data-profile-extras[^>]*>([^]*?)<\/div><\/div>/)[1];
+  assert.match(extras,/data-project-scanner-tool="trivy"[^>]*checked/);
+  assert.doesNotMatch(extras,/data-project-scanner-tool="snyk"|Snyk/);
+});
+
+test('local Automatic omits empty groups and explains when all scanners are disabled', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{npm:true}}};`);
+  let html = run("projectScannerProfileHTML({mode:'auto'},true)");
+  assert.match(html,/data-profile-auto/);
+  assert.doesNotMatch(html,/data-profile-extras/);
+  run('state.settings.scanners={trivy:true}');
+  html = run("projectScannerProfileHTML({mode:'auto'},true)");
+  assert.doesNotMatch(html,/data-profile-auto|scanner-detection-rules/);
+  assert.match(html,/data-profile-extras/);
+  run('state.settings.scanners={}');
+  html = run("projectScannerProfileHTML({mode:'auto'},true)");
+  assert.doesNotMatch(html,/scanner-detection-rules|data-profile-extras|data-project-scanner-tool=/);
+  assert.match(html,/<p class="form-note" data-profile-auto >No scanner tools are enabled/);
+  run("lang='ja'");
+  assert.match(run("projectScannerProfileHTML({mode:'auto'},true)"),/有効なスキャナがありません/);
+});
+
+test('disabled Automatic additions survive save and are selected again after re-enabling', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{snyk:true,trivy:false}}};`);
+  let html = run("projectScannerProfileHTML({mode:'auto',additional_tools:['trivy','snyk']},true)");
+  assert.doesNotMatch(html,/data-project-scanner-tool="trivy"/);
+  assert.match(html,/type="hidden" data-profile-preserved-tool="trivy" data-profile-additional="true"/);
+  run(`
+    const autoCard = {
+      querySelector:() => ({value:'auto'}),
+      querySelectorAll:selector => selector === '[data-project-scanner-tool]:checked'
+        ? [{dataset:{projectScannerTool:'snyk',profileAdditional:'true'}}]
+        : [{dataset:{profilePreservedTool:'trivy',profileAdditional:'true'}}],
+    };
+    const savedAuto = readProjectScannerProfile(autoCard);
+  `);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(savedAuto.additional_tools)')),['snyk','trivy']);
+  run('state.settings.scanners.trivy=true');
+  html = run('projectScannerProfileHTML(savedAuto,true)');
+  assert.match(html,/data-project-scanner-tool="trivy"[^>]*data-profile-additional="true"[^>]*checked/);
+  assert.doesNotMatch(html,/data-profile-preserved-tool="trivy"/);
+});
+
+test('scanner jobs display the latest status update first without mutating stored plan order', () => {
+  const run = app();
+  run(`
+    state = {settings:{},projects:[]};
+    const jobs = [
+      {target:'local',tool:'npm',status:'complete',update_sequence:4},
+      {target:'local',tool:'composer',status:'complete',update_sequence:2},
+      {target:'local',tool:'pip-audit',status:'planned',update_sequence:1},
+    ];
+  `);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(newestScannerJobs(jobs).map(job=>job.tool))')),['npm','composer','pip-audit']);
+  run("jobs[1]={...jobs[1],status:'running',update_sequence:5}");
+  assert.deepEqual(JSON.parse(run('JSON.stringify(newestScannerJobs(jobs).map(job=>job.tool))')),['composer','npm','pip-audit']);
+  assert.equal(run('jobs[0].tool'),'npm');
+  const html = run('scannerJobHTML(jobs)');
+  assert.ok(html.indexOf('composer audit') < html.indexOf('npm audit'));
+});
+
+test('older scanner jobs use matching workflow events and reverse plan order as a fallback', () => {
+  const run = app();
+  run(`
+    const repository='github.com/org/project';
+    const jobs=[
+      {target:'remote:one',repository,tool:'govulncheck',path:'',status:'complete'},
+      {target:'remote:one',repository,tool:'govulncheck',path:'nested',status:'complete'},
+      {target:'remote:one',repository,tool:'trivy',status:'complete'},
+      {target:'remote:one',repository,tool:'snyk',status:'skipped'},
+    ];
+    const logs=[
+      {step_id:'scanner',event:'scanner_skipped',tool:'snyk',scan_target:'remote',scan_repository:repository},
+      {step_id:'scanner',event:'scanner_completed',tool:'govulncheck',scan_target:'remote',scan_repository:repository},
+      {step_id:'scanner',event:'scanner_completed',tool:'trivy',scan_target:'remote',scan_repository:repository},
+      {step_id:'scanner',event:'scanner_completed',tool:'govulncheck',scan_target:'remote',scan_repository:repository,scan_path:'nested'},
+    ];
+  `);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(newestScannerJobs(jobs,logs).map(job=>[job.tool,job.path||""]))')), [['govulncheck','nested'],['trivy',''],['govulncheck',''],['snyk','']]);
+  assert.equal(run('newestScannerJobs(jobs)[0].tool'),'snyk');
+  run("jobs[0]={...jobs[0],status:'interrupted',update_sequence:1}");
+  assert.equal(run('newestScannerJobs(jobs,logs)[0].path'),'');
+  assert.equal(run('logs[0].event'),'scanner_skipped');
+});
+
+test('scanner jobs show reported counts, including zero, and distinguish unavailable results', () => {
+  const run = app();
+  run(`
+    state={settings:{},projects:[]};
+    const countJobs=[
+      {target:'local',tool:'npm',status:'complete',findings:12345,update_sequence:4},
+      {target:'local',tool:'composer',status:'complete',findings:0,update_sequence:3},
+      {target:'local',tool:'trivy',status:'running',findings:0,update_sequence:2},
+      {target:'local',tool:'snyk',status:'skipped',update_sequence:1},
+    ];
+  `);
+  const html = run('scannerJobHTML(countJobs)');
+  assert.match(html, /<th class="scanner-job-findings"[^>]*>Findings<\/th>/);
+  assert.deepEqual([...html.matchAll(/<td class="scanner-job-findings"[^>]*>([^<]*)<\/td>/g)].map(match=>match[1]),['12,345','0','—','—']);
+  assert.match(html,/before deduplication and severity filtering/);
+  run("lang='ja'");
+  assert.match(run('scannerJobHTML(countJobs)'), /検出件数/);
+});
+
+test('historical job counts use matching completion logs without mixing folders or repositories', () => {
+  const run = app();
+  run(`
+    const countLogs=[
+      {step_id:'scanner',event:'scanner_completed',tool:'govulncheck',scan_target:'local',scan_path:'nested',findings:3},
+      {step_id:'scanner',event:'scanner_completed',tool:'govulncheck',scan_target:'remote',scan_repository:'github.com/org/repo',findings:8},
+      {step_id:'scanner',event:'scanner_completed',tool:'trivy',scan_target:'local',findings:0},
+    ];
+    const recordedCounts=scannerJobCounts(countLogs);
+  `);
+  assert.equal(run("scannerJobFindings({target:'local',tool:'govulncheck',path:'nested',status:'complete'},recordedCounts)"),3);
+  assert.equal(run("scannerJobFindings({target:'local',tool:'govulncheck',path:'',status:'complete'},recordedCounts)"),null);
+  assert.equal(run("scannerJobFindings({target:'remote:one',repository:'github.com/org/repo',tool:'govulncheck',status:'complete'},recordedCounts)"),8);
+  assert.equal(run("scannerJobFindings({target:'local',tool:'trivy',status:'complete'},recordedCounts)"),0);
+  assert.equal(run("scannerJobFindings({target:'local',tool:'trivy',status:'complete',findings:2},recordedCounts)"),2);
+  assert.equal(run("scannerJobFindings({target:'local',tool:'trivy',status:'failed'},recordedCounts)"),null);
+});
+
+test('ambiguous legacy repository labels never borrow another target’s findings count', () => {
+  const run = app();
+  run(`
+    const duplicateJobs=[
+      {target:'remote:one',repository:'github.com/org/repo',tool:'trivy',status:'complete'},
+      {target:'remote:two',repository:'github.com/org/repo',tool:'trivy',status:'complete'},
+    ];
+    const duplicateLogs=[{step_id:'scanner',event:'scanner_completed',scan_target:'remote',scan_repository:'github.com/org/repo',tool:'trivy',findings:7}];
+    const ambiguousCounts=scannerJobCounts(duplicateLogs,duplicateJobs);
+  `);
+  assert.equal(run('scannerJobFindings(duplicateJobs[0],ambiguousCounts)'),null);
+  assert.equal(run('scannerJobFindings({...duplicateJobs[1],findings:0},ambiguousCounts)'),0);
 });

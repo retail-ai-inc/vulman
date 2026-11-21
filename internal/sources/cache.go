@@ -6,16 +6,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"strings"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/store"
 	"vulman/internal/workflow"
 )
 
-var ErrRejected = errors.New("CVE record is rejected")
-var ErrCacheMiss = errors.New("no cached data is available; use normal sync or force refresh")
+var ErrRejected = apperror.New("cve_record_is_rejected", "CVE record is rejected")
+var ErrCacheMiss = apperror.New("no_cached_data_is_available_use_normal_sync_or_force_refresh", "no cached data is available; use a normal assessment or force refresh")
 
 type optionsKey struct{}
 
@@ -77,7 +78,7 @@ func (c *Client) cached(ctx context.Context, key string, s model.Settings, fetch
 			if err == nil {
 				old, hasOld = entry, ok
 			} else {
-				notify(reports, model.SyncProgress{Phase: "cache_error", Item: "Could not read cached data"})
+				notifyIssue(reports, apperror.New("cache_read", "Could not read cached data"))
 			}
 		}
 	}
@@ -96,7 +97,7 @@ func (c *Client) cached(ctx context.Context, key string, s model.Settings, fetch
 			return cacheResult{err: ErrCacheMiss}
 		}
 		if !fresh(old, s) {
-			return cacheResult{entry: old, mode: "stale", err: fmt.Errorf("cached data expired; upstream freshness was not verified")}
+			return cacheResult{entry: old, mode: "stale", err: apperror.New("cached_data_expired_upstream_freshness_was_not_verified", "cached data expired; upstream freshness was not verified")}
 		}
 		return cacheResult{entry: old, mode: "cache"}
 	}
@@ -167,7 +168,7 @@ func (c *Client) cached(ctx context.Context, key string, s model.Settings, fetch
 		result.entry = store.CachedResponse{Data: data, Empty: empty, CheckedAt: time.Now().UTC()}
 		if c.Cache != nil {
 			if e := c.Cache.CachePut(key, result.entry); e != nil {
-				notify(reports, model.SyncProgress{Phase: "cache_error", Item: e.Error()})
+				notifyIssue(reports, e)
 			}
 		}
 	} else if errors.Is(err, ErrRejected) {
@@ -178,7 +179,7 @@ func (c *Client) cached(ctx context.Context, key string, s model.Settings, fetch
 		result.entry = old
 		result.partial = data
 		result.mode = "stale"
-		result.err = fmt.Errorf("using cached data; upstream refresh failed: %w", err)
+		result.err = apperror.Newf("cache_refresh_failed", "using cached data; upstream refresh failed: %w", err)
 	} else {
 		result.entry.Data = data
 	}
@@ -259,7 +260,7 @@ func (c *Client) query(ctx context.Context, kind string, a model.Asset, s model.
 
 	if len(result.entry.Data) > 0 {
 		if err := json.Unmarshal(result.entry.Data, &items); err != nil {
-			return nil, fmt.Errorf("invalid cached advisory data: %w", err)
+			return nil, apperror.Newf("invalid_cached_advisories", "invalid cached advisory data: %w", err)
 		}
 	}
 
@@ -279,16 +280,26 @@ func (c *Client) query(ctx context.Context, kind string, a model.Asset, s model.
 }
 
 func (c *Client) NVD(ctx context.Context, a model.Asset, s model.Settings, reports ...func(model.SyncProgress)) ([]model.Finding, error) {
+	if c.usesLocalNVD(s) && modeFor(ctx) != "refresh" {
+		return c.localNVD(ctx, a, s, reports)
+	}
 	return c.query(ctx, "nvd", a, s, reports)
 }
 
 func (c *Client) OSV(ctx context.Context, a model.Asset, s model.Settings, reports ...func(model.SyncProgress)) ([]model.Finding, error) {
+	if c.LocalOSV != nil && modeFor(ctx) != "refresh" && strings.TrimRight(s.OSVURL, "/") == model.DefaultOSVURL {
+		return c.localOSV(ctx, a, s, reports)
+	}
+
 	return c.query(ctx, "osv", a, s, reports)
 }
 
 func (c *Client) CVE(ctx context.Context, id string, s model.Settings, reports ...func(model.SyncProgress)) (string, []string, error) {
 	if len(id) < 4 || id[:4] != "CVE-" {
 		return "", nil, nil
+	}
+	if c.usesLocalCVE(s) {
+		return c.localCVE(ctx, id, s, reports)
 	}
 
 	ctx = withRequest(ctx, "cve", "", reports)

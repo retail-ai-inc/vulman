@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/scanner"
 	"vulman/internal/store"
@@ -42,10 +43,12 @@ func addLog(r *model.Run, stepID, event, detail string) *model.SyncLog {
 	if len(r.Logs) > model.MaxSyncLogs {
 		r.Logs = r.Logs[len(r.Logs)-model.MaxSyncLogs:]
 	}
+
 	return &r.Logs[len(r.Logs)-1]
 }
 
 func interruptSteps(r *model.Run) {
+	interruptScannerJobs(r)
 	for i := range r.Steps {
 		step := &r.Steps[i]
 		switch step.Status {
@@ -78,6 +81,7 @@ func (t *runTracker) update(fn func(*model.Run)) {
 			if p.ID != t.projectID {
 				continue
 			}
+
 			for j := range p.Runs {
 				r := &p.Runs[j]
 				if r.ID == t.runID {
@@ -112,6 +116,7 @@ func (t *runTracker) start(id string) {
 				case "scanner":
 					step.Progress.Phase = "queued"
 				}
+
 				addLog(r, id, "started", step.Component)
 				return
 			}
@@ -199,7 +204,7 @@ func (t *runTracker) progress(id string, p model.SyncProgress) {
 					addLog(r, id, "cache_summary", p.CacheStatus)
 				}
 			case "retry", "shared", "cache_error":
-				addLog(r, id, p.Phase, p.Item)
+				addLog(r, id, p.Phase, p.Item).Message = p.Message
 			case "cached", "refreshed", "shared_result", "stale_cache":
 				addLog(r, id, p.Phase, p.CheckedAt.Format(time.RFC3339))
 			}
@@ -221,6 +226,7 @@ func (t *runTracker) scannerSetup(p model.Project, tools []string, skipReason st
 			}
 			return
 		}
+
 		addLog(r, "scanner", skipReason, "")
 		for i := range r.Steps {
 			if r.Steps[i].Kind == "scanner" {
@@ -234,20 +240,68 @@ func (t *runTracker) scannerSetup(p model.Project, tools []string, skipReason st
 }
 
 func (t *runTracker) scannerEvent(event scanner.ScanEvent) {
+	// The complete plan and skipped-job reasons are saved in one transaction.
+	// Tool execution still records live starts, results, failures, and cleanup.
+	if event.Phase == "scanner_skipped" && event.Job != nil {
+		return
+	}
+
 	t.update(func(r *model.Run) {
+		if len(event.Plan) > 0 {
+			r.ScannerJobSequence++
+			for _, job := range event.Plan {
+				job.UpdateSequence = r.ScannerJobSequence
+				if len(r.ScannerJobs) < model.MaxScannerJobs {
+					r.ScannerJobs = append(r.ScannerJobs, job)
+				}
+				if job.Status == "skipped" {
+					entry := addLog(r, "scanner", "scanner_skipped", job.Tool)
+					entry.Tool, entry.ScanPath, entry.ScanReason = job.Tool, job.Path, job.Reason
+					entry.ScanTarget, entry.ScanRepository = event.Target, event.Repository
+				}
+			}
+		}
 		detail := event.Tool
 		if event.Err != nil {
 			if detail != "" {
 				detail += " · "
 			}
-			detail += event.Err.Error()
+			detail += apperror.Public(event.Err).English()
 		}
+
 		entry := addLog(r, "scanner", event.Phase, detail)
+		entry.Message = apperror.Public(event.Err)
+		entry.Tool = event.Tool
 		entry.ScanTarget = event.Target
 		entry.ScanRepository = event.Repository
+		entry.ScanPath = event.Path
+		if event.Job != nil {
+			r.ScannerJobSequence++
+			updated := *event.Job
+			updated.UpdateSequence = r.ScannerJobSequence
+			if event.Phase == "scanner_completed" {
+				count := event.Found
+				updated.Findings = &count
+			}
+			entry.ScanReason = event.Job.Reason
+			found := false
+			for i, job := range r.ScannerJobs {
+				if job.Target == event.Job.Target && job.Tool == event.Job.Tool && job.Path == event.Job.Path {
+					r.ScannerJobs[i] = updated
+					found = true
+					break
+				}
+			}
+			if !found && len(r.ScannerJobs) < model.MaxScannerJobs {
+				r.ScannerJobs = append(r.ScannerJobs, updated)
+			}
+		}
+
 		if event.Phase == "scanner_completed" {
 			entry.Findings = &event.Found
+			r.ScannersCompleted++
 		}
+
 		for i := range r.Steps {
 			step := &r.Steps[i]
 			if step.Kind != "scanner" {
@@ -267,8 +321,11 @@ func (t *runTracker) scannerEvent(event scanner.ScanEvent) {
 	})
 }
 
-func (t *runTracker) event(id, event, detail string) {
-	t.update(func(r *model.Run) { addLog(r, id, event, detail) })
+func (t *runTracker) errorEvent(id, event string, err error) {
+	t.update(func(r *model.Run) {
+		message := apperror.Public(err)
+		addLog(r, id, event, message.English()).Message = message
+	})
 }
 
 func (t *runTracker) finish(id string, found int, err error) {
@@ -278,6 +335,7 @@ func (t *runTracker) finish(id string, found int, err error) {
 			if step.ID != id {
 				continue
 			}
+
 			step.FinishedAt = time.Now()
 			step.Progress.Found = found
 			step.Progress.WaitSeconds = 0
@@ -285,11 +343,13 @@ func (t *runTracker) finish(id string, found int, err error) {
 			if err != nil {
 				step.Status = "failed"
 				event := "failed"
+
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					step.Status = "interrupted"
 					event = "interrupted"
 				}
-				addLog(r, id, event, err.Error())
+				message := apperror.Public(err)
+				addLog(r, id, event, message.English()).Message = message
 			} else {
 				step.Status = "complete"
 				addLog(r, id, "completed", step.Component)
@@ -298,4 +358,17 @@ func (t *runTracker) finish(id string, found int, err error) {
 			return
 		}
 	})
+}
+
+func interruptScannerJobs(r *model.Run) {
+	sequence := r.ScannerJobSequence + 1
+	for i := range r.ScannerJobs {
+		job := &r.ScannerJobs[i]
+		if job.Status == "running" || job.Status == "planned" {
+			job.Status = "interrupted"
+			job.Reason = "interrupted"
+			job.UpdateSequence = sequence
+			r.ScannerJobSequence = sequence
+		}
+	}
 }

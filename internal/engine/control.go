@@ -1,18 +1,17 @@
 package engine
 
 import (
-	"errors"
-	"fmt"
 	"time"
 
+	"vulman/internal/apperror"
 	"vulman/internal/model"
 )
 
-var ErrRunNotActive = errors.New("assessment is no longer active; reload its workflow")
-var ErrInvalidControl = errors.New("invalid workflow action")
+var ErrRunNotActive = apperror.New("assessment_is_no_longer_active_reload_its_workflow", "assessment is no longer active; reload its workflow")
+var ErrInvalidControl = apperror.New("invalid_workflow_action", "invalid workflow action")
 
 func activeStatus(status string) bool {
-	return status == "running" || status == "pausing" || status == "paused" || status == "stopping"
+	return status == "running" || status == "pausing" || status == "paused" || status == "stopping" || status == "queued" || status == "waiting_databases"
 }
 
 func finishPause(run *model.Run) {
@@ -34,7 +33,7 @@ func (e *Engine) acknowledgePause(projectID, runID string) {
 
 // Control addresses an exact run so a stale tab cannot stop a newer assessment.
 func (e *Engine) Control(projectID, runID, action string) error {
-	if action != "pause" && action != "resume" && action != "stop" {
+	if action != "pause" && action != "resume" && action != "stop" && action != "cancel-queued" && action != "retry-databases" && action != "use-available" {
 		return ErrInvalidControl
 	}
 
@@ -42,6 +41,14 @@ func (e *Engine) Control(projectID, runID, action string) error {
 	defer e.mu.Unlock()
 	a, ok := e.active[projectID]
 	if !ok || a.id != runID || e.closed || a.control.Context().Err() != nil {
+		return ErrRunNotActive
+	}
+
+	if a.queued != nil {
+		return e.controlQueued(projectID, a, action)
+	}
+
+	if action == "cancel-queued" || action == "retry-databases" || action == "use-available" {
 		return ErrRunNotActive
 	}
 
@@ -60,7 +67,7 @@ func (e *Engine) Control(projectID, runID, action string) error {
 				switch action {
 				case "pause":
 					if r.Status != "running" {
-						return fmt.Errorf("only a running workflow can be paused")
+						return apperror.New("only_a_running_workflow_can_be_paused", "only a running workflow can be paused")
 					}
 
 					r.Status = "pausing"
@@ -68,7 +75,7 @@ func (e *Engine) Control(projectID, runID, action string) error {
 					addLog(r, "", "pause_requested", "")
 				case "resume":
 					if r.Status != "paused" && r.Status != "pausing" {
-						return fmt.Errorf("only a paused workflow can be resumed")
+						return apperror.New("only_a_paused_workflow_can_be_resumed", "only a paused workflow can be resumed")
 					}
 
 					finishPause(r)
@@ -104,6 +111,7 @@ func (e *Engine) Control(projectID, runID, action string) error {
 }
 
 func stopSteps(r *model.Run) {
+	interruptScannerJobs(r)
 	for i := range r.Steps {
 		s := &r.Steps[i]
 		switch s.Status {

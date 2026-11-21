@@ -104,8 +104,8 @@ func TestSeveritySyncPreservesOutsideFindingsAndReconcilesRatingChanges(t *testi
 				t.Fatal(err)
 			}
 			full := awaitRun(t, s)
-			if len(full.Findings) != 6 || full.AssessedRevision != 2 || full.Runs[0].Severity != "" {
-				t.Fatal("default sync did not restore all-severity coverage")
+			if len(full.Findings) != 7 || full.AssessedRevision != 2 || full.Runs[0].Severity != "" {
+				t.Fatal("default sync did not restore all-severity coverage while retaining unassessed scanner findings")
 			}
 		})
 	}

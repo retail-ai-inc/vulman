@@ -3,13 +3,14 @@ package scanner
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/windows"
+
+	"vulman/internal/apperror"
 )
 
 func newNPMCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
@@ -34,7 +35,7 @@ func newWindowsPackageCommand(ctx context.Context, name, runtimeName, entry stri
 		dir := filepath.Dir(program)
 		script := filepath.Join(dir, entry)
 		if !regularFile(script) {
-			return nil, fmt.Errorf("%s requires %s next to its launcher", name, entry)
+			return nil, apperror.Newf("scanner_runtime_missing", "%s requires %s next to its launcher", name, entry)
 		}
 		// The npm launcher prefers its own Node interpreter when available.
 		if name == "npm" && regularFile(filepath.Join(dir, runtimeName)) {
@@ -47,7 +48,7 @@ func newWindowsPackageCommand(ctx context.Context, name, runtimeName, entry stri
 		}
 		args = append([]string{script}, args...)
 	default:
-		return nil, fmt.Errorf("unsupported %s launcher type: %s", name, filepath.Ext(program))
+		return nil, apperror.Newf("scanner_launcher_unsupported", "unsupported %s launcher type: %s", name, filepath.Ext(program))
 	}
 	// #nosec G204 -- Absolute installed executable and, for a standard shim, its installed script with fixed arguments.
 	return exec.CommandContext(ctx, program, args...), nil
@@ -59,7 +60,7 @@ func absoluteLookPath(name string) (string, error) {
 		return "", err
 	}
 	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("%s must resolve to an absolute path", name)
+		return "", apperror.Newf("absolute_path_required", "%s must resolve to an absolute path", name)
 	}
 	return path, nil
 }

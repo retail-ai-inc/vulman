@@ -151,6 +151,11 @@ func TestScannerWorkflowLogsIndividualResults(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("demo==1.0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{"go.mod", "composer.json", "composer.lock"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv("PATH", dir)
 	t.Setenv("SNYK_TOKEN", "")
 	for name, script := range map[string]string{
@@ -234,7 +239,7 @@ fi`)
 			Assets: []model.Asset{{ID: "a", Name: "demo", Version: "1", Ecosystem: "npm"}},
 			Findings: []model.Finding{
 				{ID: "CVE-inventory", AssetID: "a", Match: "cpe", Severity: "CRITICAL"},
-				{ID: "CVE-scanner-old", AssetID: "code:demo", Match: "scanner", Severity: "HIGH"},
+				{ID: "CVE-scanner-old", AssetID: "code:demo", Match: "scanner", Sources: []string{"Trivy"}, Severity: "HIGH"},
 			},
 		}}
 		return nil
@@ -345,7 +350,9 @@ printf '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CV
 	t.Setenv("TMPDIR", cloneRoot)
 	if err := s.Update(func(st *model.State) error {
 		st.Settings.Scanners = map[string]bool{"trivy": true}
-		st.Projects = []model.Project{{ID: "p", ScanCode: true, LocalPath: dir, Repository: "https://github.com/owner/project.git"}}
+		st.Projects = []model.Project{{ID: "p", ScanCode: true, LocalPath: dir, Repository: "https://github.com/owner/project.git",
+			ScannerProfiles: map[string]model.ScannerProfile{scanner.RemoteTargetKey("https://github.com/owner/project.git"): {Mode: "custom", Tools: []string{"trivy"}}},
+		}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -374,13 +381,20 @@ printf '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CV
 		t.Fatalf("unexpected target versions: %+v", versions)
 	}
 	completed := map[string]bool{}
+	cleaned := map[string]bool{}
 	for _, entry := range p.Runs[0].Logs {
-		if entry.Event == "scanner_completed" {
+		switch entry.Event {
+		case "scanner_completed":
 			completed[entry.ScanTarget] = true
+		case "scanner_cleanup_completed":
+			if !completed[entry.ScanTarget] {
+				t.Fatalf("cleanup preceded scanner completion for %s", entry.ScanTarget)
+			}
+			cleaned[entry.ScanTarget] = true
 		}
 	}
-	if !completed["local"] || !completed["remote"] {
-		t.Fatalf("missing target-specific scanner logs: %+v", p.Runs[0].Logs)
+	if !cleaned["local"] || !cleaned["remote"] {
+		t.Fatalf("missing target-specific cleanup logs: %+v", p.Runs[0].Logs)
 	}
 	assertScanScratchEmpty(t, cloneRoot)
 
@@ -392,6 +406,9 @@ printf '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CV
 			"https://github.com/owner/second.git?value=hidden",
 			"https://github.com/owner/project.git",
 		}
+		for _, repository := range st.Projects[0].Repositories() {
+			st.Projects[0].ScannerProfiles[scanner.RemoteTargetKey(repository)] = model.ScannerProfile{Mode: "custom", Tools: []string{"trivy"}}
+		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -401,16 +418,19 @@ printf '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CV
 	}
 	p = awaitRun(t, s)
 	assertScanScratchEmpty(t, cloneRoot)
-	var localFailed, remoteFailed, legacyRejected bool
+	var localFailed, remoteFailed, legacyRejected, cleanedAfterFailure bool
 	remoteCompleted := map[string]bool{}
 	for _, entry := range p.Runs[0].Logs {
 		localFailed = localFailed || (entry.Event == "scanner_target_failed" && entry.ScanTarget == "local")
 		remoteFailed = remoteFailed || (entry.Event == "scanner_target_failed" && entry.ScanRepository == "github.com/owner/missing.git")
+		if entry.Event == "scanner_cleanup_completed" && entry.ScanRepository == "github.com/owner/missing.git" {
+			cleanedAfterFailure = remoteFailed
+		}
 		if entry.ScanRepository == "gitlab.com/owner/legacy.git" {
 			if entry.Event == "clone" {
 				t.Fatal("legacy non-GitHub repository reached the clone step")
 			}
-			legacyRejected = entry.Event == "scanner_target_failed"
+			legacyRejected = legacyRejected || entry.Event == "scanner_target_failed"
 		}
 		if entry.Event == "scanner_completed" && entry.ScanTarget == "remote" {
 			remoteCompleted[entry.ScanRepository] = true
@@ -418,6 +438,9 @@ printf '{"SchemaVersion":2,"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CV
 	}
 	if p.Runs[0].Status != "partial" || !localFailed || !remoteFailed || !legacyRejected || !remoteCompleted["github.com/owner/project.git"] || !remoteCompleted["github.com/owner/second.git"] || len(p.Findings) != 3 {
 		t.Fatalf("target failures blocked the other scans or removed prior findings: %+v", p)
+	}
+	if !cleanedAfterFailure {
+		t.Fatal("temporary file cleanup was not logged after the failed clone")
 	}
 	remoteVersions := map[string]string{}
 	for _, finding := range p.Findings {
@@ -485,5 +508,97 @@ func TestWorkflowLogLimitKeepsRecentEvents(t *testing.T) {
 	}
 	if len(r.Logs) != model.MaxSyncLogs || r.Logs[0].Detail != "10" || r.Logs[len(r.Logs)-1].Detail != fmt.Sprint(model.MaxSyncLogs+9) {
 		t.Fatal("workflow logs were not bounded correctly")
+	}
+}
+
+func TestScannerJobUpdateSequenceFollowsStatusChanges(t *testing.T) {
+	s := testStore(t)
+	if err := s.Update(func(st *model.State) error {
+		st.Projects = []model.Project{{ID: "p", Runs: []model.Run{{ID: "run", Steps: []model.SyncStep{{ID: "scanner", Kind: "scanner"}}}}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := newTracker(s, "p", "run")
+	jobs := []model.ScannerJob{
+		{Target: "local", Tool: "npm", Status: "planned"},
+		{Target: "local", Tool: "composer", Status: "planned"},
+	}
+	tracker.scannerEvent(scanner.ScanEvent{Phase: "scanner_planned", Target: "local", Plan: jobs})
+	npm := jobs[0]
+	npm.Status = "running"
+	tracker.scannerEvent(scanner.ScanEvent{Phase: "scanning", Tool: npm.Tool, Target: "local", Job: &npm})
+	npm.Status = "complete"
+	tracker.scannerEvent(scanner.ScanEvent{Phase: "scanner_completed", Tool: npm.Tool, Target: "local", Job: &npm})
+
+	state, err := s.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := state.Projects[0].Runs[0]
+	if run.ScannerJobSequence != 3 || run.ScannerJobs[0].UpdateSequence != 3 || run.ScannerJobs[1].UpdateSequence != 1 {
+		t.Fatalf("status changes did not persist their update order: %+v", run)
+	}
+	if jobs[0].UpdateSequence != 0 || npm.UpdateSequence != 0 {
+		t.Fatal("progress persistence mutated scanner input")
+	}
+
+	interruptScannerJobs(&run)
+	if run.ScannerJobSequence != 4 || run.ScannerJobs[1].UpdateSequence != 4 || run.ScannerJobs[1].Status != "interrupted" || run.ScannerJobs[0].UpdateSequence != 3 {
+		t.Fatalf("interruption did not update only unfinished jobs: %+v", run.ScannerJobs)
+	}
+	interruptScannerJobs(&run)
+	if run.ScannerJobSequence != 4 {
+		t.Fatal("unchanged jobs received a new update sequence")
+	}
+}
+
+func TestScannerJobFindingCountsPersistIncludingZeroAfterLogsExpire(t *testing.T) {
+	s := testStore(t)
+	if err := s.Update(func(st *model.State) error {
+		st.Projects = []model.Project{{ID: "p", Runs: []model.Run{{ID: "run"}}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := newTracker(s, "p", "run")
+	jobs := []model.ScannerJob{
+		{Target: "local", Tool: "govulncheck", Status: "planned"},
+		{Target: "local", Tool: "govulncheck", Path: "nested", Status: "planned"},
+		{Target: "local", Tool: "trivy", Status: "skipped"},
+	}
+	tracker.scannerEvent(scanner.ScanEvent{Phase: "scanner_planned", Target: "local", Plan: jobs})
+	for i, count := range []int{0, 4} {
+		job := jobs[i]
+		job.Status = "complete"
+		tracker.scannerEvent(scanner.ScanEvent{Phase: "scanner_completed", Target: "local", Tool: job.Tool, Path: job.Path, Found: count, Job: &job})
+	}
+	if err := s.Update(func(st *model.State) error {
+		run := &st.Projects[0].Runs[0]
+		for range model.MaxSyncLogs {
+			addLog(run, "save", "completed", "")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := s.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := state.Projects[0].Runs[0]
+	if run.ScannerJobs[0].Findings == nil || *run.ScannerJobs[0].Findings != 0 || run.ScannerJobs[1].Findings == nil || *run.ScannerJobs[1].Findings != 4 {
+		t.Fatalf("per-folder counts did not survive persistence and log eviction: %+v", run.ScannerJobs)
+	}
+	if run.ScannerJobs[2].Findings != nil {
+		t.Fatal("skipped scanner was recorded as a clean scan")
+	}
+	for _, job := range jobs {
+		if job.Findings != nil {
+			t.Fatal("persistence mutated scanner inputs")
+		}
 	}
 }
