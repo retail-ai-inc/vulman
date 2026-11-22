@@ -275,53 +275,34 @@ Use `make test-ui` for the UI behavior tests; no npm dependencies are needed. Ru
 
 ### UI translations
 
-Each language has a JSON file under `cmd/vulman/locales`. To add a language, copy `en.json` to a file named for its language tag, such as `pt-BR.json`. Set `name` to the label shown in the dropdown, then translate the values under `messages`. Keep message keys and placeholders such as `{count}` intact. The optional `locale` field controls number and date formatting. Remove it to use the filename’s language tag for formatting.
+Each language has a JSON file in `cmd/vulman/locales`. To add one, copy `en.json` to a language-tag filename such as `pt-BR.json`, set `name` and optional `locale`, and translate `messages`. Preserve keys and placeholders such as `{count}` and `{arg0}`.
 
-Rebuild Vulman to bundle the file. Both language dropdowns pick it up automatically, and missing messages use the English version.
-
-Validation errors, error notifications, database update failures, scanner warnings, and new workflow history use structured error codes. Their translations are the `error_*` entries in the same separate English and Japanese JSON files. Messages are translated when displayed, so switching languages also translates newly recorded workflow warnings and logs. Existing history with text-only messages remains readable in its original language. Unknown codes fall back to English or a safe generic error.
-
-For Go code, use `apperror.New("project_not_found", "project not found")` for a fixed message, or `apperror.Newf("upstream_http", "upstream returned HTTP %d", status)` for parameters. Add the corresponding `error_project_not_found` or `error_upstream_http` entry to both locale files. Formatted values use `{arg0}`, `{arg1}`, and so on. Wrapped error arguments become structured causes and retain `errors.Is` / `errors.As` behavior. Translation tests check code coverage and parameter consistency. Internal causes and external command output are excluded from public error payloads; unrecognized system failures receive translated troubleshooting guidance.
-
-`make release` builds the desktop app and standalone scanner for Linux and Windows on amd64 and arm64. When run on a Mac, it also builds `dist/Vulman.app` and `dist/vulman-scan-macos`. Check the platform dependencies on the machine that will run the build.
-
-`make release-windows` builds the Windows executables with the Vulman icon embedded. `make release-linux` builds the Linux executables and copies the desktop entry and SVG icon into `dist/`.
+Rebuild to include the language; missing translations fall back to English. Add translations for structured Go errors as `error_<code>` entries in each locale file.
 
 ### Automatic GitHub releases
 
-Commit `.github/workflows/release.yml` and its helper scripts before pushing a new version tag. Update the UI version in `cmd/vulman/ui/index.html` and `CFBundleShortVersionString` in `packaging/macos/Info.plist` to match the next version, and increment `CFBundleVersion`. Commit and push those changes, then tag that commit:
+Update the UI version in `cmd/vulman/ui/index.html` and `CFBundleShortVersionString` in `packaging/macos/Info.plist`, then increment `CFBundleVersion`. Commit and push the changes, including the release workflow and helper scripts, then push a matching tag:
 
 ```sh
 git tag -a v1.3.0 -m "Vulman v1.3.0"
 git push origin v1.3.0
 ```
 
-The workflow checks versions, runs UI/packaging tests and the Go race suite, and builds a universal macOS ZIP plus Windows and Linux archives for x64 and ARM64. Each includes the desktop app, standalone scanner, installation instructions, and source commit. It publishes the release only after all five archives and `SHA256SUMS` are uploaded and verified. The built-in `GITHUB_TOKEN` supplies publication access; no personal token is needed.
+GitHub Actions runs the checks and publishes macOS, Windows, and Linux downloads with `SHA256SUMS`. It uses the built-in `GITHUB_TOKEN`; no personal token is needed.
 
-Tags such as `v1.3.0-rc.1` create prereleases; use that full version in the UI and `1.3.0` in the macOS short version. Failed uploads leave a resumable draft. Rerun failed jobs from Actions; conflicting published assets are never overwritten. macOS remains ad-hoc signed, Windows remains unsigned, and the runtime requirements in **Download** still apply.
+### Platform packaging
 
-For local packaging checks, use Python 3.11+ and run `python3 -m unittest discover -s scripts -p 'test_release.py' -v`. `python3 scripts/release.py validate --tag v1.2.0` checks the current source version without publishing anything.
+Outputs go to `dist/`. `make release` builds Linux and Windows, plus macOS when run on a Mac.
 
-To add Vulman to a Linux application menu, install the executable, desktop entry, and icon for your account. Use `vulman-linux-arm64` in the first `install` command on ARM64.
+| Platform | Command | Output |
+| --- | --- | --- |
+| macOS | `make release-macos` | Universal app and scanner; requires a Mac with Xcode Command Line Tools. Ad-hoc signed; see the [signing guide](https://v3.wails.io/guides/build/macos/). |
+| Windows | `make release-windows` | x64/ARM64 app and scanner with embedded icons. |
+| Linux | `make release-linux` | x64/ARM64 app and scanner, desktop entry, and SVG icon. |
 
-```sh
-data_dir="${XDG_DATA_HOME:-$HOME/.local/share}"
-install -Dm755 dist/vulman-linux-amd64 "$HOME/.local/bin/vulman"
-install -Dm644 dist/com.vulman.app.desktop "$data_dir/applications/com.vulman.app.desktop"
-install -Dm644 dist/com.vulman.app.svg "$data_dir/icons/hicolor/scalable/apps/com.vulman.app.svg"
-```
+Linux menu integration needs `vulman` on `PATH` and the desktop entry/icon installed for your user. See the [Desktop Entry Specification](https://specifications.freedesktop.org/desktop-entry/latest/).
 
-The launcher looks for `vulman` on the desktop session's `PATH`. If needed, set `Exec` in the installed desktop entry to the absolute executable path. [Desktop Entry Specification](https://specifications.freedesktop.org/desktop-entry/latest/)
-
-`make release-macos` builds the macOS bundle and standalone scanner. Run it on a Mac with the Xcode Command Line Tools installed. Both builds are universal for Apple Silicon and Intel. The desktop bundle targets macOS 13 or later. The target applies ad-hoc signatures for local use. Distribution to other users can use Developer ID signing and notarization. [Wails macOS packaging guide](https://v3.wails.io/guides/build/macos/)
-
-The macOS and Linux release targets use `cmd/vulman/ui/icon.svg` directly. If the artwork changes, regenerate the embedded Windows resources on macOS with the same SVG renderer.
-
-```sh
-mkdir -p dist/windows-icon
-swift packaging/macos/render-icon.swift cmd/vulman/ui/icon.svg dist/windows-icon
-(cd packaging/windows && go run . ../../dist/windows-icon/icon_256x256.png ../../cmd/vulman)
-```
+After changing `cmd/vulman/ui/icon.svg`, regenerate Windows icon resources using the [SVG renderer](packaging/macos/render-icon.swift) and [resource generator](packaging/windows/main.go).
 
 ## Project layout
 
