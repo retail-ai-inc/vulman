@@ -4,7 +4,19 @@
 
 **Vulnerability Management for your projects.** Vulman is a native desktop application written in Go. It includes an encrypted local database and supports English and Japanese. The interface is embedded in the executable and runs in the operating system's WebView.
 
-## Run
+## Download
+
+Download **v1.2.0**, extract the archive, and launch Vulman. No Go installation or compilation is required.
+
+| Platform | Download | Start |
+| --- | --- | --- |
+| macOS | [Universal ZIP — Apple Silicon + Intel](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/Vulman-v1.2.0-macos-universal.zip) | Drag `Vulman.app` into Applications and open it. |
+| Windows | [x64](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/Vulman-v1.2.0-windows-amd64.zip) · [ARM64](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/Vulman-v1.2.0-windows-arm64.zip) | Open `Vulman.exe`. |
+| Linux | [x64](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/Vulman-v1.2.0-linux-amd64.tar.gz) · [ARM64](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/Vulman-v1.2.0-linux-arm64.tar.gz) | Run `./vulman` from the extracted folder. |
+
+Requires macOS 13+, WebView2 Runtime on Windows, or GTK4 and WebKitGTK 6.0 on Linux. See the [release notes](https://github.com/retail-ai-inc/vulman/releases/tag/v1.2.0) for first-launch guidance and [SHA-256 checksums](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/SHA256SUMS) to verify your download.
+
+## Build from source
 
 To build from source, install **Go 1.27.3 or later** and the [Wails platform dependencies](https://v3.wails.io/getting-started/installation/). Use the latest stable Go patch release when possible. Windows uses WebView2. Linux uses GTK4 and WebKitGTK 6.0. The bundled interface needs no npm build or Node.js runtime.
 
@@ -274,6 +286,21 @@ For Go code, use `apperror.New("project_not_found", "project not found")` for a 
 `make release` builds the desktop app and standalone scanner for Linux and Windows on amd64 and arm64. When run on a Mac, it also builds `dist/Vulman.app` and `dist/vulman-scan-macos`. Check the platform dependencies on the machine that will run the build.
 
 `make release-windows` builds the Windows executables with the Vulman icon embedded. `make release-linux` builds the Linux executables and copies the desktop entry and SVG icon into `dist/`.
+
+### Automatic GitHub releases
+
+Commit `.github/workflows/release.yml` and its helper scripts before pushing a new version tag. Update the UI version in `cmd/vulman/ui/index.html` and `CFBundleShortVersionString` in `packaging/macos/Info.plist` to match the next version, and increment `CFBundleVersion`. Commit and push those changes, then tag that commit:
+
+```sh
+git tag -a v1.3.0 -m "Vulman v1.3.0"
+git push origin v1.3.0
+```
+
+The workflow checks versions, runs UI/packaging tests and the Go race suite, and builds a universal macOS ZIP plus Windows and Linux archives for x64 and ARM64. Each includes the desktop app, standalone scanner, installation instructions, and source commit. It publishes the release only after all five archives and `SHA256SUMS` are uploaded and verified. The built-in `GITHUB_TOKEN` supplies publication access; no personal token is needed.
+
+Tags such as `v1.3.0-rc.1` create prereleases; use that full version in the UI and `1.3.0` in the macOS short version. Failed uploads leave a resumable draft. Rerun failed jobs from Actions; conflicting published assets are never overwritten. macOS remains ad-hoc signed, Windows remains unsigned, and the runtime requirements in **Download** still apply.
+
+For local packaging checks, use Python 3.11+ and run `python3 -m unittest discover -s scripts -p 'test_release.py' -v`. `python3 scripts/release.py validate --tag v1.2.0` checks the current source version without publishing anything.
 
 To add Vulman to a Linux application menu, install the executable, desktop entry, and icon for your account. Use `vulman-linux-arm64` in the first `install` command on ARM64.
 
