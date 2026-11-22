@@ -95,7 +95,20 @@ func orderedNames(names []string) []string {
 }
 
 func SameProfile(a, b model.ScannerProfile) bool {
-	return a.Mode == b.Mode && slices.Equal(orderedNames(a.Tools), orderedNames(b.Tools)) && slices.Equal(orderedNames(a.AdditionalTools), orderedNames(b.AdditionalTools))
+	return a.Mode == b.Mode && a.GenerateLockfiles == b.GenerateLockfiles && a.IgnoreComposerPlatform == b.IgnoreComposerPlatform && slices.Equal(orderedNames(a.Tools), orderedNames(b.Tools)) && slices.Equal(orderedNames(a.AdditionalTools), orderedNames(b.AdditionalTools))
+}
+
+func UsesLocalPackagist(p model.Project, s model.Settings) bool {
+	if !p.ScanCode || !s.Scanners["composer-lock"] {
+		return false
+	}
+	tool, _ := definition("composer-lock")
+	for _, target := range TargetKeys(p) {
+		if profileSelects(EffectiveProfile(p, s, target), tool) {
+			return true
+		}
+	}
+	return false
 }
 
 func profileSelects(profile model.ScannerProfile, tool Definition) bool {
@@ -144,8 +157,7 @@ func discoverInputs(ctx context.Context, directory string) (map[string][]string,
 			return apperror.New("scanner_discovery_limit", "Repository discovery exceeded 100,000 entries. Excluded dependency and generated folders are not scanned.")
 		}
 		if entry.IsDir() {
-			switch entry.Name() {
-			case ".git", "node_modules", "vendor", ".venv", "venv", "__pycache__":
+			if excludedScannerDirectory(entry.Name()) {
 				return fs.SkipDir
 			}
 			return nil
@@ -211,6 +223,9 @@ func Plan(ctx context.Context, directory string, profile model.ScannerProfile, e
 				for _, alternatives := range tool.Inputs {
 					if !patternMatches(alternatives, inputs[directory]) {
 						job.Status, job.Reason = "blocked", "missing_input"
+						if profile.GenerateLockfiles && canGenerateLockfile(tool.ID, inputs[directory]) {
+							job.Status, job.Reason = "planned", "lockfile_required"
+						}
 						break
 					}
 				}
@@ -226,9 +241,10 @@ func Plan(ctx context.Context, directory string, profile model.ScannerProfile, e
 }
 
 type Coverage struct {
-	Target string
-	Tool   string
-	Path   string
+	GeneratedLockfile bool
+	Target            string
+	Tool              string
+	Path              string
 }
 
 type Report struct {
@@ -281,7 +297,7 @@ func (report Report) Unassessed(prior []model.Finding, project model.Project) []
 			covered := false
 			for _, coverage := range report.Completed {
 				tool, ok := definition(coverage.Tool)
-				if ok && target == coverage.Target && strings.EqualFold(source, tool.Label) && (tool.Scope == "repository" || coverage.Path == finding.ScanPath) {
+				if ok && (!coverage.GeneratedLockfile || finding.GeneratedLockfile) && target == coverage.Target && strings.EqualFold(source, tool.Label) && (tool.Scope == "repository" || coverage.Path == finding.ScanPath) {
 					covered = true
 					break
 				}

@@ -51,6 +51,44 @@ func TestRunScannerReportsStatusAndExitCode(t *testing.T) {
 	}
 }
 
+func TestRunLockfileGenerationIsOptInAndLabelsJSON(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixtures")
+	}
+	dir, bin := t.TempDir(), t.TempDir()
+	t.Setenv("PATH", bin)
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteShellFixture(t, bin, "npm", `case "$1" in
+install) printf '%s' '{"lockfileVersion":3,"packages":{}}' > package-lock.json;;
+audit) printf '%s' '{"vulnerabilities":{}}';;
+*) exit 9;;
+esac`)
+	for _, generate := range []bool{false, true} {
+		args := []string{"--scanners", "npm", "--dir", dir}
+		if generate {
+			args = append(args, "--generate-lockfiles")
+		}
+		var stdout, stderr bytes.Buffer
+		code := run(context.Background(), args, &stdout, &stderr)
+		var report scanReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if generate {
+			if code != 0 || report.Status != "complete" || len(report.Scanners) != 1 || !report.Scanners[0].GeneratedLockfile {
+				t.Fatalf("generated resolution was not labeled in CLI output: %s, %s", &stdout, &stderr)
+			}
+		} else if code != 2 || report.Status != "failed" {
+			t.Fatalf("default CLI generated a missing lockfile: %s", &stdout)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "package-lock.json")); !os.IsNotExist(err) {
+		t.Fatal("CLI lockfile generation changed the original repository")
+	}
+}
+
 func TestRunPipAuditUsesProjectManifests(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("scanner fixtures use shell executables")

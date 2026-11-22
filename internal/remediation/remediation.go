@@ -54,14 +54,19 @@ func Generate(ctx context.Context, f model.Finding, s model.Settings, provider s
 		return base
 	}
 
-	key := s.Tokens[provider]
-	modelName := s.OpenAIModel
+	key := strings.TrimSpace(s.Tokens[provider])
+	modelName, providerName := strings.TrimSpace(s.OpenAIModel), "OpenAI"
 	if provider == "claude" {
-		modelName = s.ClaudeModel
+		modelName, providerName = strings.TrimSpace(s.ClaudeModel), "Claude"
 	}
 
-	if key == "" || modelName == "" {
-		base.WarningMessage = apperror.Public(apperror.New("advice_missing_credentials", "API key or model is missing; showing public advisory guidance."))
+	if key == "" {
+		base.WarningMessage = apperror.Public(apperror.Newf("advice_missing_api_key", "%s API key is missing. Add it under Configuration → API credentials. Showing public advisory guidance.", providerName))
+		base.Warning = base.WarningMessage.English()
+		return base
+	}
+	if modelName == "" {
+		base.WarningMessage = apperror.Public(apperror.Newf("advice_missing_model", "%s model ID is missing. Set it under Configuration → Fix suggestions. Showing public advisory guidance.", providerName))
 		base.Warning = base.WarningMessage.English()
 		return base
 	}

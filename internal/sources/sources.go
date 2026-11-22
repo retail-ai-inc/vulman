@@ -258,6 +258,11 @@ func (c *Client) fetchOSV(ctx context.Context, a model.Asset, s model.Settings, 
 }
 
 func osvFinding(v osvRecord, a model.Asset) model.Finding {
+	return OSVFinding(v, a)
+}
+
+// OSVFinding shares advisory normalization with native lockfile scanners.
+func OSVFinding(v osvdb.Record, a model.Asset) model.Finding {
 	sev := strings.ToUpper(v.DatabaseSpecific.Severity)
 	f := model.Finding{ID: v.ID, AssetID: a.ID, Component: a.Name, Version: a.Version, Title: v.Summary, Description: v.Details, Severity: sev, Sources: []string{"OSV"}, Match: "package", Aliases: v.Aliases, References: []string{}, FixedVersions: []string{}}
 	if f.Title == "" {
@@ -273,7 +278,7 @@ func osvFinding(v osvRecord, a model.Asset) model.Finding {
 		f.References = Unique(f.References, r.URL)
 	}
 	for _, a2 := range v.Affected {
-		if a2.Package.Name != a.Name || a2.Package.Ecosystem != a.Ecosystem {
+		if osvdb.PackageName(a.Ecosystem, a2.Package.Name) != osvdb.PackageName(a.Ecosystem, a.Name) || a2.Package.Ecosystem != a.Ecosystem {
 			continue
 		}
 		if f.Severity == "" {
@@ -326,6 +331,8 @@ func Merge(all []model.Finding) []model.Finding {
 		key := f.AssetID + "/" + f.ID
 		if i, ok := index[key]; ok {
 			old := &out[i]
+			// Preserve evidence from supplied lockfiles when reports are combined.
+			old.GeneratedLockfile = old.GeneratedLockfile && f.GeneratedLockfile
 			old.Sources = Unique(old.Sources, f.Sources...)
 			old.References = Unique(old.References, f.References...)
 			old.FixedVersions = Unique(old.FixedVersions, f.FixedVersions...)

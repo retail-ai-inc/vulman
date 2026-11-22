@@ -172,12 +172,13 @@ func (s *scanScratch) configure(cmd *exec.Cmd) {
 	}
 	cmd.Env = slices.DeleteFunc(cmd.Env, func(entry string) bool {
 		name, _, _ := strings.Cut(entry, "=")
-		return strings.EqualFold(name, "npm_config_cache")
+		return strings.EqualFold(name, "npm_config_cache") || strings.EqualFold(name, "COMPOSER")
 	})
 	cmd.Env = append(cmd.Env,
 		"TMPDIR="+temp, "TMP="+temp, "TEMP="+temp, "GOTMPDIR="+temp,
 		"GOCACHE="+filepath.Join(dir, "go-build"), "GOMODCACHE="+filepath.Join(dir, "go-mod"), "GOCACHEPROG=",
 		"npm_config_cache="+filepath.Join(dir, "npm"), "COMPOSER_CACHE_DIR="+filepath.Join(dir, "composer"),
+		"COMPOSER=composer.json",
 		"TRIVY_CACHE_DIR="+filepath.Join(dir, "trivy"), "SNYK_CACHE_PATH="+filepath.Join(dir, "snyk"),
 	)
 }

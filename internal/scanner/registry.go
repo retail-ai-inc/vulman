@@ -11,6 +11,7 @@ import (
 // Definition is the shared catalogue used by matching, profiles, availability
 // checks, and the desktop. Commands and parsers remain application-owned code.
 type Definition struct {
+	Native    bool       `json:"native,omitempty"`
 	ID        string     `json:"id"`
 	Label     string     `json:"label"`
 	Scope     string     `json:"scope"`
@@ -25,6 +26,7 @@ type Definition struct {
 }
 
 var registry = []Definition{
+	{ID: "composer-lock", Label: ComposerLockLabel, Native: true, Scope: "manifest", Detect: []string{"composer.json", "composer.lock"}, Inputs: [][]string{{"composer.lock"}}, DocsURL: "https://google.github.io/osv.dev/"},
 	{ID: "govulncheck", exitCodes: []int{0, 1, 3}, Label: "govulncheck", Scope: "manifest", Detect: []string{"go.mod"}, Inputs: [][]string{{"go.mod"}}, DocsURL: "https://go.dev/doc/security/vuln/",
 		build: simpleCommand(func(ctx context.Context) (*exec.Cmd, error) {
 			return exec.CommandContext(ctx, "govulncheck", "-json", "./..."), nil

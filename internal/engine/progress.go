@@ -75,26 +75,12 @@ func newTracker(s *store.Store, projectID, runID string) *runTracker {
 }
 
 func (t *runTracker) update(fn func(*model.Run)) {
-	err := t.store.Update(func(st *model.State) error {
-		for i := range st.Projects {
-			p := &st.Projects[i]
-			if p.ID != t.projectID {
-				continue
-			}
-
-			for j := range p.Runs {
-				r := &p.Runs[j]
-				if r.ID == t.runID {
-					fn(r)
-					return nil
-				}
-			}
-		}
-
+	err := t.store.UpdateRun(t.projectID, t.runID, func(_ *store.RunProject, run *model.Run) error {
+		fn(run)
 		return nil
 	})
 
-	if err != nil {
+	if err != nil && !errors.Is(err, store.ErrRunNotFound) {
 		log.Printf("Could not persist sync progress for project %s: %v", t.projectID, err)
 	}
 }
@@ -106,6 +92,7 @@ func (t *runTracker) start(id string) {
 
 			if step.ID == id {
 				step.Status = "running"
+				step.Failure = nil
 				step.StartedAt = time.Now()
 				step.Progress.Phase = "request"
 				switch step.Kind {
@@ -308,7 +295,7 @@ func (t *runTracker) scannerEvent(event scanner.ScanEvent) {
 				continue
 			}
 			switch event.Phase {
-			case "clone", "clone_auth", "scanning":
+			case "clone", "clone_auth", "scanning", "scanner_copying", "scanner_lockfile_started", "scanner_lockfile_completed":
 				step.Progress.Phase = event.Phase
 				step.Progress.Item = event.Tool
 				step.Progress.ScanTarget = event.Target
@@ -339,6 +326,9 @@ func (t *runTracker) finish(id string, found int, err error) {
 			step.FinishedAt = time.Now()
 			step.Progress.Found = found
 			step.Progress.WaitSeconds = 0
+			// Keep the public cause on the step even after its bounded log expires.
+			// Unknown errors are classified rather than exposing external output.
+			step.Failure = apperror.Public(err)
 
 			if err != nil {
 				step.Status = "failed"
@@ -348,7 +338,7 @@ func (t *runTracker) finish(id string, found int, err error) {
 					step.Status = "interrupted"
 					event = "interrupted"
 				}
-				message := apperror.Public(err)
+				message := step.Failure
 				addLog(r, id, event, message.English()).Message = message
 			} else {
 				step.Status = "complete"

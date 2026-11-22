@@ -527,7 +527,7 @@ func (e *Engine) assess(p model.Project, s model.Settings, runID string, scope a
 				scannersCompleted++
 			}
 			tracker.scannerEvent(event)
-		})
+		}, e.Sources.LocalOSV)
 		items, warns := scannerReport.Findings, scannerReport.Problems
 		var scanErr error
 

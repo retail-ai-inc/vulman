@@ -42,7 +42,7 @@ func TestAutomaticPlanFindsMixedProjectsAndSkipsDependencyFolders(t *testing.T) 
 			planned = append(planned, job.Tool+":"+job.Path)
 		}
 	}
-	if !slices.Equal(planned, []string{"npm:web", "composer:backend", "trivy:"}) {
+	if !slices.Equal(planned, []string{"composer-lock:backend", "npm:web", "composer:backend", "trivy:"}) {
 		t.Fatalf("wrong mixed-project plan: %+v", jobs)
 	}
 }

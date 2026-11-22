@@ -23,7 +23,21 @@ type CheckResult struct {
 
 // Check runs an informational command with the same executable resolution and
 // OS account used by assessments. It does not enter a project directory.
-func Check(ctx context.Context, name string) (CheckResult, error) {
+func Check(ctx context.Context, name string, catalogues ...LocalOSV) (CheckResult, error) {
+	if item, ok := definition(name); ok && item.Native {
+		result := CheckResult{Platform: scannerPlatform(), Status: "ready"}
+		err := composerCatalogueRequired()
+		if len(catalogues) > 0 && catalogues[0] != nil {
+			_, err = catalogues[0].Query(ctx, "Packagist", "", "")
+			if err != nil {
+				err = composerCatalogueRequired()
+			}
+		}
+		if err != nil {
+			result.Status, result.Message = "database", apperror.Public(err)
+		}
+		return result, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	cmd, err := newScannerProbe(ctx, name)
@@ -72,7 +86,7 @@ func Check(ctx context.Context, name string) (CheckResult, error) {
 
 func newScannerProbe(ctx context.Context, name string) (*exec.Cmd, error) {
 	item, ok := definition(name)
-	if !ok {
+	if !ok || item.probe == nil {
 		return nil, apperror.Newf("scanner_check_unsupported", "scanner availability check is unsupported for %q", name)
 	}
 	return item.probe(ctx)

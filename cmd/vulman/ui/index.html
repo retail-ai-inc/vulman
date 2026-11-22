@@ -74,6 +74,17 @@
   </template>
   <dialog id="component-dialog"><form id="component-form"><div class="dialog-header"><div><h2 data-t="addComponentTitle"></h2><p class="subtitle" id="component-project"></p></div><button type="button" class="icon-button close-dialog" aria-label="Close">×</button></div><div class="dialog-body"><div id="component-fields"></div><p class="form-note" data-t="matchingHint"></p><p id="component-error" class="form-error" role="alert"></p></div><div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="cancel"></button><button type="submit" class="button primary" id="save-component" data-t="saveComponent"></button></div></form></dialog>
   <dialog id="detail-dialog"><div class="dialog-header"><span class="eyebrow" data-t="advisoryDetail"></span><button class="icon-button close-dialog" aria-label="Close">×</button></div><div class="dialog-body" id="detail-body"></div></dialog>
+  <dialog id="workflow-failure-dialog" aria-labelledby="workflow-failure-title" aria-describedby="workflow-failure-reason">
+    <div class="dialog-header"><h2 id="workflow-failure-title" data-t="workflowStepDetails"></h2><button type="button" class="icon-button close-dialog" aria-label="Close">×</button></div>
+    <div class="dialog-body">
+      <div id="workflow-failure-status"></div>
+      <h3 class="detail-title" id="workflow-failure-step"></h3>
+      <p class="workflow-failure-context" id="workflow-failure-context"></p>
+      <p class="workflow-failure-progress" id="workflow-failure-progress"></p>
+      <p class="workflow-failure-reason" id="workflow-failure-reason"></p>
+    </div>
+    <div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="close"></button></div>
+  </dialog>
   <dialog id="confirm-dialog" aria-labelledby="confirm-message"><div class="dialog-body"><p id="confirm-message"></p></div><div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="cancel" autofocus></button><button type="button" class="button danger" id="confirm-action" data-t="confirmAction"></button></div></dialog>
   <dialog id="scanner-info-dialog" aria-labelledby="scanner-info-title">
     <div class="dialog-header"><h2 id="scanner-info-title"></h2><button type="button" class="icon-button close-dialog" data-scanner-info-close aria-label="Close" autofocus>×</button></div>
@@ -84,6 +95,22 @@
     <div class="dialog-header"><h2 id="database-info-title"></h2><button type="button" class="icon-button close-dialog" data-database-info-close aria-label="Close" autofocus>×</button></div>
     <div class="dialog-body" id="database-info-body" tabindex="0"></div>
     <div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="close"></button></div>
+  </dialog>
+  <dialog id="lockfile-options-dialog" aria-labelledby="lockfile-options-title" aria-describedby="lockfile-options-hint">
+    <form id="lockfile-options-form" method="dialog">
+      <div class="dialog-header"><h2 id="lockfile-options-title" data-t="scannerLockfileOptions"></h2><button type="button" class="icon-button close-dialog" data-lockfile-options-close aria-label="Close">×</button></div>
+      <div class="dialog-body">
+        <p data-t="scannerLockfilePrompt"></p>
+        <label class="check-row"><input type="checkbox" id="lockfile-options-enabled" autofocus><span><strong data-t="scannerGenerateLockfiles"></strong></span></label>
+        <p class="form-note" id="lockfile-options-hint" data-t="scannerGenerateLockfilesHint"></p>
+        <div id="lockfile-composer-platform-options" hidden>
+          <label class="check-row"><input type="checkbox" id="lockfile-ignore-composer-platform"><span><strong data-t="scannerIgnoreComposerPlatform"></strong></span></label>
+          <p class="form-note" data-t="scannerIgnoreComposerPlatformHint"></p>
+        </div>
+        <p class="form-note" data-t="scannerLockfileSaveHint"></p>
+      </div>
+      <div class="dialog-footer"><button type="button" class="button secondary close-dialog" data-t="cancel"></button><button type="submit" class="button primary" data-t="scannerLockfileApply"></button></div>
+    </form>
   </dialog>
   <dialog id="about-dialog">
     <div class="dialog-header"><h2>Vulman</h2><button class="icon-button close-dialog" aria-label="Close">×</button></div>

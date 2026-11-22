@@ -14,12 +14,12 @@ import (
 )
 
 func newNPMCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
-	// #nosec G204 -- Only the fixed audit and version arguments are passed by the scanner package.
+	// #nosec G204 -- Only fixed audit, lockfile-generation, and version arguments are passed by the scanner package.
 	return exec.CommandContext(ctx, "npm", args...), nil
 }
 
 func newComposerCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
-	// #nosec G204 -- Only the fixed audit and version arguments are passed by the scanner package.
+	// #nosec G204 -- Only fixed audit, lockfile-generation, and version arguments are passed by the scanner package.
 	return exec.CommandContext(ctx, "composer", args...), nil
 }
 

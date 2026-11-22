@@ -11,6 +11,8 @@ import (
 	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/osvdb"
+	"vulman/internal/scanner"
+	"vulman/internal/store"
 	"vulman/internal/workflow"
 )
 
@@ -73,17 +75,26 @@ func (e *Engine) databaseStatus(source string) (model.DatabaseWait, error) {
 }
 
 // Only updates already running for the selected assessment's sources delay it.
-// A standalone scan never depends on the local vulnerability catalogues.
+// Native PHP scans also wait for an active Packagist catalogue update.
 func (e *Engine) databaseDependencies(p model.Project, s model.Settings, mode string) ([]model.DatabaseWait, error) {
 	return e.databaseDependenciesForAsset(p, s, mode, "")
 }
 
 func (e *Engine) databaseDependenciesForAsset(p model.Project, s model.Settings, mode, assetID string) ([]model.DatabaseWait, error) {
+	var waits []model.DatabaseWait
+	if mode != "local" && assetID == "" && scanner.UsesLocalPackagist(p, s) {
+		status, err := e.databaseStatus("osv:Packagist")
+		if err != nil {
+			return nil, err
+		}
+		if status.Status == "updating" {
+			waits = append(waits, status)
+		}
+	}
 	if mode == codeScanMode || len(p.Assets) == 0 {
-		return nil, nil
+		return waits, nil
 	}
 
-	var waits []model.DatabaseWait
 	for _, source := range []string{"nvd", "cve"} {
 		endpoint, defaultEndpoint := s.NVDURL, model.DefaultNVDURL
 		if source == "cve" {
@@ -106,6 +117,9 @@ func (e *Engine) databaseDependenciesForAsset(p model.Project, s model.Settings,
 
 	if s.Sources["osv"] && strings.TrimRight(s.OSVURL, "/") == model.DefaultOSVURL {
 		seen := map[string]bool{}
+		for _, wait := range waits {
+			seen[strings.TrimPrefix(wait.Source, "osv:")] = true
+		}
 		for _, asset := range p.Assets {
 			if assetID != "" && asset.ID != assetID {
 				continue
@@ -197,84 +211,52 @@ func (e *Engine) awaitDatabases(projectID, runID string, q *queuedSync, control 
 }
 
 func (e *Engine) persistQueueState(projectID, runID string, waits []model.DatabaseWait, ready, blocked bool, mode string, useAvailable bool) error {
-	return e.Store.Update(func(st *model.State) error {
-		for i := range st.Projects {
-			p := &st.Projects[i]
-			if p.ID != projectID {
-				continue
+	return e.Store.UpdateRun(projectID, runID, func(p *store.RunProject, r *model.Run) error {
+		r.DatabaseWaits = waits
+		if ready {
+			finishPause(r)
+			r.Status, r.Mode = "running", mode
+			event := "databases_ready"
+			if useAvailable {
+				event = "queue_use_available"
 			}
 
-			for j := range p.Runs {
-				r := &p.Runs[j]
-				if r.ID != runID {
-					continue
-				}
+			addLog(r, "", event, "")
+			addLog(r, "", "run_started", r.AssetName)
+			if interval := model.Interval(p.Schedule); interval > 0 && r.Selection == nil && r.AssetID == "" && r.Severity == "" && mode != "local" {
+				p.NextRun = time.Now().Add(interval)
+			}
+		} else {
+			r.Status = "queued"
+			if blocked {
+				r.Status = "waiting_databases"
+			}
 
-				r.DatabaseWaits = waits
-				if ready {
-					finishPause(r)
-					r.Status, r.Mode = "running", mode
-					event := "databases_ready"
-					if useAvailable {
-						event = "queue_use_available"
-					}
-
-					addLog(r, "", event, "")
-					addLog(r, "", "run_started", r.AssetName)
-					if interval := model.Interval(p.Schedule); interval > 0 && r.Selection == nil && r.AssetID == "" && r.Severity == "" && mode != "local" {
-						p.NextRun = time.Now().Add(interval)
-					}
-				} else {
-					r.Status = "queued"
-					if blocked {
-						r.Status = "waiting_databases"
-					}
-
-					for _, wait := range waits {
-						addLog(r, "", "database_wait_"+wait.Status, wait.Source)
-					}
-				}
-
-				return nil
+			for _, wait := range waits {
+				addLog(r, "", "database_wait_"+wait.Status, wait.Source)
 			}
 		}
 
-		return ErrRunNotActive
+		return nil
 	})
 }
 
 // Cancel a queued request without invoking assessment or touching its findings.
 func (e *Engine) finishQueued(projectID, runID string, stopped bool) {
-	err := e.Store.Update(func(st *model.State) error {
-		for i := range st.Projects {
-			p := &st.Projects[i]
-			if p.ID != projectID {
-				continue
-			}
-
-			for j := range p.Runs {
-				r := &p.Runs[j]
-				if r.ID != runID {
-					continue
-				}
-
-				finishPause(r)
-				r.FinishedAt = time.Now()
-				r.Status = "interrupted"
-				interruptSteps(r)
-				if stopped {
-					r.Status = "stopped"
-					addLog(r, "", "queue_cancelled", "")
-				} else {
-					addLog(r, "", "queue_interrupted", "")
-				}
-
-				p.Syncing = false
-				return nil
-			}
+	err := e.Store.UpdateRun(projectID, runID, func(p *store.RunProject, r *model.Run) error {
+		finishPause(r)
+		r.FinishedAt = time.Now()
+		r.Status = "interrupted"
+		interruptSteps(r)
+		if stopped {
+			r.Status = "stopped"
+			addLog(r, "", "queue_cancelled", "")
+		} else {
+			addLog(r, "", "queue_interrupted", "")
 		}
 
-		return ErrRunNotActive
+		p.Syncing = false
+		return nil
 	})
 	if err != nil {
 		log.Printf("Could not finish queued sync for project %s: %v", projectID, err)

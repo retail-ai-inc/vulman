@@ -8,6 +8,7 @@ import (
 	"vulman/internal/apperror"
 	"vulman/internal/model"
 	"vulman/internal/osvdb"
+	"vulman/internal/scanner"
 )
 
 func OSVEcosystems(st model.State) []string {
@@ -17,6 +18,9 @@ func OSVEcosystems(st model.State) []string {
 
 	var selected []string
 	for _, project := range st.Projects {
+		if scanner.UsesLocalPackagist(project, st.Settings) && !slices.Contains(selected, "Packagist") {
+			selected = append(selected, "Packagist")
+		}
 		for _, asset := range project.Assets {
 			if ecosystem, err := osvdb.Ecosystem(asset.Ecosystem); err == nil && !slices.Contains(selected, ecosystem) {
 				selected = append(selected, ecosystem)
