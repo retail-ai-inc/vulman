@@ -4,7 +4,19 @@
 
 **Vulnerability Management for your projects.** Vulman is a native desktop application written in Go. It includes an encrypted local database and supports English and Japanese. The interface is embedded in the executable and runs in the operating system's WebView.
 
-## Run
+## Download
+
+Download **v1.2.0**, extract the archive, and launch Vulman. No Go installation or compilation is required.
+
+| Platform | Download | Start |
+| --- | --- | --- |
+| macOS | [Universal ZIP — Apple Silicon + Intel](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/Vulman-v1.2.0-macos-universal.zip) | Drag `Vulman.app` into Applications and open it. |
+| Windows | [x64](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/Vulman-v1.2.0-windows-amd64.zip) · [ARM64](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/Vulman-v1.2.0-windows-arm64.zip) | Open `Vulman.exe`. |
+| Linux | [x64](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/Vulman-v1.2.0-linux-amd64.tar.gz) · [ARM64](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/Vulman-v1.2.0-linux-arm64.tar.gz) | Run `./vulman` from the extracted folder. |
+
+Requires macOS 13+, WebView2 Runtime on Windows, or GTK4 and WebKitGTK 6.0 on Linux. See the [release notes](https://github.com/retail-ai-inc/vulman/releases/tag/v1.2.0) for first-launch guidance and [SHA-256 checksums](https://github.com/retail-ai-inc/vulman/releases/download/v1.2.0/SHA256SUMS) to verify your download.
+
+## Build from source
 
 To build from source, install **Go 1.27.3 or later** and the [Wails platform dependencies](https://v3.wails.io/getting-started/installation/). Use the latest stable Go patch release when possible. Windows uses WebView2. Linux uses GTK4 and WebKitGTK 6.0. The bundled interface needs no npm build or Node.js runtime.
 
@@ -126,116 +138,94 @@ Enable **OSV.dev**, select ecosystems under **Local OSV database**, and **Save c
 
 ## Scheduling
 
-Each project has exactly one schedule: **manual only**, **hourly**, **daily**, or **weekly**. These are elapsed intervals, not a particular local time of day. The next run is persisted, and a scheduler checks due projects every 15 seconds. An overdue project is assessed after startup; overlapping assessments for a project are prevented. A full-project normal or forced assessment advances its next scheduled run. Reassessment from local data leaves that schedule unchanged.
+Choose **Manual only**, **Hourly**, **Daily**, or **Weekly** per project. **Keep Vulman running** for automatic assessments. Schedules use elapsed intervals; overdue runs start after restart, and assessments for the same project do not overlap.
 
-**Vulman must remain running for scheduled assessments.** This release does not install a Windows service, systemd service, or operating-system scheduler. Interrupted runs are marked interrupted on restart. The most recent 30 runs are retained per project.
+Full-project normal or forced assessments advance the next run; reassessing from local data does not. Interrupted runs are marked after restart, and the latest 30 runs are retained per project.
 
 ## Public and AI remediation
 
-Public guidance is available without credentials. It shows retrieved fixed-version boundaries when present and otherwise points to original advisory references. A published boundary is not necessarily the correct upgrade for every supported release branch.
+Public guidance needs no API key and provides published fix information or original advisory references.
 
-To request optional AI advice:
+For optional AI advice, configure an OpenAI or Claude API key and an accessible model ID in **Configuration**. Open an advisory, select a provider, and choose **Propose a fix**. Public guidance remains available if AI is unavailable.
 
-1. In **Configuration**, enter an OpenAI API key and/or a Claude API key.
-2. Enter the exact model ID your API account can access; no account-specific model is assumed.
-3. Select a provider, open an advisory, and choose **Propose a fix**.
-
-The OpenAI/Codex integration uses the OpenAI **Responses API**, not desktop Codex authentication or a ChatGPT session. Claude uses the **Messages API**. Advice requests send only the selected finding and its advisory metadata; Vulman does not send repository source code to these AI providers. Failed/missing AI credentials fall back to public guidance. Usage can incur API charges. Generated guidance needs human review; Vulman does not apply patches or modify repositories.
+AI requests share only the finding and advisory metadata, excluding repository source code. API charges may apply. Review guidance before applying changes; Vulman does not modify repositories.
 
 ## Optional repository scanners
 
-Enable tools in Configuration and explicitly enable **Run configured code scanners** for a trusted project. External tools need to be installed on PATH; the built-in PHP lockfile scanner needs no PHP or Composer runtime. In **Edit project**, add HTTPS GitHub.com repository URLs or a local folder. Vulman scans each location separately, identifies it in results and logs, and merges duplicate findings within each location. Failed locations retain previous findings. Git is required for GitHub repositories; submodules are not fetched.
+Scan HTTPS GitHub repositories or local folders. External scanners must be on `PATH`; Git is required for GitHub scans, and submodules are not fetched. The built-in PHP lockfile scanner needs no PHP or Composer runtime.
 
 ### Per-repository scanner profiles
 
-1. Enable installed tools under **Configuration → Code scanners**. **More info** provides installation and permission guidance for your OS; **Check again** rechecks availability.
-2. In **Add project** or **Edit project → Code scanning**, set a profile for each GitHub URL and local folder:
+Enable tools under **Configuration → Code scanners**, then set each location's profile in **Add project / Edit project → Code scanning**. Enable **Run configured code scanners**, save, and select **Scan code**.
 
-   | Target | Modes |
-   | --- | --- |
-   | GitHub repository URL | **Custom selection** or **Disabled**. Choose tools explicitly before saving. |
-   | Local repository folder | **Automatic**, **Custom selection**, or **Disabled**. Automatic detects supported project files. |
+| Target | Modes |
+| --- | --- |
+| GitHub URL | **Custom selection** or **Disabled** |
+| Local folder | **Automatic**, **Custom selection**, or **Disabled** |
 
-3. Enable **Run configured code scanners** and **Save project**. Use **Scan code** to run scanners independently, or include them in a full assessment.
+Automatic detects supported project files. Only globally enabled tools can run.
 
-Only globally enabled tools can run. Disabled, skipped, or failed jobs retain their previous findings. The workflow lists each job's status and raw finding count; saved results merge duplicate reports within the same repository and project folder.
+| Tool | Requires |
+| --- | --- |
+| PHP lockfile (local OSV) | Existing `composer.lock`; enable OSV.dev and download [Packagist data](#local-osv-database). |
+| govulncheck | `go.mod` and a Go toolchain. |
+| npm audit | `package.json` and an npm lockfile. |
+| composer audit | PHP/Composer, `composer.json`, and `composer.lock`. |
+| pip-audit | Supported Python lockfiles or pinned `requirements.txt`. |
+| Trivy | Supported dependency manifests. |
+| Snyk | Snyk CLI and token. |
 
-| Tool | Checks | Required inputs |
-| --- | --- | --- |
-| PHP lockfile (local OSV) | PHP dependencies, including development dependencies | `composer.lock` and the downloaded local OSV **Packagist** ecosystem |
-| govulncheck | Go vulnerabilities | `go.mod` and a Go toolchain |
-| npm audit | JavaScript dependencies | `package.json` and an npm lockfile |
-| composer audit | Optional additional PHP dependency audit | PHP/Composer, `composer.json`, and `composer.lock` |
-| pip-audit | Python dependencies | Supported Python lockfiles or pinned `requirements.txt` |
-| Trivy | Filesystem dependencies | Supported dependency manifests |
-| Snyk | Dependencies across supported ecosystems | Snyk CLI and a configured token |
+Use **Lockfile options** to enable temporary npm/Composer lockfile generation. Original files are preserved and scripts/plugins disabled; resolved versions may differ from deployed dependencies.
 
-Vulman checks required inputs and reports missing tools or unsupported projects. Selecting **npm audit** or **composer audit** opens **Lockfile options**, where you can enable **Generate missing lockfiles for scanning** (off by default). Reopen the pop-up with the compact **Lockfile options** button when either tool is selected; local Automatic profiles also provide this button when those tools are enabled. It requires the appropriate manifest, preserves existing lockfiles, disables scripts/plugins, and uses a disposable scan copy. Results are labeled because newly resolved versions may differ from deployed dependencies; earlier findings from supplied lockfiles are preserved. Generation may access package registries, but does not install project dependencies.
+For private GitHub repositories, save a PAT in **Configuration → API credentials**. Fine-grained tokens need access to the selected repositories with **Contents → Read-only** permission.
 
-For PHP, prefer the built-in lockfile scanner: enable OSV.dev, download **Packagist** under **Local OSV database**, and select **PHP lockfile (local OSV)** in the repository profile. Matching stays local and reports unsupported versions as incomplete coverage. It requires an existing lockfile. Composer's optional **Ignore project PHP and extension requirements** setting applies only to temporary lockfile generation; it does not remove Composer's own runtime/network requirements or change existing-lockfile audits.
+Skipped or failed jobs retain previous findings. Workflow counts are raw reports; saved results merge duplicates within each repository and project folder.
 
-For **private GitHub repositories**, save a personal access token under **Configuration → API credentials**. Fine-grained tokens need access to the selected repositories with **Contents → Read-only** permission. Use an HTTPS GitHub.com repository URL; authenticated cloning requires Git with `--config-env` support. [GitHub token guidance](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
-
-Clones, scan temporary files, and supported scanner caches use private system temporary storage outside Vulman's data directory. They are removed after scans; abandoned files from a force quit are cleaned on the next desktop launch or scan. Only findings and run metadata are retained in the database.
+Clones and temporary scan data are removed after scanning; leftovers from force quits are cleaned on the next launch or scan.
 
 ### Set up Snyk
 
-1. Install the Snyk CLI on the machine running Vulman and add it to PATH. On macOS with Homebrew, run `brew install snyk/tap/snyk`. On Windows, use the standalone `snyk.exe`. [Snyk CLI installation](https://docs.snyk.io/developer-tools/snyk-cli/install-the-snyk-cli)
-2. Copy your API token from Snyk account settings or use a Snyk personal access token. Add it under **Configuration → API credentials → Snyk token**. [Snyk CLI authentication](https://docs.snyk.io/developer-tools/snyk-cli/authenticate-to-use-the-cli)
-3. Enable **Snyk** under **Code scanners** and select **Save configuration**. The availability check verifies that Vulman can start the CLI. The token is used when a scan runs.
-4. In **Edit project**, configure a GitHub repository URL or local folder, enable **Run configured code scanners**, and save the project. Select **Scan code** to run the configured scanners and see their results in the workflow.
+1. Install the [Snyk CLI](https://docs.snyk.io/developer-tools/snyk-cli/install-the-snyk-cli) on `PATH`: macOS `brew install snyk/tap/snyk`; Windows `snyk.exe`.
+2. Add your [Snyk token](https://docs.snyk.io/developer-tools/snyk-cli/authenticate-to-use-the-cli) under **Configuration → API credentials → Snyk token**.
+3. Enable **Snyk** under **Configuration → Code scanners**, then **Save configuration**.
+4. In **Edit project**, add a repository or local folder, select **Snyk** in its scanner profile, enable **Run configured code scanners**, and save. Select **Scan code**.
 
-Vulman runs `snyk test --json` to check supported dependency manifests and passes the configured token to Snyk as `SNYK_TOKEN`. A nonempty `SNYK_TOKEN` in Vulman's environment takes precedence over the saved credential. [Snyk test](https://docs.snyk.io/developer-tools/snyk-cli/commands/test)
-
-Scanners use their own network services, caches, and local toolchains. Snyk and other tools can execute ecosystem tooling; only scan repositories you trust. Vulman disables npm lifecycle scripts and Composer plugins/scripts, does not install project dependencies itself, bounds output to 16 MiB, and limits each scanner to three minutes. A full assessment has a twenty-minute limit. Missing tools, unsupported report formats, and scanner failures appear in Activity rather than being treated as a clean scan.
+A nonempty `SNYK_TOKEN` overrides the saved token. External scanners use their own services and tools; scan only repositories you trust.
 
 ### Run code scanners on their own
 
-On the project page, select **Scan code** after enabling **Run configured code scanners** and setting a repository in **Edit project**. The run uses each repository’s saved scanner profile and globally allowed tools, covers all severities, and appears in the project's workflow panel and Activity. It refreshes scanner findings independently of the CVE, NVD, and OSV assessment. Incomplete scans retain previous scanner findings. The project's assessment date and schedule continue to reflect full-project assessments.
+**Desktop:** Configure a repository and enable **Run configured code scanners** in **Edit project**, then select **Scan code**. This refreshes scanner findings only; incomplete scans retain previous findings.
 
-For terminal or CI use, build the standalone CLI with `make build-scan`. External scanners use tools on your shell's `PATH`, `SNYK_TOKEN`, and `GITHUB_TOKEN` for private GitHub repositories. The built-in PHP scanner opens an existing workspace's local OSV database read-only; close the desktop app before using it. All scans write a JSON report to stdout.
+**CLI:** Included in release downloads, or build with `make build-scan` to create `dist/vulman-scan` (`.exe` on Windows). It writes JSON to stdout:
 
 ```sh
 ./dist/vulman-scan --scanners govulncheck,trivy --dir /path/to/project
 ./dist/vulman-scan --scanners npm --repo https://github.com/your-org/project.git
-./dist/vulman-scan --scanners pip-audit --dir /path/to/python-project
 ./dist/vulman-scan --scanners composer-lock --dir /path/to/php-project --data-dir /path/to/Vulman
+./dist/vulman-scan --help
 ```
 
-`--scanners` is an explicit tool selection for the CLI target. Manifest-based tools run in detected project folders and report missing inputs. Each scanner job includes its relative `path` and any skip/block `reason` in JSON; the desktop uses the saved per-repository profiles instead.
+External tools must be on `PATH`. Use `GITHUB_TOKEN` for private GitHub repositories and `SNYK_TOKEN` for Snyk. `composer-lock` requires a workspace with the local OSV Packagist database; close the desktop app before using it.
 
-Add `--generate-lockfiles` to opt into temporary npm/Composer lockfile generation. JSON jobs and findings identify generated-lockfile results; original local files are preserved.
-With `--scanners composer --generate-lockfiles`, optionally add `--ignore-composer-platform` to bypass project PHP/extension requirements only during temporary generation.
+With no `--dir` or `--repo`, the CLI scans the current folder. See `--help` for scanner names and temporary lockfile options.
 
-Use `--dir` for a local folder or `--repo` for an HTTPS GitHub.com repository URL. With neither option, Vulman scans the current directory. The exit code is **0** for a completed scan with zero findings, **1** for a completed scan with findings, or **2** for invalid arguments or an incomplete scan. The report includes per-tool outcomes, finding counts, findings, and warnings.
+Exit codes: **0** = complete with no findings, **1** = complete with findings, **2** = error or incomplete scan.
 
 ## Local storage and credentials
 
-The embedded OSS database is [bbolt](https://github.com/etcd-io/bbolt), linked into the Go executable with no separate database service. State is encrypted with AES-256-GCM. The data directory contains:
+Data is stored locally in [bbolt](https://github.com/etcd-io/bbolt) with AES-256-GCM encryption:
 
-- `vulman.db`: projects, inventory, findings, assessment history, configuration, encrypted credentials.
-- `vulman-cve.db`: shared encrypted CVE catalogue, on-demand records, and resumable import metadata.
-- `vulman-nvd.db`: encrypted NVD advisories, CPE dictionary, search indexes, and resumable import metadata.
-- `vulman-osv.db`: encrypted ecosystem-scoped OSV advisories, package indexes, pending changes, and resumable import metadata.
-- `vulman.key`: the encryption key. **Back up the workspace database and key together while Vulman is stopped.** Losing the key makes the database unreadable.
+- `vulman.db`: projects, findings, assessment history, settings, and credentials.
+- `vulman-cve.db`, `vulman-nvd.db`, `vulman-osv.db`: local vulnerability catalogues, including the CPE dictionary.
+- `vulman.key`: the encryption key.
 
-**Configuration → File & Databases** displays the active data directory and the absolute paths to the workspace database, encryption key, and CVE, NVD, and OSV catalog databases.
+View file paths in **Configuration → File & Databases**. **Back up the databases and key together while Vulman is stopped. Losing the key makes the data unreadable.** Encryption does not protect against access through your OS account or possession of both the databases and key.
 
-Normal quit, `kill` (SIGTERM), and Ctrl+C stop active assessments and wait for their final writes before closing bbolt. Force Quit and `kill -9` can end the process immediately. bbolt's synchronized transactions protect committed data, and Vulman marks unfinished assessments as interrupted on the next launch.
+Writes commit atomically, and unfinished assessments are marked interrupted after restart.
 
-The master database stores settings, project metadata, finding chunks, workflow runs, and log chunks as independently encrypted records. Progress updates touch only the active workflow records. Separate findings and workflow revisions let the interface receive changed records without reloading the workspace or interrupting searches. Records and revisions commit together; incompatible polling cursors safely reload a complete snapshot. Assessment results, severity counts, project changes, and deletions still commit atomically.
+The eye button reveals new input or a masked saved-key preview. Blank fields keep stored credentials; **Remove stored key** takes effect when Configuration is saved.
 
-The directory and files use owner-only permissions where supported by the OS. The key sits alongside the database; encryption does not protect against another process running as your user or an attacker who obtains both files. Apply normal OS access controls, particularly Windows directory ACLs.
-
-Use the eye button to review a new entry or show a masked preview of a saved key. Saved previews show the first 10 and last 4 characters with `x` in between. Keys with 14 or fewer characters stay fully masked. Blank fields preserve stored values. **Remove stored key** removes a key when Configuration is saved. The following environment variables override stored credentials:
-
-```text
-NVD_API_KEY
-OPENAI_API_KEY
-ANTHROPIC_API_KEY
-SNYK_TOKEN
-GITHUB_TOKEN
-```
+Environment variables override stored credentials: `NVD_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `SNYK_TOKEN`, `GITHUB_TOKEN`.
 
 ## Desktop security
 
@@ -243,58 +233,56 @@ Vulman's bundled interface calls Go through the Wails bridge without opening a l
 
 ## Existing workspaces
 
-Existing master databases upgrade automatically on opening. Migration uses one synchronized transaction: an interruption keeps the previous format or the complete new format, and reopening retries an unfinished migration. The key, API response cache, and local vulnerability catalogues are preserved. Older builds cannot open the new format; use a matching database-and-key backup if returning to an older release.
+Workspaces upgrade automatically with atomic, interruption-safe migrations. Keys, API response cache, and local catalogues are preserved. Returning to an incompatible older build requires a matching backup of the database and key.
 
-Every build defaults to `Vulman` inside your OS user configuration directory. On macOS this is `~/Library/Application Support/Vulman`. On Windows it is `%AppData%\Vulman`. On Linux it is `$XDG_CONFIG_HOME/Vulman` when set, or `~/.config/Vulman` otherwise.
+To switch, select a folder containing `vulman.db` and `vulman.key` in **Configuration → Use this folder**. The choice is remembered; switching loads its settings and stops active assessments. **Use default** resets the selection, while `--data-dir` overrides it for one launch. Invalid workspaces fall back to the default with a warning.
 
-In **Configuration**, browse for or enter an existing workspace directory that contains both `vulman.db` and `vulman.key`, then select **Use this folder**. Vulman switches workspaces immediately and remembers the choice for future launches. Switching loads the selected workspace’s saved configuration and stops active assessments in the previous workspace.
+Default folders: macOS `~/Library/Application Support/Vulman`; Windows `%AppData%\Vulman`; Linux `$XDG_CONFIG_HOME/Vulman` or `~/.config/Vulman`.
 
-Vulman checks that both files exist and the database decrypts with the supplied key. If the selected or remembered workspace is empty, corrupted, or unavailable, Vulman uses the default directory and shows a warning. **Use default** resets the choice. The `--data-dir` flag overrides the saved choice for a single launch and can initialize a new workspace. Close any other Vulman process using the same database before opening it.
+Close other Vulman processes using the same database before opening it.
 
 ## Development and builds
 
-```sh
-make test
-make check
-make build
-```
+| Command | Purpose |
+| --- | --- |
+| `make test` | Go tests with the race detector. |
+| `make test-ui` | UI behavior tests. |
+| `make check` | Go static checks (`go vet`). |
+| `make build` | Desktop executable in `dist/`. |
+| `make benchmark` / `make benchmark-ui` | Storage and UI benchmarks. |
 
-Use `make test-ui` for the UI behavior tests; no npm dependencies are needed. Run `make benchmark` for full and incremental encrypted workspace reads, delta payload sizes, focused workflow updates, and full-state updates with allocation and bbolt page metrics, or `make benchmark-ui` for polling, search, and pagination timings with 1,000–50,000 synthetic findings. Benchmarks use disposable data; UI timings run in Node and exclude WebView layout and bridge transfer. Compare runs on the same machine and runtime. To compare an earlier UI snapshot, run `node scripts/benchmark-ui.cjs /path/to/earlier/app.js`.
+`make test-ui` and `make benchmark-ui` require Node.js; no npm dependencies are needed.
 
 ### UI translations
 
-Each language has a JSON file under `cmd/vulman/locales`. To add a language, copy `en.json` to a file named for its language tag, such as `pt-BR.json`. Set `name` to the label shown in the dropdown, then translate the values under `messages`. Keep message keys and placeholders such as `{count}` intact. The optional `locale` field controls number and date formatting. Remove it to use the filename’s language tag for formatting.
+Each language has a JSON file in `cmd/vulman/locales`. To add one, copy `en.json` to a language-tag filename such as `pt-BR.json`, set `name` and optional `locale`, and translate `messages`. Preserve keys and placeholders such as `{count}` and `{arg0}`.
 
-Rebuild Vulman to bundle the file. Both language dropdowns pick it up automatically, and missing messages use the English version.
+Rebuild to include the language; missing translations fall back to English. Add translations for structured Go errors as `error_<code>` entries in each locale file.
 
-Validation errors, error notifications, database update failures, scanner warnings, and new workflow history use structured error codes. Their translations are the `error_*` entries in the same separate English and Japanese JSON files. Messages are translated when displayed, so switching languages also translates newly recorded workflow warnings and logs. Existing history with text-only messages remains readable in its original language. Unknown codes fall back to English or a safe generic error.
+### Automatic GitHub releases
 
-For Go code, use `apperror.New("project_not_found", "project not found")` for a fixed message, or `apperror.Newf("upstream_http", "upstream returned HTTP %d", status)` for parameters. Add the corresponding `error_project_not_found` or `error_upstream_http` entry to both locale files. Formatted values use `{arg0}`, `{arg1}`, and so on. Wrapped error arguments become structured causes and retain `errors.Is` / `errors.As` behavior. Translation tests check code coverage and parameter consistency. Internal causes and external command output are excluded from public error payloads; unrecognized system failures receive translated troubleshooting guidance.
-
-`make release` builds the desktop app and standalone scanner for Linux and Windows on amd64 and arm64. When run on a Mac, it also builds `dist/Vulman.app` and `dist/vulman-scan-macos`. Check the platform dependencies on the machine that will run the build.
-
-`make release-windows` builds the Windows executables with the Vulman icon embedded. `make release-linux` builds the Linux executables and copies the desktop entry and SVG icon into `dist/`.
-
-To add Vulman to a Linux application menu, install the executable, desktop entry, and icon for your account. Use `vulman-linux-arm64` in the first `install` command on ARM64.
+Update the UI version in `cmd/vulman/ui/index.html` and `CFBundleShortVersionString` in `packaging/macos/Info.plist`, then increment `CFBundleVersion`. Commit and push the changes, including the release workflow and helper scripts, then push a matching tag:
 
 ```sh
-data_dir="${XDG_DATA_HOME:-$HOME/.local/share}"
-install -Dm755 dist/vulman-linux-amd64 "$HOME/.local/bin/vulman"
-install -Dm644 dist/com.vulman.app.desktop "$data_dir/applications/com.vulman.app.desktop"
-install -Dm644 dist/com.vulman.app.svg "$data_dir/icons/hicolor/scalable/apps/com.vulman.app.svg"
+git tag -a v1.3.0 -m "Vulman v1.3.0"
+git push origin v1.3.0
 ```
 
-The launcher looks for `vulman` on the desktop session's `PATH`. If needed, set `Exec` in the installed desktop entry to the absolute executable path. [Desktop Entry Specification](https://specifications.freedesktop.org/desktop-entry/latest/)
+GitHub Actions runs the checks and publishes macOS, Windows, and Linux downloads with `SHA256SUMS`. It uses the built-in `GITHUB_TOKEN`; no personal token is needed.
 
-`make release-macos` builds the macOS bundle and standalone scanner. Run it on a Mac with the Xcode Command Line Tools installed. Both builds are universal for Apple Silicon and Intel. The desktop bundle targets macOS 13 or later. The target applies ad-hoc signatures for local use. Distribution to other users can use Developer ID signing and notarization. [Wails macOS packaging guide](https://v3.wails.io/guides/build/macos/)
+### Platform packaging
 
-The macOS and Linux release targets use `cmd/vulman/ui/icon.svg` directly. If the artwork changes, regenerate the embedded Windows resources on macOS with the same SVG renderer.
+Outputs go to `dist/`. `make release` builds Linux and Windows, plus macOS when run on a Mac.
 
-```sh
-mkdir -p dist/windows-icon
-swift packaging/macos/render-icon.swift cmd/vulman/ui/icon.svg dist/windows-icon
-(cd packaging/windows && go run . ../../dist/windows-icon/icon_256x256.png ../../cmd/vulman)
-```
+| Platform | Command | Output |
+| --- | --- | --- |
+| macOS | `make release-macos` | Universal app and scanner; requires a Mac with Xcode Command Line Tools. Ad-hoc signed; see the [signing guide](https://v3.wails.io/guides/build/macos/). |
+| Windows | `make release-windows` | x64/ARM64 app and scanner with embedded icons. |
+| Linux | `make release-linux` | x64/ARM64 app and scanner, desktop entry, and SVG icon. |
+
+Linux menu integration needs `vulman` on `PATH` and the desktop entry/icon installed for your user. See the [Desktop Entry Specification](https://specifications.freedesktop.org/desktop-entry/latest/).
+
+After changing `cmd/vulman/ui/icon.svg`, regenerate Windows icon resources using the [SVG renderer](packaging/macos/render-icon.swift) and [resource generator](packaging/windows/main.go).
 
 ## Project layout
 

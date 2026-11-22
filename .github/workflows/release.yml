@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    if: github.event.deleted == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      commit: ${{ steps.version.outputs.commit }}
+      go-version: ${{ steps.version.outputs.go-version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Check tag and application versions
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/release.py validate --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
+      - name: Test release packaging and publication
+        run: python -m unittest discover -s scripts -p 'test_release.py' -v
+      - name: Test UI behavior
+        run: node --test scripts/test-ui*.cjs
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+            target: release-linux
+          - platform: windows
+            runner: ubuntu-24.04
+            target: release-windows
+          - platform: macos
+            runner: macos-15
+            target: release-macos
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      GOTOOLCHAIN: local
+      RELEASE_TAG: ${{ github.ref_name }}
+      SOURCE_COMMIT: ${{ needs.validate.outputs.commit }}
+      BUILD_TARGET: ${{ matrix.target }}
+      RELEASE_PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: ${{ needs.validate.outputs.go-version }}
+          check-latest: true
+          cache-dependency-path: |
+            go.sum
+            packaging/windows/go.sum
+      - name: Test Go behavior and recovery
+        if: matrix.platform == 'macos'
+        run: make test
+      - name: Build desktop application and standalone scanner
+        run: make "$BUILD_TARGET"
+      - name: Package and verify downloads
+        run: python scripts/release.py package --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT" --platform "$RELEASE_PLATFORM"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            dist/release/*.zip
+            dist/release/*.tar.gz
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 30
+
+  publish:
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      SOURCE_COMMIT: ${{ needs.validate.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist/release
+          merge-multiple: true
+      - name: Verify all platform packages and generate SHA-256 checksums
+        run: python scripts/release.py checksums --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT"
+      - name: Upload assets and publish the completed release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/publish_release.py --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT" --repository "$GITHUB_REPOSITORY"
