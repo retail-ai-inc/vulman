@@ -49,6 +49,39 @@ func TestRepositoryProfilesSaveWithProjectAndRejectStaleEditors(t *testing.T) {
 	}
 }
 
+func TestLockfileGenerationOptInSavesAndChangingItRequiresANewScan(t *testing.T) {
+	desktop := &Desktop{store: newTestStore(t)}
+	profile := model.ScannerProfile{Mode: "custom", Tools: []string{"npm"}, GenerateLockfiles: true}
+	project, err := desktop.CreateProject(ProjectInput{
+		Name: "Lockfiles", LocalPath: t.TempDir(), Schedule: "off",
+		RepositoryScanners: []RepositoryScannerInput{{Local: true, Profile: profile}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := desktop.State()
+	if err != nil || !saved.Projects[0].ScannerProfiles["local"].GenerateLockfiles {
+		t.Fatalf("lockfile opt-in was not persisted: %v", err)
+	}
+	if err := desktop.store.Update(func(st *model.State) error {
+		current := st.Projects[0].ScannerProfiles["local"]
+		current.NeedsScan = false
+		st.Projects[0].ScannerProfiles["local"] = current
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	profile.GenerateLockfiles = false
+	updated, err := desktop.UpdateProject(project.ID, ProjectInput{
+		Name: project.Name, LocalPath: project.LocalPath, Schedule: "off", Revision: project.Revision,
+		RepositoryScanners: []RepositoryScannerInput{{Local: true, Profile: profile}},
+	})
+	if err != nil || updated.ScannerProfiles["local"].GenerateLockfiles || !updated.ScannerProfiles["local"].NeedsScan {
+		t.Fatalf("changing generation did not invalidate scanner coverage: %+v, %v", updated.ScannerProfiles, err)
+	}
+}
+
 func TestInvalidProjectProfilesDoNotPartiallyCommit(t *testing.T) {
 	desktop := &Desktop{store: newTestStore(t)}
 	repository := "https://github.com/owner/project"

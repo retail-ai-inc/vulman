@@ -1,6 +1,6 @@
 module vulman
 
-go 1.26.0
+go 1.27.3
 
 require (
 	github.com/wailsapp/wails/v3 v3.1.0

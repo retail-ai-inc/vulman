@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -20,11 +19,12 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-// Store encrypts the complete application state at rest. The local key is owned
+// Store independently encrypts workspace records at rest. The local key is owned
 // by the OS account; it is not a defense against processes running as that user.
 type Store struct {
 	db          *bolt.DB
 	root        *os.Root
+	indexKey    [32]byte
 	aead        cipher.AEAD
 	cacheHits   atomic.Uint64
 	cacheMisses atomic.Uint64
@@ -186,6 +186,7 @@ func openStore(root *os.Root, create bool) (_ *Store, err error) {
 	}
 
 	s := &Store{db: db, root: root, aead: aead}
+	s.indexKey = recordIndexKey(key)
 	err = s.initialize(create)
 	if err != nil {
 		return nil, errors.Join(err, db.Close())
@@ -194,15 +195,25 @@ func openStore(root *os.Root, create bool) (_ *Store, err error) {
 }
 
 func (s *Store) initialize(create bool) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	migrating := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket([]byte("state")) == nil && tx.Bucket([]byte("cache-v1")) != nil {
+			return errInvalidRecords
+		}
 		if !create {
 			bucket := tx.Bucket([]byte("state"))
-			if bucket == nil || len(bucket.Get([]byte("v1"))) == 0 {
+			if bucket == nil || bucket.Bucket([]byte(recordsBucket)) == nil && len(bucket.Get([]byte("v1"))) == 0 {
 				return apperror.New("workspace_has_no_encrypted_vulman_state", "workspace has no encrypted Vulman state")
 			}
 		}
 		if _, e := tx.CreateBucketIfNotExists([]byte("state")); e != nil {
 			return e
+		}
+
+		legacy := tx.Bucket([]byte("state"))
+		migrating = legacy.Bucket([]byte(recordsBucket)) == nil && len(legacy.Get([]byte("v1"))) != 0
+		if err := s.migrateRecords(tx); err != nil {
+			return err
 		}
 
 		cache, e := tx.CreateBucketIfNotExists([]byte("cache-v1"))
@@ -230,6 +241,10 @@ func (s *Store) initialize(create bool) error {
 
 		return applyCacheLimits(cache, state.Settings)
 	})
+	if err != nil && migrating {
+		return apperror.Newf("workspace_migration_failed", "Workspace migration failed. Reopen Vulman to retry safely: %w", err)
+	}
+	return err
 }
 
 func (s *Store) Close() error {
@@ -241,24 +256,7 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) read(tx *bolt.Tx) (model.State, error) {
-	state := model.Defaults()
-	data := tx.Bucket([]byte("state")).Get([]byte("v1"))
-	if data == nil {
-		return state, nil
-	}
-
-	n := s.aead.NonceSize()
-	if len(data) < n {
-		return state, apperror.New("invalid_database_state", "invalid database state")
-	}
-
-	plain, err := s.aead.Open(nil, data[:n], data[n:], []byte("vulman-state-v1"))
-	if err != nil {
-		return state, apperror.Newf("decrypt_database", "cannot decrypt database: %w", err)
-	}
-
-	err = json.Unmarshal(plain, &state)
-	return state, err
+	return s.readRecords(tx)
 }
 
 func (s *Store) Read() (model.State, error) {
@@ -297,30 +295,24 @@ func (s *Store) Update(fn func(*model.State) error) error {
 		}
 
 		cache := tx.Bucket([]byte("cache-v1"))
-		if err = applyCacheLimits(cache, state.Settings); err != nil {
+		if err := applyCacheLimits(cache, state.Settings); err != nil {
 			return err
 		}
-
-		if err = s.persistCacheCounters(cache.Bucket([]byte("meta"))); err != nil {
+		if err := s.writeRecords(tx, state); err != nil {
 			return err
 		}
-
-		plain, err := json.Marshal(state)
-		if err != nil {
-			return err
-		}
-
-		nonce := make([]byte, s.aead.NonceSize())
-		if _, err = rand.Read(nonce); err != nil {
-			return err
-		}
-
-		data := s.aead.Seal(nonce, nonce, plain, []byte("vulman-state-v1"))
-		bucket := tx.Bucket([]byte("state"))
-		if err := bucket.Put([]byte("v1"), data); err != nil {
-			return err
-		}
-		_, err = bucket.NextSequence()
-		return err
+		return s.finishUpdate(tx)
 	})
+}
+
+func (s *Store) finishUpdate(tx *bolt.Tx) error {
+	cache := tx.Bucket([]byte("cache-v1"))
+	if cache == nil || cache.Bucket([]byte("meta")) == nil {
+		return errInvalidRecords
+	}
+	if err := s.persistCacheCounters(cache.Bucket([]byte("meta"))); err != nil {
+		return err
+	}
+	_, err := tx.Bucket([]byte("state")).NextSequence()
+	return err
 }

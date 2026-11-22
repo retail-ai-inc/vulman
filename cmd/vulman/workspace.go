@@ -49,6 +49,9 @@ type State struct {
 	NVDDatabase            *nvddb.Stats         `json:"nvd_database,omitempty"`
 	CVEDatabase            *cvedb.Stats         `json:"cve_database,omitempty"`
 	*model.State
+	Delta                *store.WorkspaceDelta       `json:"delta,omitempty"`
+	BaseVersion          string                      `json:"base_version,omitempty"`
+	MetadataChanged      bool                        `json:"metadata_changed,omitempty"`
 	Version              string                      `json:"version"`
 	TokenStatus          map[string]bool             `json:"token_status"`
 	SavedTokenStatus     map[string]bool             `json:"saved_token_status,omitempty"`
@@ -68,7 +71,8 @@ func (d *Desktop) State() (_ State, resultErr error) {
 	return d.StateSince("")
 }
 
-// StateSince returns cache metrics on every poll and sends workspace data only on a change.
+// StateSince returns an atomic revision-based delta, or a full snapshot when
+// the cursor is missing, incompatible, or belongs to another workspace.
 func (d *Desktop) StateSince(since string) (_ State, resultErr error) {
 	defer func() {
 		resultErr = apperror.Expose(resultErr)
@@ -85,7 +89,7 @@ func (d *Desktop) StateSince(since string) (_ State, resultErr error) {
 		since = ""
 	}
 
-	st, version, err := d.store.ReadSnapshot(since)
+	changes, err := d.store.ReadChanges(since)
 	if err != nil {
 		return State{}, apperror.New("could_not_read_application_data", "could not read application data")
 	}
@@ -95,7 +99,10 @@ func (d *Desktop) StateSince(since string) (_ State, resultErr error) {
 		return State{}, apperror.New("could_not_read_cache_information", "could not read cache information")
 	}
 
-	result := State{State: st, Version: prefix + version, CacheStats: cacheStats, ScannerDefinitions: scanner.Definitions()}
+	result := State{State: changes.Full, Delta: changes.Delta, Version: prefix + changes.Version, CacheStats: cacheStats, MetadataChanged: changes.View != nil}
+	if changes.Delta != nil {
+		result.BaseVersion = prefix + changes.BaseVersion
+	}
 	if d.engine != nil {
 		stats, err := d.engine.CVE.Stats()
 		if err != nil {
@@ -114,7 +121,8 @@ func (d *Desktop) StateSince(since string) (_ State, resultErr error) {
 
 		result.OSVDatabase = &osvStats
 	}
-	if st != nil {
+	if st := changes.View; st != nil {
+		result.ScannerDefinitions = scanner.Definitions()
 		result.OSVEcosystemOptions = slices.Clone(osvdb.Ecosystems)
 		suggestions := *st
 		suggestions.Settings.OSVEcosystems = nil
@@ -421,7 +429,15 @@ func (d *Desktop) CheckScanner(ctx context.Context, name string) (_ scanner.Chec
 		resultErr = apperror.Expose(resultErr)
 	}()
 
-	return scanner.Check(ctx, name)
+	if name != "composer-lock" {
+		return scanner.Check(ctx, name)
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.closed || d.engine == nil {
+		return scanner.CheckResult{}, apperror.New("application_is_stopping", "application is stopping")
+	}
+	return scanner.Check(ctx, name, d.engine.Sources.LocalOSV)
 }
 
 func (d *Desktop) ClearAPIResponseCache() (_ store.CacheStats, resultErr error) {

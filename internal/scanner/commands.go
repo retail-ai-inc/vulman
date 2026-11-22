@@ -21,7 +21,7 @@ func Supported(name string) bool {
 
 func newScannerCommand(ctx context.Context, name string) (*exec.Cmd, error) {
 	item, ok := definition(name)
-	if !ok || name == "pip-audit" {
+	if !ok || item.build == nil || name == "pip-audit" {
 		return nil, apperror.Newf("scanner_unsupported", "unsupported scanner %q", name)
 	}
 	cmd, _, err := item.build(ctx, "", nil)

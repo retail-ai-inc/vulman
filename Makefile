@@ -1,4 +1,6 @@
 GO ?= go
+NODE ?= node
+BENCHTIME ?= 5x
 GOPATH ?= $(shell $(GO) env GOPATH)
 GOLANGCI_LINT_VERSION=latest
 BUILD_DIR=dist
@@ -20,6 +22,16 @@ run:
 .PHONY: test
 test:
 	$(GO) test -race -tags production ./...
+
+.PHONY: test-ui benchmark benchmark-ui
+test-ui:
+	$(NODE) --test scripts/test-ui*.cjs
+
+benchmark:
+	$(GO) test -run '^$$' -bench '^BenchmarkWorkspace$$' -benchmem -benchtime=$(BENCHTIME) ./internal/store
+
+benchmark-ui:
+	$(NODE) scripts/benchmark-ui.cjs
 
 .PHONY: check
 check:

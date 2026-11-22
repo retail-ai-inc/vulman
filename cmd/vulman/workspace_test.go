@@ -55,7 +55,7 @@ func TestStateSinceReturnsDataOnlyAfterACommittedChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed, err := desktop.StateSince(initial.Version)
-	if err != nil || changed.State == nil || changed.Version == initial.Version || len(changed.Projects) != 1 || changed.Projects[0].ID != project.ID {
+	if err != nil || changed.State != nil || changed.Delta == nil || changed.Version == initial.Version || len(changed.Delta.Projects) != 1 || changed.Delta.Projects[0].ID != project.ID {
 		t.Fatalf("committed project was missing from the changed poll: %v", err)
 	}
 	rejected := errors.New("discard test update")

@@ -23,22 +23,23 @@ type Asset struct {
 }
 
 type Finding struct {
-	ID             string   `json:"id"`
-	AssetID        string   `json:"asset_id"`
-	ScanTarget     string   `json:"scan_target,omitempty"`
-	ScanRepository string   `json:"scan_repository,omitempty"`
-	ScanPath       string   `json:"scan_path,omitempty"`
-	Component      string   `json:"component"`
-	Version        string   `json:"version"`
-	Title          string   `json:"title"`
-	Description    string   `json:"description"`
-	Severity       string   `json:"severity"`
-	Score          float64  `json:"score"`
-	Sources        []string `json:"sources"`
-	References     []string `json:"references"`
-	FixedVersions  []string `json:"fixed_versions"`
-	Match          string   `json:"match"`
-	Aliases        []string `json:"aliases"`
+	GeneratedLockfile bool     `json:"generated_lockfile,omitempty"`
+	ID                string   `json:"id"`
+	AssetID           string   `json:"asset_id"`
+	ScanTarget        string   `json:"scan_target,omitempty"`
+	ScanRepository    string   `json:"scan_repository,omitempty"`
+	ScanPath          string   `json:"scan_path,omitempty"`
+	Component         string   `json:"component"`
+	Version           string   `json:"version"`
+	Title             string   `json:"title"`
+	Description       string   `json:"description"`
+	Severity          string   `json:"severity"`
+	Score             float64  `json:"score"`
+	Sources           []string `json:"sources"`
+	References        []string `json:"references"`
+	FixedVersions     []string `json:"fixed_versions"`
+	Match             string   `json:"match"`
+	Aliases           []string `json:"aliases"`
 }
 
 type Run struct {
@@ -82,21 +83,25 @@ type AssessmentItem struct {
 }
 
 type ScannerProfile struct {
-	Mode            string   `json:"mode"`
-	Tools           []string `json:"tools,omitempty"`
-	AdditionalTools []string `json:"additional_tools,omitempty"`
-	NeedsScan       bool     `json:"needs_scan,omitempty"`
+	IgnoreComposerPlatform bool     `json:"ignore_composer_platform,omitempty"`
+	GenerateLockfiles      bool     `json:"generate_lockfiles,omitempty"`
+	Mode                   string   `json:"mode"`
+	Tools                  []string `json:"tools,omitempty"`
+	AdditionalTools        []string `json:"additional_tools,omitempty"`
+	NeedsScan              bool     `json:"needs_scan,omitempty"`
 }
 
 type ScannerJob struct {
-	UpdateSequence uint64 `json:"update_sequence,omitempty"`
-	Findings       *int   `json:"findings,omitempty"`
-	Target         string `json:"target"`
-	Repository     string `json:"repository,omitempty"`
-	Tool           string `json:"tool"`
-	Path           string `json:"path,omitempty"`
-	Status         string `json:"status"`
-	Reason         string `json:"reason,omitempty"`
+	IgnoredComposerPlatform bool   `json:"ignored_composer_platform,omitempty"`
+	GeneratedLockfile       bool   `json:"generated_lockfile,omitempty"`
+	UpdateSequence          uint64 `json:"update_sequence,omitempty"`
+	Findings                *int   `json:"findings,omitempty"`
+	Target                  string `json:"target"`
+	Repository              string `json:"repository,omitempty"`
+	Tool                    string `json:"tool"`
+	Path                    string `json:"path,omitempty"`
+	Status                  string `json:"status"`
+	Reason                  string `json:"reason,omitempty"`
 }
 
 type DatabaseWait struct {
@@ -122,13 +127,14 @@ type SyncProgress struct {
 }
 
 type SyncStep struct {
-	ID         string       `json:"id"`
-	Kind       string       `json:"kind"`
-	Component  string       `json:"component,omitempty"`
-	Status     string       `json:"status"`
-	StartedAt  time.Time    `json:"started_at"`
-	FinishedAt time.Time    `json:"finished_at"`
-	Progress   SyncProgress `json:"progress"`
+	ID         string            `json:"id"`
+	Kind       string            `json:"kind"`
+	Component  string            `json:"component,omitempty"`
+	Status     string            `json:"status"`
+	StartedAt  time.Time         `json:"started_at"`
+	FinishedAt time.Time         `json:"finished_at"`
+	Progress   SyncProgress      `json:"progress"`
+	Failure    *apperror.Message `json:"failure,omitempty"`
 }
 
 type SyncLog struct {

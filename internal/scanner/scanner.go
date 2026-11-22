@@ -83,8 +83,15 @@ func prepareCommand(dir string, cmd *exec.Cmd, token string) error {
 }
 
 func run(ctx context.Context, dir string, cmd *exec.Cmd, token string) ([]byte, int, error) {
+	output, _, code, err := runWithStderr(ctx, dir, cmd, token)
+	return output, code, err
+}
+
+// stderr stays inside the scanner package. Only fixed diagnostic messages may
+// reach workflow logs; external output can contain credentials or private URLs.
+func runWithStderr(ctx context.Context, dir string, cmd *exec.Cmd, token string) ([]byte, []byte, int, error) {
 	if err := prepareCommand(dir, cmd, token); err != nil {
-		return nil, -1, err
+		return nil, nil, -1, err
 	}
 	var output, stderr cappedBuffer
 	cmd.Stdout = &output
@@ -93,22 +100,22 @@ func run(ctx context.Context, dir string, cmd *exec.Cmd, token string) ([]byte, 
 	code := 0
 
 	if ctx.Err() != nil {
-		return nil, -1, ctx.Err()
+		return nil, nil, -1, ctx.Err()
 	}
 
 	if output.exceeded {
-		return nil, -1, apperror.New("scanner_output_exceeded_16_mib", "scanner output exceeded 16 MiB")
+		return nil, nil, -1, apperror.New("scanner_output_exceeded_16_mib", "scanner output exceeded 16 MiB")
 	}
 
 	if err != nil {
 		if e, ok := err.(*exec.ExitError); ok {
 			code = e.ExitCode()
 		} else {
-			return nil, -1, err
+			return nil, nil, -1, err
 		}
 	}
 
-	return output.Bytes(), code, nil
+	return output.Bytes(), stderr.Bytes(), code, nil
 }
 
 type ScanEvent struct {
@@ -135,8 +142,8 @@ func EnabledTools(scanners map[string]bool) []string {
 
 // Scan preserves the English CLI report format. Desktop assessments use the
 // structured causes from ScanDetailed so saved warnings follow the UI language.
-func Scan(ctx context.Context, p model.Project, s model.Settings, dataDir string, report func(ScanEvent)) ([]model.Finding, []string) {
-	findings, problems := ScanDetailed(ctx, p, s, dataDir, report)
+func Scan(ctx context.Context, p model.Project, s model.Settings, dataDir string, report func(ScanEvent), catalogues ...LocalOSV) ([]model.Finding, []string) {
+	findings, problems := ScanDetailed(ctx, p, s, dataDir, report, catalogues...)
 	warnings := make([]string, 0, len(problems))
 	for _, problem := range problems {
 		warnings = append(warnings, apperror.Public(problem).English())
@@ -145,12 +152,12 @@ func Scan(ctx context.Context, p model.Project, s model.Settings, dataDir string
 	return findings, warnings
 }
 
-func ScanDetailed(ctx context.Context, p model.Project, s model.Settings, dataDir string, report func(ScanEvent)) ([]model.Finding, []error) {
-	result := ScanWithReport(ctx, p, s, dataDir, report)
+func ScanDetailed(ctx context.Context, p model.Project, s model.Settings, dataDir string, report func(ScanEvent), catalogues ...LocalOSV) ([]model.Finding, []error) {
+	result := ScanWithReport(ctx, p, s, dataDir, report, catalogues...)
 	return result.Findings, result.Problems
 }
 
-func ScanWithReport(ctx context.Context, p model.Project, s model.Settings, dataDir string, report func(ScanEvent)) (result Report) {
+func ScanWithReport(ctx context.Context, p model.Project, s model.Settings, dataDir string, report func(ScanEvent), catalogues ...LocalOSV) (result Report) {
 	result.Findings = []model.Finding{}
 	result.Problems = []error{}
 
@@ -211,10 +218,10 @@ func ScanWithReport(ctx context.Context, p model.Project, s model.Settings, data
 				event.Job.Target, event.Job.Repository = target.key, target.repository
 			}
 			if event.Phase == "scanner_completed" {
-				result.Completed = append(result.Completed, Coverage{Target: target.key, Tool: event.Tool, Path: event.Path})
+				result.Completed = append(result.Completed, Coverage{Target: target.key, Tool: event.Tool, Path: event.Path, GeneratedLockfile: event.Job != nil && event.Job.GeneratedLockfile})
 			}
 			report(event)
-		})
+		}, catalogues...)
 		for i := range items {
 			items[i].AssetID = FindingAssetID(target.key, items[i].ScanPath, items[i].Component)
 			items[i].ScanTarget = target.kind
@@ -291,7 +298,7 @@ func RepositoryLabel(repository string) string {
 	return parsed.Host + parsed.EscapedPath()
 }
 
-func scanRepository(ctx context.Context, root *os.Root, kind, location string, profile model.ScannerProfile, enabled map[string]bool, tokens map[string]string, maxJobs int, report func(ScanEvent)) (findings []model.Finding, warnings []error) {
+func scanRepository(ctx context.Context, root *os.Root, kind, location string, profile model.ScannerProfile, enabled map[string]bool, tokens map[string]string, maxJobs int, report func(ScanEvent), catalogues ...LocalOSV) (findings []model.Finding, warnings []error) {
 	targetFailed := func(err error) ([]model.Finding, []error) {
 		report(ScanEvent{Phase: "scanner_target_failed", Err: err})
 		return nil, []error{err}
@@ -335,12 +342,24 @@ func scanRepository(ctx context.Context, root *os.Root, kind, location string, p
 	if err != nil {
 		return targetFailed(err)
 	}
+	if kind == "local" && slices.ContainsFunc(jobs, func(job model.ScannerJob) bool { return job.Reason == "lockfile_required" }) {
+		report(ScanEvent{Phase: "scanner_copying"})
+		dir, err = copyRepository(ctx, dir, scratch)
+		if err != nil {
+			return targetFailed(err)
+		}
+		jobs, err = Plan(ctx, dir, profile, enabled)
+		if err != nil {
+			return targetFailed(err)
+		}
+	}
 
 	if len(jobs) > maxJobs {
 		return targetFailed(apperror.New("scanner_plan_limit", "Repository contains too many project directories to scan in one run."))
 	}
 
 	report(ScanEvent{Phase: "scanner_planned", Plan: jobs})
+	generated, ignoredPlatform := false, false
 
 	for _, job := range jobs {
 		emit := func(phase, status string, found int, err error) {
@@ -354,7 +373,7 @@ func scanRepository(ctx context.Context, root *os.Root, kind, location string, p
 
 		tool, _ := definition(job.Tool)
 		if job.Status == "blocked" {
-			err := apperror.Newf("scanner_input_missing", "%s requires these project files: %s. Create the required lockfile yourself before scanning.", tool.Label, inputDescription(tool))
+			err := apperror.Newf("scanner_input_missing", "%s requires these project files: %s. Add the missing files, or enable temporary lockfile generation for npm/Composer when the manifest exists.", tool.Label, inputDescription(tool))
 			warnings = append(warnings, err)
 			emit("scanner_blocked", "blocked", 0, err)
 			continue
@@ -364,6 +383,29 @@ func scanRepository(ctx context.Context, root *os.Root, kind, location string, p
 			emit("scanner_interrupted", "interrupted", 0, err)
 			warnings = append(warnings, err)
 			break
+		}
+		if job.Reason == "lockfile_required" {
+			job.Reason = "generating_lockfile"
+			emit("scanner_lockfile_started", "running", 0, nil)
+			err := generateLockfile(ctx, filepath.Join(dir, filepath.FromSlash(job.Path)), scratch, job.Tool, profile.IgnoreComposerPlatform)
+			if err != nil {
+				job.Reason = "lockfile_generation_failed"
+				phase, status := "scanner_lockfile_failed", "failed"
+				if ctx.Err() != nil {
+					phase, status, job.Reason = "scanner_interrupted", "interrupted", "interrupted"
+				}
+				emit(phase, status, 0, err)
+				warnings = append(warnings, err)
+				continue
+			}
+			generated, job.GeneratedLockfile, job.Reason = true, true, "generated_lockfile"
+			job.IgnoredComposerPlatform = job.Tool == "composer" && profile.IgnoreComposerPlatform
+			ignoredPlatform = ignoredPlatform || job.IgnoredComposerPlatform
+			emit("scanner_lockfile_completed", "running", 0, nil)
+		}
+		if tool.Scope == "repository" && generated {
+			job.GeneratedLockfile, job.Reason = true, "generated_lockfile"
+			job.IgnoredComposerPlatform = ignoredPlatform
 		}
 
 		token := tokens[tool.Token]
@@ -375,9 +417,29 @@ func scanRepository(ctx context.Context, root *os.Root, kind, location string, p
 			continue
 		}
 
-		items, err := scanTool(ctx, filepath.Join(dir, filepath.FromSlash(job.Path)), scratch, job.Tool, token, func() {
+		var items []model.Finding
+		var err error
+		if tool.Native {
+			var catalogue LocalOSV
+			if len(catalogues) > 0 {
+				catalogue = catalogues[0]
+			}
 			emit("scanning", "running", 0, nil)
-		})
+			items, err = scanComposerLock(ctx, filepath.Join(dir, filepath.FromSlash(job.Path)), catalogue)
+		} else {
+			items, err = scanTool(ctx, filepath.Join(dir, filepath.FromSlash(job.Path)), scratch, job.Tool, token, func() {
+				emit("scanning", "running", 0, nil)
+			})
+		}
+		for i := range items {
+			items[i].GeneratedLockfile = job.GeneratedLockfile
+			if tool.Scope != "repository" {
+				items[i].ScanPath = job.Path
+			}
+		}
+		if err == nil || tool.Native {
+			findings = append(findings, items...)
+		}
 		if err != nil {
 			phase, status := "scanner_failed", "failed"
 			job.Reason = "execution_failed"
@@ -389,12 +451,6 @@ func scanRepository(ctx context.Context, root *os.Root, kind, location string, p
 			continue
 		}
 
-		for i := range items {
-			if tool.Scope != "repository" {
-				items[i].ScanPath = job.Path
-			}
-		}
-		findings = append(findings, items...)
 		emit("scanner_completed", "complete", len(items), nil)
 	}
 
@@ -449,7 +505,7 @@ func scanTool(ctx context.Context, dir string, scratch *scanScratch, name, token
 	scanCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	item, ok := definition(name)
-	if !ok {
+	if !ok || item.build == nil {
 		return nil, apperror.New("unsupported_scanner", "unsupported scanner")
 	}
 	cmd, dir, err := item.build(scanCtx, dir, scratch)
@@ -499,7 +555,7 @@ func finding(source, id, pkg, version, title, sev, fixed, ref string) model.Find
 
 func Parse(name string, data []byte) ([]model.Finding, error) {
 	definition, ok := definition(name)
-	if !ok {
+	if !ok || definition.parse == nil {
 		return nil, apperror.New("unsupported_scanner", "unsupported scanner")
 	}
 

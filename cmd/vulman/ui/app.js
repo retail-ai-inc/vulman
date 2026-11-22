@@ -24,19 +24,31 @@ const icons = {
 const icon = n => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[n]||icons.stack}</svg>`;
 let componentDraft = null;
 
+function showDialog(dialog) {
+  const body = $('.dialog-body', dialog);
+  if (body) body.setAttribute('tabindex', '0');
+
+  dialog.showModal();
+  if (body) {
+    body.scrollTop = 0;
+    if (body.scrollHeight > body.clientHeight && !$('[autofocus]', dialog)) body.focus({preventScroll:true});
+  }
+}
+
 async function confirmAction(message) {
   const dialog = $('#confirm-dialog');
   $('#confirm-message').textContent = message;
   dialog.returnValue = '';
   return new Promise(resolve => {
     dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), {once:true});
-    dialog.showModal();
+    showDialog(dialog);
   });
 }
 
 const defaultLanguage = 'en';
 let localizations = {};
 let state, lang=defaultLanguage, toastTimer, currentFinding, clearing=new Set();
+let adviceRequestSequence = 0;
 const syncSelection = {};
 const syncModeSelection = {};
 const syncSeveritySelection = {};
@@ -50,9 +62,14 @@ const newProjectHash = '#projects/new';
 let newProjectReturnHash = '';
 let projectTokenSetup = null;
 let projectDeleteDraft = null;
+let lockfileOptionsContext = null;
 const findingsPerPage = 100;
 const findingSeverities = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
 let findingsPage = 1;
+let pendingFindingSearch = 0;
+const findingIndexes = new WeakMap();
+const emptyFindings = [];
+let findingQueryCache = null;
 let filter={search:'',severity:'',project:'',match:'',stack:''}, projectTab='vulnerabilities';
 const t = key => localizations[lang]?.messages[key] || localizations[defaultLanguage]?.messages[key] || key;
 // Messages are translated when rendered so stored workflow history follows the
@@ -108,11 +125,50 @@ function renderNav(){const active=route()[0]||'overview';const findingCount=stat
 function heading(title,sub='',actions='',eyebrow=''){return `<div class="page-heading"><div>${eyebrow?`<div class="eyebrow">${esc(eyebrow)}</div>`:''}<h1>${esc(title)}</h1>${sub?`<p class="subtitle">${esc(sub)}</p>`:''}</div><div class="heading-actions">${actions}</div></div>`;}
 function empty(title,sub,art='projects',actions=''){return `<div class="empty-state"><div class="empty-art">${icon(art)}</div><h3>${t(title)}</h3><p>${t(sub)}</p>${actions}</div>`;}
 const expandedRuns=new Set();
+const expandedNoticeGroups=new Set();
 const dismissedRuns=new Set();
 const dismissedDatabaseWarnings = new Set();
 const databaseWarningAgeDays = 7;
 function canDismissWorkflow(run){return !!run&&['complete','partial','failed','interrupted','stopped'].includes(run.status);}
 function stepLabel(step){return ({nvd:'NIST NVD',osv:'OSV.dev',cve:'CVE Program',scanner:t('codeScanners'),save:t('saveResults')}[step.kind]||step.kind)+(step.component?' · '+step.component:'');}
+function workflowStepMarker(project, run, step, index) {
+  if (['failed','interrupted'].includes(step.status)) {
+    const label = t('showStepFailure').replace('{step}', () => stepLabel(step));
+    return `<button type="button" class="workflow-step-marker workflow-failure-trigger" data-step-failure data-project-id="${esc(project.id)}" data-run-id="${esc(run.id)}" data-step-index="${index}" aria-haspopup="dialog" aria-controls="workflow-failure-dialog" aria-label="${esc(label)}" title="${esc(label)}">!</button>`;
+  }
+  return `<span class="workflow-step-marker" aria-hidden="true">${{complete:'✓',running:'↻',stopped:'■',skipped:'–',pending:'·'}[step.status] || '·'}</span>`;
+}
+
+function workflowStepFailure(run, step) {
+  const failure = messageText(step.failure);
+  if (failure) return failure;
+
+  // Older workflows kept the cause only in their bounded log. Match this step
+  // exactly so another component's failure is never shown as its explanation.
+  const entry = (run.logs || []).slice().reverse().find(entry => entry.step_id === step.id && ['failed','interrupted'].includes(entry.event));
+  const detail = entry && (messageText(entry.message) || entry.detail);
+  return detail || t(step.status === 'interrupted' ? 'stepInterruptionUnavailable' : 'stepFailureUnavailable');
+}
+
+function showWorkflowStepFailure(projectID, runID, stepIndex) {
+  if (!Number.isSafeInteger(stepIndex) || stepIndex < 0) return false;
+  const project = state?.projects.find(project => project.id === projectID);
+  const run = project?.runs?.find(run => run.id === runID);
+  const step = run?.steps?.[stepIndex];
+  if (!step || !['failed','interrupted'].includes(step.status)) return false;
+
+  const dialog = $('#workflow-failure-dialog');
+  $('#workflow-failure-status').innerHTML = pill(t(step.status), step.status);
+  $('#workflow-failure-step').textContent = stepLabel(step);
+  $('#workflow-failure-context').textContent = [project.name, validDate(step.finished_at) ? fmtDate(step.finished_at) : ''].filter(Boolean).join(' · ');
+  $('#workflow-failure-progress').textContent = stepProgress(step);
+  $('#workflow-failure-reason').textContent = workflowStepFailure(run, step);
+  $('.close-dialog', dialog).setAttribute('aria-label', t('close'));
+  localize(dialog);
+  showDialog(dialog);
+  return true;
+}
+
 function interruptionMessage(run, fullProject = false) {
   if (run.logs?.some(entry => entry.event === 'queue_interrupted')) return t('event_queue_interrupted');
 
@@ -125,7 +181,7 @@ function scanTargetLabel(target, repository) {
 }
 
 function findingVersionLabel(finding) {
-  return [finding.version, finding.scan_path, scanTargetLabel(finding.scan_target, finding.scan_repository)].filter(Boolean).join(' · ');
+  return [finding.version, finding.scan_path, scanTargetLabel(finding.scan_target, finding.scan_repository), finding.generated_lockfile ? t('scannerGeneratedLockfile') : ''].filter(Boolean).join(' · ');
 }
 
 function projectRepositories(project) {
@@ -172,7 +228,7 @@ function workflowLogs(run, steps) {
       parts.push(t(key).replace('{count}', entry.findings.toLocaleString(formatLocale())));
     }
     const cleanup = event === 'scanner_cleanup_completed' || event === 'scanner_cleanup_failed';
-    const error = ['failed', 'interrupted', 'scanner_failed', 'scanner_interrupted', 'scanner_target_failed', 'scanner_cleanup_failed', 'database_wait_failed', 'database_wait_interrupted'].includes(event);
+    const error = ['failed', 'interrupted', 'scanner_failed', 'scanner_interrupted', 'scanner_target_failed', 'scanner_cleanup_failed', 'scanner_lockfile_failed', 'database_wait_failed', 'database_wait_interrupted'].includes(event);
     const time = entry.at ? `<time>${esc(new Date(entry.at).toLocaleTimeString(formatLocale(),{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}))}</time>` : '<time>—</time>';
     const text = esc(parts.filter(Boolean).join(' · '));
     return `<li class="${error ? 'workflow-log-error' : ''}">${time}<span>${cleanup ? `<strong>${text}</strong>` : text}</span></li>`;
@@ -361,7 +417,7 @@ function runSelectionLabel(run) {
   return run.asset_name || t('syncEverything');
 }
 
-function workflowBody(project,run,dismissible=false){
+function workflowBody(project,run,dismissible=false,includeScannerNotices=true){
   const steps=run.steps||[],done=steps.filter(s=>!['pending','running'].includes(s.status)).length;
   const current=steps.find(s=>s.status==='running')||(run.status==='running'?steps.find(s=>s.status==='pending'):null);
   const expanded=expandedRuns.has(run.id),detailsID='workflow-details-'+run.id;
@@ -370,11 +426,11 @@ function workflowBody(project,run,dismissible=false){
   const codeScan = run.mode === 'code';
   const scope = [runSelectionLabel(run), syncSeverityLabel(run.severity), codeScan ? '' : t('mode_' + (run.mode || 'auto'))].filter(Boolean).join(' · ');
   const progress=t('stepsFinished').replace('{done}',done).replace('{total}',steps.length);
-  return `<div class="workflow-heading"><div><h3>${t(codeScan ? 'codeScanWorkflow' : 'workflow')} · ${esc(project.name)}</h3><p>${esc(scope)} · ${t('elapsed')} ${workflowElapsed(run)}</p>${validDate(run.data_checked_at)?`<p title="${t('sourceDataHint')}">${t('sourceDataChecked')}: ${fmtDate(run.data_checked_at)}</p>`:''}</div><div class="workflow-actions">${pill(t(run.status),run.status)}${workflowControls(project,run)}<button type="button" class="button secondary small" data-toggle-workflow="${esc(run.id)}" aria-expanded="${expanded}" aria-controls="${esc(detailsID)}">${t(expanded?'showLess':'showMore')}</button>${dismissible&&canDismissWorkflow(run)?`<button type="button" class="icon-button workflow-close" data-dismiss-workflow="${esc(run.id)}" data-project-id="${esc(project.id)}" aria-label="${t('closeWorkflow')}" title="${t('closeWorkflow')}">×</button>`:''}</div></div><div class="workflow-progress"><progress max="${Math.max(1,steps.length)}" value="${done}" aria-label="${esc(progress)}"></progress><span>${esc(progress)}</span></div><div class="workflow-current" role="status">${summary?esc(summary):current?`${esc(stepLabel(current))}<span>${esc(stepProgress(current)||t('phase_queued'))}</span>`:esc(t(run.status==='running'?'finishing':run.status))}</div>${databaseWaitNotice(run)}${scannerRunSummary(run)}${codeScanSeverityBreakdown(project, run)}<div class="workflow-details" id="${esc(detailsID)}" ${expanded?'':'hidden'}>${expanded?`<ol class="workflow-stepper">${steps.map(step=>`<li class="workflow-step ${esc(step.status)}"><span class="workflow-step-marker" aria-hidden="true">${{complete:'✓',running:'↻',failed:'!',interrupted:'!',stopped:'■',skipped:'–',pending:'·'}[step.status]||'·'}</span><div><strong>${esc(stepLabel(step))}</strong><p>${esc(stepProgress(step))}</p></div>${pill(t(step.status),step.status)}</li>`).join('')}</ol>${run.scanner_jobs?.length ? `<div class="workflow-log-heading"><h3>${t('scannerRunPlan')}</h3><small>${t('scannerJobsOrderHint')}</small></div>${scannerJobHTML(run.scanner_jobs, run.logs)}` : ''}<div class="workflow-log-heading"><h3>${t('workflowLogs')}</h3><small>${t('workflowLogsHint')}</small></div><ol class="workflow-logs" tabindex="0" aria-label="${esc(t('workflowLogs'))}">${workflowLogs(run, steps)}</ol>`:''}</div>`;
+  return `<div class="workflow-heading"><div><h3>${t(codeScan ? 'codeScanWorkflow' : 'workflow')} · ${esc(project.name)}</h3><p>${esc(scope)} · ${t('elapsed')} ${workflowElapsed(run)}</p>${validDate(run.data_checked_at)?`<p title="${t('sourceDataHint')}">${t('sourceDataChecked')}: ${fmtDate(run.data_checked_at)}</p>`:''}</div><div class="workflow-actions">${pill(t(run.status),run.status)}${workflowControls(project,run)}<button type="button" class="button secondary small" data-toggle-workflow="${esc(run.id)}" aria-expanded="${expanded}" aria-controls="${esc(detailsID)}">${t(expanded?'showLess':'showMore')}</button>${dismissible&&canDismissWorkflow(run)?`<button type="button" class="icon-button workflow-close" data-dismiss-workflow="${esc(run.id)}" data-project-id="${esc(project.id)}" aria-label="${t('closeWorkflow')}" title="${t('closeWorkflow')}">×</button>`:''}</div></div><div class="workflow-progress"><progress max="${Math.max(1,steps.length)}" value="${done}" aria-label="${esc(progress)}"></progress><span>${esc(progress)}</span></div><div class="workflow-current" role="status">${summary?esc(summary):current?`${esc(stepLabel(current))}<span>${esc(stepProgress(current)||t('phase_queued'))}</span>`:esc(t(run.status==='running'?'finishing':run.status))}</div>${databaseWaitNotice(run)}${includeScannerNotices ? scannerRunSummary(run) : ''}${codeScanSeverityBreakdown(project, run)}<div class="workflow-details" id="${esc(detailsID)}" ${expanded?'':'hidden'}>${expanded?`<ol class="workflow-stepper">${steps.map((step,index)=>`<li class="workflow-step ${esc(step.status)}">${workflowStepMarker(project,run,step,index)}<div><strong>${esc(stepLabel(step))}</strong><p>${esc(stepProgress(step))}</p></div>${pill(t(step.status),step.status)}</li>`).join('')}</ol>${run.scanner_jobs?.length ? `<div class="workflow-log-heading"><h3>${t('scannerRunPlan')}</h3><small>${t('scannerJobsOrderHint')}</small></div>${scannerJobHTML(run.scanner_jobs, run.logs)}` : ''}<div class="workflow-log-heading"><h3>${t('workflowLogs')}</h3><small>${t('workflowLogsHint')}</small></div><ol class="workflow-logs" tabindex="0" aria-label="${esc(t('workflowLogs'))}">${workflowLogs(run, steps)}</ol>`:''}</div>`;
 }
-function workflowRun(project,run,dismissible=false){if(dismissible&&canDismissWorkflow(run)&&dismissedRuns.has(run.id))return '';return run?.steps?.length?`<section class="sync-workflow ${esc(run.status)}" data-sync-project-id="${esc(project.id)}" data-sync-run="${esc(run.id)}" data-sync-scope="${scopedAssessment(run) ? 'scoped' : 'full'}" data-workflow-dismissible="${dismissible}">${workflowBody(project,run,dismissible)}</section>`:'';}
+function workflowRun(project,run,dismissible=false,includeScannerNotices=true){if(dismissible&&canDismissWorkflow(run)&&dismissedRuns.has(run.id))return '';return run?.steps?.length?`<section class="sync-workflow ${esc(run.status)}" data-sync-project-id="${esc(project.id)}" data-sync-run="${esc(run.id)}" data-sync-scope="${scopedAssessment(run) ? 'scoped' : 'full'}" data-workflow-dismissible="${dismissible}" data-workflow-notices="${includeScannerNotices}">${workflowBody(project,run,dismissible,includeScannerNotices)}</section>`:'';}
 function mountActiveSyncs(){if(['project','settings','activity'].includes(route()[0]))return;const html=state.projects.filter(p=>p.syncing).map(p=>workflowRun(p,p.runs?.[0])).join('');$('.page-heading')?.insertAdjacentHTML('afterend','<div id="active-syncs">'+html+'</div>');}
-function updateSyncPanels(runID){
+function updateSyncPanels(runID, changedRuns){
   for (const el of $$('[data-sync-run]')) {
     if (runID && el.dataset.syncRun !== runID) continue;
     const project = state.projects.find(p => p.id === el.dataset.syncProjectId);
@@ -386,11 +442,13 @@ function updateSyncPanels(runID){
       continue;
     }
     // Replacing paused or finished panels during polling restarts their animations.
-    if (runID || (run.status !== 'paused' && !canDismissWorkflow(run))) {
+    if (runID || changedRuns?.has(run.id) || (run.status !== 'paused' && !canDismissWorkflow(run))) {
       const logs = $('.workflow-logs', el);
       const scrollTop = logs?.scrollTop;
       const focused = logs && document.activeElement === logs;
-      el.innerHTML = workflowBody(project, run, dismissible);
+      el.className = 'sync-workflow ' + run.status;
+      el.dataset.syncScope = scopedAssessment(run) ? 'scoped' : 'full';
+      el.innerHTML = workflowBody(project, run, dismissible, el.dataset.workflowNotices !== 'false');
       if (logs) {
         const updated = $('.workflow-logs', el);
         if (updated) {
@@ -407,9 +465,47 @@ function toggleWorkflow(id) {
   else expandedRuns.add(id);
   updateSyncPanels(id);
 }
-function progressSnapshot(st){const {cache_stats,cve_database,nvd_database,osv_database,version,...rest}=st;return JSON.stringify({...rest,projects:st.projects.map(p=>({...p,runs:(p.runs||[]).map(({steps,logs,data_checked_at,...run})=>run)}))});}
-function applyPollingState(next) {
-  const [page, id, view] = route();
+const snapshotKeys = Object.keys, snapshotOwns = Object.hasOwn, snapshotArray = Array.isArray;
+const sameSnapshotValue = function sameSnapshotValue(left, right) {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  if (snapshotArray(left)) {
+    if (!snapshotArray(right) || left.length !== right.length) return false;
+    for (let i = 0; i < left.length; i++) {
+      if (left[i] !== right[i] && !sameSnapshotValue(left[i], right[i])) return false;
+    }
+    return true;
+  }
+  if (snapshotArray(right)) return false;
+  const keys = snapshotKeys(left);
+  if (keys.length !== snapshotKeys(right).length) return false;
+  for (const key of keys) {
+    if (!snapshotOwns(right, key) || (left[key] !== right[key] && !sameSnapshotValue(left[key], right[key]))) return false;
+  }
+  return true;
+};
+
+function reuseFindingSnapshots(next, previous) {
+  const projects = new Map(previous.projects.map(project => [project.id, project]));
+  let unchanged = next.projects.length === previous.projects.length;
+  for (const project of next.projects) {
+    const old = projects.get(project.id);
+    if (old && sameSnapshotValue(old.findings, project.findings)) project.findings = old.findings;
+    else unchanged = false;
+  }
+  return unchanged;
+}
+
+// Compare small page metadata only after all finding content has been checked.
+// Equal finding arrays retain their identity for the search index and query cache.
+function progressSnapshot(st) {
+  const {cache_stats,cve_database,nvd_database,osv_database,version,...rest} = st;
+  return JSON.stringify({...rest, projects:st.projects.map(({findings,...project}) => ({
+    ...project, runs:(project.runs || []).map(({steps,logs,data_checked_at,...run}) => run),
+  }))});
+}
+function updatePollingMetrics(next) {
+  const [page] = route();
   if (next.osv_database) {
     state.osv_database = next.osv_database;
     if (page === 'settings') updateOSVDatabaseStatus(next.osv_database);
@@ -423,10 +519,107 @@ function applyPollingState(next) {
     state.cve_database = next.cve_database;
     if (page === 'settings') updateCVEDatabaseStatus(next.cve_database);
   }
-  if (next.projects === undefined) {
+  if (next.cache_stats !== undefined) {
     state.cache_stats = next.cache_stats;
     if (page === 'settings') updateCacheMetrics(next.cache_stats);
-    else updateSyncPanels();
+  }
+}
+
+function runDisplaySnapshot(run) {
+  const {steps,logs,data_checked_at,...display} = run;
+  return JSON.stringify(display);
+}
+
+function mergeWorkflowDelta(previous, patch, compareDisplay = true) {
+  if (!patch || typeof patch !== 'object' || (!Array.isArray(patch.order) && patch.order !== null) ||
+      (patch.updated != null && !Array.isArray(patch.updated))) return null;
+  const order = patch.order || [], updates = new Map();
+  for (const item of patch.updated || []) {
+    if (!item || !Number.isInteger(item.index) || item.index < 0 || item.index >= order.length ||
+        updates.has(item.index) || !item.run || item.run.id !== order[item.index]) return null;
+    updates.set(item.index, item.run);
+  }
+  const old = previous || [];
+  const orderChanged = old.length !== order.length || old.some((run, index) => run.id !== order[index]);
+  let displayChanged = orderChanged || (previous === null) !== (patch.order === null);
+  const runs = [];
+  for (let index = 0; index < order.length; index++) {
+    const run = updates.get(index) || old[index];
+    if (!run || typeof order[index] !== 'string' || run.id !== order[index]) return null;
+    if (!old[index] || old[index].id !== run.id ||
+        (compareDisplay && updates.has(index) && runDisplaySnapshot(old[index]) !== runDisplaySnapshot(run))) displayChanged = true;
+    runs.push(run);
+  }
+  return {runs:patch.order === null ? null : runs, displayChanged, orderChanged};
+}
+
+function applyWorkspaceDelta(next) {
+  if (!state || next.base_version !== state.version || typeof next.version !== 'string' || !next.version ||
+      !next.delta || typeof next.delta !== 'object' || Array.isArray(next.delta)) return false;
+  const delta = next.delta, [page, id, view] = route();
+  if ((delta.projects != null && !Array.isArray(delta.projects)) ||
+      (delta.project_order !== undefined && delta.project_order !== null && !Array.isArray(delta.project_order)) ||
+      (delta.settings !== undefined && (!delta.settings || typeof delta.settings !== 'object' || Array.isArray(delta.settings)))) return false;
+  const projects = new Map(state.projects.map(project => [project.id, project]));
+  const seen = new Set(), changedRuns = new Set();
+  let renderPage = delta.settings !== undefined || delta.project_order !== undefined;
+  for (const patch of delta.projects || []) {
+    if (!patch || typeof patch.id !== 'string' || seen.has(patch.id)) return false;
+    seen.add(patch.id);
+    const old = projects.get(patch.id);
+    if (!old && (!patch.metadata || !Object.hasOwn(patch,'findings') || !patch.workflows)) return false;
+    let project = {...old};
+    if (patch.metadata !== undefined) {
+      if (!patch.metadata || patch.metadata.id !== patch.id) return false;
+      const {findings,runs,...metadata} = patch.metadata;
+      project = {...project,...metadata};
+      renderPage = true;
+    }
+    if (Object.hasOwn(patch,'findings')) {
+      if (patch.findings !== null && !Array.isArray(patch.findings)) return false;
+      project.findings = patch.findings;
+      renderPage = true;
+    }
+    if (Object.hasOwn(patch,'workflows')) {
+      const displayVisible = page !== 'vulnerabilities';
+      const merged = mergeWorkflowDelta(old?.runs, patch.workflows, displayVisible);
+      if (!merged) return false;
+      project.runs = merged.runs;
+      for (const item of patch.workflows.updated || []) changedRuns.add(item.run.id);
+      renderPage ||= merged.orderChanged || (displayVisible && merged.displayChanged);
+    }
+    projects.set(patch.id, project);
+  }
+  const order = delta.project_order === undefined ? state.projects.map(project => project.id) : delta.project_order || [];
+  if (new Set(order).size !== order.length || order.some(id => typeof id !== 'string' || !projects.has(id)) ||
+      [...seen].some(id => !order.includes(id))) return false;
+  const updated = {...state, projects:order.map(id => projects.get(id)), version:next.version};
+  if (delta.settings !== undefined && page !== 'settings') updated.settings = delta.settings;
+  if (next.metadata_changed) {
+    updated.scan_repositories = next.scan_repositories || {};
+    updated.token_status = next.token_status || {};
+    updated.saved_token_status = next.saved_token_status || {};
+    updated.osv_ecosystem_options = next.osv_ecosystem_options || [];
+    updated.osv_suggested_ecosystems = next.osv_suggested_ecosystems || [];
+    updated.scanner_definitions = next.scanner_definitions || [];
+    for (const key of ['storage_paths','data_directory','default_data_directory','storage_warning']) updated[key] = next[key];
+  }
+  state = updated;
+  updatePollingMetrics(next);
+  if (page === 'settings' || (page === 'project' && view === 'edit') || location.hash === newProjectHash) return true;
+  if (page === 'project' && view === 'delete') {renderProjectDeletion(id); return true;}
+  lang = supportedLanguage(state.settings.language);
+  if (renderPage) {localize(); render();}
+  else {updateSyncPanels(undefined, changedRuns); updateDatabaseFreshnessWarning();}
+  return true;
+}
+
+function applyPollingState(next) {
+  if (next.delta !== undefined) return applyWorkspaceDelta(next);
+  const [page, id, view] = route();
+  updatePollingMetrics(next);
+  if (next.projects === undefined) {
+    if (page !== 'settings') updateSyncPanels();
     updateDatabaseFreshnessWarning();
     return;
   }
@@ -444,7 +637,8 @@ function applyPollingState(next) {
     renderProjectDeletion(id);
     return;
   }
-  const progressOnly = progressSnapshot(next) === progressSnapshot(state);
+  const findingsUnchanged = reuseFindingSnapshots(next, state);
+  const progressOnly = findingsUnchanged && progressSnapshot(next) === progressSnapshot(state);
   state = next;
   lang = supportedLanguage(state.settings.language);
   if (progressOnly) {
@@ -775,6 +969,7 @@ function updateTechStackFilter(projectID, replaceOptions = false) {
 }
 
 function changeTechStackFilterSelection(input, projectID) {
+  cancelFindingSearch();
   if (input.matches('[data-stack-filter-all]')) filter.stack = input.checked ? '' : [];
   else {
     const keys = new Set(techStackFilterSelection() || []);
@@ -849,36 +1044,81 @@ function findingPagination(pages) {
   const pageLabel = t('findingPage').replace('{page}', formatResultNumber(findingsPage)).replace('{pages}', formatResultNumber(pages));
   return `<nav class="findings-pagination" aria-label="${t('findingPages')}"><button type="button" class="button secondary small" data-finding-page="previous" ${findingsPage === 1 ? 'disabled' : ''}>${t('previousPage')}</button><span>${esc(pageLabel)}</span><button type="button" class="button secondary small" data-finding-page="next" ${findingsPage === pages ? 'disabled' : ''}>${t('nextPage')}</button></nav>`;
 }
-function findingsTable(projectID) {
+// Finding arrays are immutable desktop snapshots. New results replace the array;
+// progress-only polls reuse it. Weak keys let obsolete indexes be collected.
+function findingIndex(findings) {
+  const cached = findingIndexes.get(findings);
+  if (cached?.length === findings.length) return cached.buckets;
+  const buckets = findingSeverities.map(() => []);
+  for (const finding of findings) {
+    const rank = findingSeverities.indexOf(finding.severity);
+    buckets[rank < 0 ? buckets.length - 1 : rank].push({
+      finding, search:null,
+    });
+  }
+  findingIndexes.set(findings, {length:findings.length, buckets});
+  return buckets;
+}
+
+function queryFindings(projectID) {
+  const snapshots = state.projects.map(project => project.findings || emptyFindings);
+  const key = JSON.stringify([
+    state.data_directory, state.storage_paths?.database,
+    state.version?.includes(':') ? state.version.split(':', 1)[0] : '',
+    projectID, filter.search.toLowerCase(), filter.severity, filter.project, filter.match, filter.stack,
+    state.projects.map(project => [project.id, project.name, project.local_path]), state.scan_repositories,
+  ]);
+  if (findingQueryCache?.key === key && snapshots.length === findingQueryCache.snapshots.length &&
+      snapshots.every((snapshot, index) => snapshot === findingQueryCache.snapshots[index] && snapshot.length === findingQueryCache.lengths[index])) {
+    return findingQueryCache.result;
+  }
+
   const search = filter.search.toLowerCase();
   const scopes = techStackFilterScopes();
   const items = [];
   let total = 0;
   const selectedSeverityCounts = scopes === null ? null : {};
-  for (const project of state.projects) {
+  const projects = [];
+  for (let index = 0; index < state.projects.length; index++) {
+    const project = state.projects[index];
     if (projectID && projectID !== project.id) continue;
-    const findings = project.findings || [];
+    const findings = snapshots[index];
     total += findings.length;
     if (!projectID && filter.project && filter.project !== project.id) continue;
     const scope = scopes?.get(project.id);
     if (scopes && !scope) continue;
-    for (const finding of findings) {
-      if (scope && !findingMatchesStackScope(finding, scope)) continue;
-      if ((filter.match && filter.match !== finding.match) ||
-          (search && ![finding.id, finding.title, finding.component].join(' ').toLowerCase().includes(search))) continue;
-      const severity = findingSeverities.includes(finding.severity) ? finding.severity : 'UNKNOWN';
-      if (selectedSeverityCounts) {
-        selectedSeverityCounts[severity] = (selectedSeverityCounts[severity] || 0) + 1;
+    projects.push({project:{id:project.id, name:project.name}, buckets:findingIndex(findings), scope});
+  }
+  // Severity buckets preserve the original project/finding order within each
+  // severity without sorting the complete result set on every query or page.
+  for (let rank = 0; rank < findingSeverities.length; rank++) {
+    const severity = findingSeverities[rank];
+    if (!selectedSeverityCounts && filter.severity && filter.severity !== severity) continue;
+    for (const {project, buckets, scope} of projects) {
+      for (const entry of buckets[rank]) {
+        const finding = entry.finding;
+        if (scope && !findingMatchesStackScope(finding, scope)) continue;
+        if (filter.match && filter.match !== finding.match) continue;
+        if (search) {
+          entry.search ??= [finding.id, finding.title, finding.component].join(' ').toLowerCase();
+          if (!entry.search.includes(search)) continue;
+        }
+        if (selectedSeverityCounts) selectedSeverityCounts[severity] = (selectedSeverityCounts[severity] || 0) + 1;
+        if (!filter.severity || filter.severity === severity) items.push({finding, project});
       }
-      if (filter.severity && filter.severity !== severity) continue;
-      items.push({finding, project});
     }
   }
-  items.sort((a, b) => findingSeverities.indexOf(a.finding.severity) - findingSeverities.indexOf(b.finding.severity));
+  const result = {items, total, selectedSeverityCounts, scoped:scopes !== null};
+  findingQueryCache = {key, snapshots, lengths:snapshots.map(snapshot => snapshot.length), result};
+  return result;
+}
+
+function findingsTable(projectID) {
+  const {items, total, selectedSeverityCounts, scoped} = queryFindings(projectID);
   const pages = Math.max(1, Math.ceil(items.length / findingsPerPage));
   findingsPage = Math.max(1, Math.min(findingsPage, pages));
   const start = (findingsPage - 1) * findingsPerPage;
-  const filtered = filter.search || filter.severity || scopes !== null || filter.match || (!projectID && filter.project);
+  const filtered = filter.search || filter.severity || scoped || filter.match || (!projectID && filter.project);
   const severitySummary = selectedSeverityCounts
     ? `<div class="scan-location-severity"><span>${t('severityBreakdown')}</span>${severityCountList(selectedSeverityCounts)}</div>` : '';
   const toolbar = `<div class="findings-toolbar">${resultsSummary(items.length, total, start, filtered)}${findingPagination(pages)}</div>` + severitySummary;
@@ -889,14 +1129,48 @@ function findingsTable(projectID) {
   const rows = items.slice(start, start + findingsPerPage).map(({finding:f, project}) => `<tr data-finding="${esc(f.id)}" data-asset="${esc(f.asset_id)}" data-project="${esc(project.id)}" tabindex="0" role="button" aria-label="${esc(f.id+' '+f.title)}"><td><span class="finding-title">${esc(f.title||f.id)}</span><span class="finding-id">${esc(f.id)} · ${esc(f.sources.join(' + '))}</span></td><td>${esc(f.component)}<span class="component-version">${esc(findingVersionLabel(f))}</span></td><td>${pill(t(severityKey(f.severity)),severityKey(f.severity))}</td><td>${pill(t(f.match),f.match==='review'?'review':'')}</td>${!projectID?`<td>${esc(project.name)}</td>`:''}</tr>`).join('');
   return toolbar + `<div class="table-wrap"><table class="table"><thead><tr><th>${t('advisory')}</th><th>${t('component')}</th><th>${t('severity')}</th><th>${t('match')}</th>${!projectID?`<th>${t('project')}</th>`:''}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
+function cancelFindingSearch() {
+  clearTimeout(pendingFindingSearch);
+  pendingFindingSearch = 0;
+}
+
 function bindFilters(projectID) {
+  cancelFindingSearch();
   const updateResults = () => {
+    cancelFindingSearch();
     findingsPage = 1;
     $('#finding-results').innerHTML = findingsTable(projectID);
   };
-  $('#finding-search')?.addEventListener('input', e => {
+  const input = $('#finding-search');
+  let composing = false;
+  const schedule = () => {
+    cancelFindingSearch();
+    if (!filter.search) {updateResults(); return;}
+    const hash = location.hash, results = $('#finding-results');
+    pendingFindingSearch = setTimeout(() => {
+      pendingFindingSearch = 0;
+      if (location.hash === hash && input === $('#finding-search') && results === $('#finding-results') && input.isConnected !== false) updateResults();
+    }, 120);
+  };
+  input?.addEventListener('input', e => {
     filter.search = e.target.value;
-    updateResults();
+    if (composing || e.isComposing) cancelFindingSearch();
+    else schedule();
+  });
+  input?.addEventListener('compositionstart', () => {
+    composing = true;
+    cancelFindingSearch();
+  });
+  input?.addEventListener('compositionend', e => {
+    composing = false;
+    filter.search = e.target.value;
+    schedule();
+  });
+  input?.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !composing && !e.isComposing) {
+      e.preventDefault();
+      updateResults();
+    }
   });
   $('#tech-stack-filter')?.addEventListener('change', e => {
     if (e.target.matches('[data-stack-filter-item], [data-stack-filter-all]')) changeTechStackFilterSelection(e.target, projectID);
@@ -912,6 +1186,7 @@ function bindFilters(projectID) {
   }
 }
 function turnFindingPage(direction) {
+  cancelFindingSearch();
   const [page, projectID] = route();
   const results = $('#finding-results');
   findingsPage += direction === 'next' ? 1 : -1;
@@ -933,12 +1208,12 @@ function componentCriticalCount(project, asset) {
 function renderProject(id){const p=state.projects.find(p=>p.id===id);if(!p){location.hash='projects';return;}
   const latestRun = p.runs?.[0];
   const fullRun = latestFullRun(p);
-  const workflow = workflowRun(p, latestRun, true);
+  const workflow = workflowRun(p, latestRun, true, false);
   let statusBadge = workflow && latestRun?.status === 'paused' ? '' : projectStatus(p);
   if (!p.syncing && fullRun?.status === 'interrupted') {
     statusBadge = pill(interruptionMessage(fullRun, true), 'interrupted full-sync-interruption');
   }
-  $('#main').innerHTML=heading(p.name,p.description||t('projectPanelSub'),`<button class="button secondary" data-action="edit-project" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('edit')}${t('editProject')}</button><button type="button" class="button secondary" data-action="scan-code" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${icon('scanCode')}${t('runCodeScan')}</button>${syncControls(p)}`)+`<div class="project-meta">${statusBadge}${pill(t(p.schedule))}${validDate(p.last_sync)?pill(t('lastSync')+' · '+fmtDate(p.last_sync)):''}${validDate(p.data_checked_at)?pill(t('sourceDataChecked')+' · '+fmtDate(p.data_checked_at)):''}${validDate(p.next_run)?pill(t('nextRun')+' · '+fmtDate(p.next_run)):''}${projectRepositoryLinks(p)}</div>${scannerCoverageNotice(p)}${workflow}<div class="tabs">${['vulnerabilities','techStack','activity'].map(tab=>`<button class="tab ${projectTab===tab?'active':''}" data-tab="${tab}">${t(tab)}${tab==='vulnerabilities'?' ('+(p.findings?.length||0)+')':''}</button>`).join('')}</div>${fullRun&&['partial','failed','interrupted','stopped'].includes(fullRun.status)?`<div class="notice">${t('incomplete')}</div>`:''}${(latestRun&&scopedAssessment(latestRun))&&['partial','failed','interrupted','stopped'].includes(latestRun.status)?`<div class="notice">${t(latestRun.mode==='code'?'codeScanIncomplete':'scopedSyncIncomplete')}</div>`:''}${projectNeedsAssessment(p)?`<div class="notice" role="status">${t('techStackResyncHint')}</div>`:p.assessed_revision!==p.revision&&p.assessed_revision?`<div class="notice info">${t('inventoryChanged')}</div>`:''}<div id="project-tab-content"></div>`;const content=$('#project-tab-content');if(projectTab==='vulnerabilities'){content.innerHTML=filtersHTML(false,id)+`<div class="panel" id="finding-results">${findingsTable(id)}</div>`;bindFilters(id);}else if(projectTab==='techStack'){content.innerHTML=`<div class="stack-toolbar"><button type="button" class="button primary" data-action="add-component" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${t('addComponent')}</button></div>`+(p.assets.length?`<div class="stack-grid">${p.assets.map(a=>`<div class="stack-card"><div class="eyebrow">${t(a.kind)}</div><strong>${esc(a.name)}</strong><p>${esc(a.version)}${a.ecosystem?' · '+esc(a.ecosystem):''}</p>${a.cpe?`<code>${esc(a.cpe)}</code>`:''}${componentCriticalCount(p,a)}${componentSyncControls(p,a)}</div>`).join('')}</div>`:empty('noStack','noStackSub','stack'));}else content.innerHTML=`<div class="panel">${activityList(allRuns().filter(r=>r.project_id===id))}</div>`;}
+  $('#main').innerHTML=heading(p.name,p.description||t('projectPanelSub'),`<button class="button secondary" data-action="edit-project" data-id="${p.id}" ${p.syncing?'disabled':''}>${icon('edit')}${t('editProject')}</button><button type="button" class="button secondary" data-action="scan-code" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${icon('scanCode')}${t('runCodeScan')}</button>${syncControls(p)}`)+`<div class="project-meta">${statusBadge}${pill(t(p.schedule))}${validDate(p.last_sync)?pill(t('lastSync')+' · '+fmtDate(p.last_sync)):''}${validDate(p.data_checked_at)?pill(t('sourceDataChecked')+' · '+fmtDate(p.data_checked_at)):''}${validDate(p.next_run)?pill(t('nextRun')+' · '+fmtDate(p.next_run)):''}${projectRepositoryLinks(p)}</div>${projectAssessmentNotices(p)}${workflow}<div class="tabs">${['vulnerabilities','techStack','activity'].map(tab=>`<button class="tab ${projectTab===tab?'active':''}" data-tab="${tab}">${t(tab)}${tab==='vulnerabilities'?' ('+(p.findings?.length||0)+')':''}</button>`).join('')}</div><div id="project-tab-content"></div>`;const content=$('#project-tab-content');if(projectTab==='vulnerabilities'){content.innerHTML=filtersHTML(false,id)+`<div class="panel" id="finding-results">${findingsTable(id)}</div>`;bindFilters(id);}else if(projectTab==='techStack'){content.innerHTML=`<div class="stack-toolbar"><button type="button" class="button primary" data-action="add-component" data-id="${esc(p.id)}" ${p.syncing?'disabled':''}>${t('addComponent')}</button></div>`+(p.assets.length?`<div class="stack-grid">${p.assets.map(a=>`<div class="stack-card"><div class="eyebrow">${t(a.kind)}</div><strong>${esc(a.name)}</strong><p>${esc(a.version)}${a.ecosystem?' · '+esc(a.ecosystem):''}</p>${a.cpe?`<code>${esc(a.cpe)}</code>`:''}${componentCriticalCount(p,a)}${componentSyncControls(p,a)}</div>`).join('')}</div>`:empty('noStack','noStackSub','stack'));}else content.innerHTML=`<div class="panel">${activityList(allRuns().filter(r=>r.project_id===id))}</div>`;}
 function field(name,label,value='',type='text',extra=''){return `<label><span>${t(label)}</span><input type="${type}" name="${name}" value="${esc(value)}" ${extra}></label>`;}
 function sourceSettingsHTML(settings) {
   const sources = [
@@ -996,7 +1271,7 @@ function openDatabaseInfo(source) {
     <div id="database-info-status" role="status" aria-live="polite">${localDatabaseStatusHTML(source, stats, true)}</div>
     <p class="database-safety">${t(settings.safety)}</p><p class="form-note">${t('cveDBSchedule')}</p>`;
   localize(dialog);
-  dialog.showModal();
+  showDialog(dialog);
 }
 
 function updateLocalDatabaseDetails(source, stats) {
@@ -1104,10 +1379,21 @@ function osvDatabaseSettingsHTML() {
   const selected = state.settings.osv_ecosystems ?? suggested;
   const options = [...new Set([...(state.osv_ecosystem_options || []), ...suggested, ...selected])].sort();
 
-  return localDatabaseSettingsHTML('osv', `<details class="database-ecosystem-settings"><summary><span>${t('osvDBEcosystems')}</span><small data-osv-selection-summary>${esc(t('databaseEcosystemsSelected').replace('{count}', cacheNumber(new Set(selected).size)))}</small></summary>
-    <div class="osv-ecosystem-controls"><button type="button" class="button secondary small" data-action="suggest-osv-ecosystems">${t('osvDBSuggest')}</button><p class="form-note">${t('osvDBSaveFirst')}</p></div>
-    <div class="osv-ecosystems-grid">${options.map(value => `<label class="check-row"><input type="checkbox" data-osv-ecosystem value="${esc(value)}" ${selected.includes(value) ? 'checked' : ''}><span>${esc(value)}</span></label>`).join('')}</div>
-    </details>`);
+  return localDatabaseSettingsHTML('osv', `<div class="database-ecosystem-settings">
+    <div class="osv-ecosystem-controls">
+      <div class="scope-field osv-ecosystem-field"><span id="osv-ecosystems-label">${esc(t('osvDBEcosystems'))}</span>
+        <details class="scope-picker" id="osv-ecosystem-picker">
+          <summary aria-labelledby="osv-ecosystems-label osv-selection-summary"><span id="osv-selection-summary" data-osv-selection-summary>${esc(t('databaseEcosystemsSelected').replace('{count}', cacheNumber(new Set(selected).size)))}</span></summary>
+          <div class="scope-picker-menu" tabindex="0" role="region" aria-label="${esc(t('osvDBEcosystems'))}">
+            ${scopeSearchHTML(false, 'osvDBEcosystemSearch', 'osvDBEcosystemSearchEmpty')}
+            <div class="scope-group">${options.map(value => `<label class="scope-choice"><input type="checkbox" data-osv-ecosystem value="${esc(value)}" ${selected.includes(value) ? 'checked' : ''}><span>${esc(value)}</span></label>`).join('')}</div>
+          </div>
+        </details>
+      </div>
+      <button type="button" class="button secondary small" data-action="suggest-osv-ecosystems">${t('osvDBSuggest')}</button>
+    </div>
+    <p class="form-note">${t('osvDBSaveFirst')}</p>
+  </div>`);
 }
 
 function updateOSVEcosystemSelectionSummary() {
@@ -1209,7 +1495,7 @@ async function changeDataDirectory(directory) {
     for (const button of buttons) button.disabled = false;
   }
 }
-const scannerLabels = {govulncheck:'govulncheck', npm:'npm audit', composer:'composer audit', 'pip-audit':'pip-audit', trivy:'Trivy', snyk:'Snyk'};
+const scannerLabels = {'composer-lock':'PHP lockfile (local OSV)', govulncheck:'govulncheck', npm:'npm audit', composer:'composer audit', 'pip-audit':'pip-audit', trivy:'Trivy', snyk:'Snyk'};
 const trivyInstall = 'https://trivy.dev/docs/latest/getting-started/installation/';
 const nodeInstall = 'https://nodejs.org/en/download';
 const composerInstall = 'https://getcomposer.org/doc/00-intro.md';
@@ -1267,7 +1553,8 @@ function snykSetupHTML() {
 }
 
 function scannerDefinitions() {
-  return state?.scanner_definitions || Object.entries(scannerLabels).map(([id,label]) => ({id,label,scope:['trivy','snyk'].includes(id)?'repository':'manifest'}));
+  const definitions = state?.scanner_definitions || Object.entries(scannerLabels).map(([id,label]) => ({id,label,scope:['trivy','snyk'].includes(id)?'repository':'manifest'}));
+  return definitions.map(tool => tool.id === 'composer-lock' ? {...tool,label:t('scannerComposerLock'),native:true} : tool);
 }
 function scannerLabel(id) {
   return scannerDefinitions().find(tool => tool.id === id)?.label || id;
@@ -1278,6 +1565,8 @@ function defaultScannerProfile(project, target) {
     mode:saved?.mode || 'auto', tools:[...(saved?.tools || [])],
     additional_tools:[...(saved ? saved.additional_tools || [] : scannerDefinitions().filter(tool => tool.scope === 'repository' && state?.settings?.scanners?.[tool.id]).map(tool => tool.id))],
     needs_scan:Boolean(saved?.needs_scan),
+    ...(saved?.generate_lockfiles ? {generate_lockfiles:true} : {}),
+    ...(saved?.ignore_composer_platform ? {ignore_composer_platform:true} : {}),
   };
 }
 function globalScannerEnabled(id) {
@@ -1287,7 +1576,7 @@ function scannerJobKey(tool, target, repository, path) {
   return JSON.stringify([tool, target === 'local' ? 'local' : 'remote', repository || '', path || '']);
 }
 function newestScannerJobs(jobs, logs = []) {
-  const events = new Set(['scanning','scanner_completed','scanner_failed','scanner_interrupted','scanner_blocked','scanner_missing_token','scanner_skipped']);
+  const events = new Set(['scanning','scanner_completed','scanner_failed','scanner_interrupted','scanner_blocked','scanner_missing_token','scanner_skipped','scanner_lockfile_started','scanner_lockfile_completed','scanner_lockfile_failed']);
   const recorded = new Map();
   for (const [index, entry] of (logs || []).entries()) {
     if (entry.step_id === 'scanner' && entry.tool && events.has(entry.event)) {
@@ -1325,7 +1614,8 @@ function scannerJobHTML(jobs, logs = []) {
   const ordered = newestScannerJobs(jobs, logs), counts = scannerJobCounts(logs, jobs);
   return `<div class="scanner-job-list" tabindex="0"><table><thead><tr><th>${t('scannerRepository')}</th><th>${t('scannerTool')}</th><th>${t('scannerProjectFolder')}</th><th>${t('scannerJobStatus')}</th><th class="scanner-job-findings" title="${esc(t('scannerJobFindingsHint'))}">${t('scannerJobFindings')}</th><th>${t('scannerReason')}</th></tr></thead><tbody>${ordered.map(job => {
     const count = scannerJobFindings(job, counts);
-    return `<tr><td>${esc(job.repository || (job.target === 'local' ? t('scanTarget_local') : ''))}</td><td>${esc(scannerLabel(job.tool))}</td><td><code>${esc(job.path || '.')}</code></td><td>${esc(t('scannerJob_' + job.status))}</td><td class="scanner-job-findings" ${count === null ? `title="${esc(t('scannerJobFindingsUnavailable'))}"` : ''}>${count === null ? '—' : formatResultNumber(count)}</td><td>${esc(job.reason ? t('scannerReason_' + job.reason) : '')}</td></tr>`;
+    const reason = [job.reason ? t('scannerReason_' + job.reason) : '', job.generated_lockfile && job.reason !== 'generated_lockfile' ? t('scannerGeneratedLockfile') : '', job.ignored_composer_platform ? t('noticeIgnoredComposerPlatform') : ''].filter(Boolean).join(' · ');
+    return `<tr><td>${esc(job.repository || (job.target === 'local' ? t('scanTarget_local') : ''))}</td><td>${esc(scannerLabel(job.tool))}</td><td><code>${esc(job.path || '.')}</code></td><td>${esc(t('scannerJob_' + job.status))}</td><td class="scanner-job-findings" ${count === null ? `title="${esc(t('scannerJobFindingsUnavailable'))}"` : ''}>${count === null ? '—' : formatResultNumber(count)}</td><td>${esc(reason)}</td></tr>`;
   }).join('')}</tbody></table></div><p class="form-note">${t('scannerJobFindingsHint')}</p>`;
 }
 
@@ -1361,6 +1651,7 @@ function projectScannerProfileHTML(profile, local = false) {
   const repositoryTools = enabledTools.filter(tool => tool.scope === 'repository');
   const preservedTools = (profile.tools || []).filter(id => !globalScannerEnabled(id));
   const preservedAdditionalTools = (profile.additional_tools || []).filter(id => !globalScannerEnabled(id));
+  const lockfileAvailable = enabledTools.some(tool => ['npm','composer'].includes(tool.id) && (mode === 'auto' && local || mode === 'custom' && profile.tools?.includes(tool.id)));
   const choice = (tool, additional) => {
     const enabled = globalScannerEnabled(tool.id);
     const checked = (additional ? profile.additional_tools || [] : profile.tools || []).includes(tool.id);
@@ -1368,7 +1659,7 @@ function projectScannerProfileHTML(profile, local = false) {
     return `<label class="check-row scanner-profile-tool ${enabled?'':'scanner-tool-disabled'}" title="${esc(hint)}"><input type="checkbox" data-project-scanner-tool="${esc(tool.id)}" data-profile-additional="${additional}" ${checked?'checked':''} ${enabled?'':'disabled'}><span>${esc(tool.label)}</span></label>`;
   };
   return `<div class="repository-scanner-profile" data-repository-profile data-scanner-location="${local?'local':'github'}">
-    <div class="scanner-profile-header"><strong>${t('repositoryScannerProfile')}</strong><label class="scanner-profile-mode"><span>${t('scannerMode')}</span><select data-project-scanner-mode>${modes.map(value => `<option value="${value}" ${mode === value?'selected':''}>${t('scannerMode_' + value)}</option>`).join('')}</select></label></div>
+    <div class="scanner-profile-header"><strong>${t('repositoryScannerProfile')}</strong><div class="scanner-profile-options"><button type="button" class="button secondary small" data-action="lockfile-options" data-profile-lockfile-options aria-haspopup="dialog" aria-controls="lockfile-options-dialog" title="${esc(t('scannerGenerateLockfiles') + ': ' + t(profile.generate_lockfiles ? 'enabled' : 'disabled'))}" ${lockfileAvailable ? '' : 'hidden'}>${icon('settings')}${esc(t('scannerLockfileOptions'))}</button><label class="scanner-profile-mode"><span>${t('scannerMode')}</span><select data-project-scanner-mode>${modes.map(value => `<option value="${value}" ${mode === value?'selected':''}>${t('scannerMode_' + value)}</option>`).join('')}</select></label></div></div>
     <p class="scanner-profile-hint" data-profile-mode-hint>${esc(scannerModeHint(mode, local))}</p>
     <div class="scanner-profile-tools" data-profile-custom ${mode === 'custom'?'':'hidden'}>${enabledTools.length ? enabledTools.map(tool => choice(tool, false)).join('') : `<p class="form-note">${t('scannerCustomNoTools')}</p>`}</div>
     ${preservedTools.map(id => `<input type="hidden" data-profile-preserved-tool="${esc(id)}" data-profile-additional="false">`).join('')}
@@ -1379,10 +1670,77 @@ function projectScannerProfileHTML(profile, local = false) {
     }).join('')}</ul></details>` : ''}
     ${local && repositoryTools.length ? `<div data-profile-extras ${mode === 'auto'?'':'hidden'}><h4>${t('scannerAdditionalTools')}</h4><div class="scanner-profile-tools">${repositoryTools.map(tool => choice(tool, true)).join('')}</div></div>` : ''}
     ${local && !enabledTools.length ? `<p class="form-note" data-profile-auto ${mode === 'auto'?'':'hidden'}>${t('scannerCustomNoTools')}</p>` : ''}
+    <input type="checkbox" data-project-generate-lockfiles ${profile.generate_lockfiles ? 'checked' : ''} hidden>
+    <input type="checkbox" data-project-ignore-composer-platform ${profile.ignore_composer_platform ? 'checked' : ''} hidden>
     ${profile.selection_required ? `<p class="scanner-profile-migration" role="status">${t('scannerGitHubAutomaticRemoved')}</p>` : ''}
     ${profile.needs_scan && mode !== 'disabled' ? `<p class="scanner-policy-notice">${t('scannerProfileNeedsScan')}</p>` : ''}
   </div>`;
 }
+
+function projectUsesLockfileTools(card) {
+  return projectUsesScannerTools(card, ['npm','composer']);
+}
+
+function projectUsesScannerTools(card, tools) {
+  const mode = $('[data-project-scanner-mode]', card).value;
+  if (mode === 'disabled') return false;
+
+  if (mode === 'auto' && card.dataset.scannerLocation === 'local') {
+    return tools.some(globalScannerEnabled);
+  }
+  return mode === 'custom' && $$('[data-project-scanner-tool]:checked', card)
+    .some(input => tools.includes(input.dataset.projectScannerTool) && globalScannerEnabled(input.dataset.projectScannerTool));
+}
+
+function updateProjectLockfileOptions(card) {
+  const button = $('[data-profile-lockfile-options]', card);
+  if (!button) return;
+
+  button.hidden = !projectUsesLockfileTools(card);
+  const enabled = $('[data-project-generate-lockfiles]', card)?.checked;
+  button.title = t('scannerGenerateLockfiles') + ': ' + t(enabled ? 'enabled' : 'disabled');
+}
+
+function openLockfileOptions(card) {
+  const dialog = $('#lockfile-options-dialog');
+  if (!card || card.isConnected === false || dialog.open || !projectUsesLockfileTools(card)) return false;
+
+  lockfileOptionsContext = {card, hash:location.hash};
+  $('#lockfile-options-enabled').checked = Boolean($('[data-project-generate-lockfiles]', card)?.checked);
+  $('#lockfile-ignore-composer-platform').checked = Boolean($('[data-project-ignore-composer-platform]', card)?.checked);
+  updateComposerPlatformOption();
+  localize(dialog);
+  $('[data-lockfile-options-close]', dialog).setAttribute('aria-label', t('close'));
+  showDialog(dialog);
+  return true;
+}
+
+function applyLockfileOptions(event) {
+  event.preventDefault();
+  const dialog = $('#lockfile-options-dialog');
+  const context = lockfileOptionsContext;
+  if (context && context.hash === location.hash && context.card.isConnected !== false && projectUsesLockfileTools(context.card)) {
+    $('[data-project-generate-lockfiles]', context.card).checked = $('#lockfile-options-enabled').checked;
+    const ignorePlatform = $('[data-project-ignore-composer-platform]', context.card);
+    if (ignorePlatform) ignorePlatform.checked = $('#lockfile-options-enabled').checked && $('#lockfile-ignore-composer-platform').checked;
+    updateProjectLockfileOptions(context.card);
+  }
+  lockfileOptionsContext = null;
+  dialog.close();
+}
+
+function updateComposerPlatformOption() {
+  const available = lockfileOptionsContext && projectUsesScannerTools(lockfileOptionsContext.card, ['composer']);
+  $('#lockfile-composer-platform-options').hidden = !available;
+  $('#lockfile-ignore-composer-platform').disabled = !available || !$('#lockfile-options-enabled').checked;
+}
+
+function changeProjectScannerTool(input) {
+  const card = input.closest('[data-repository-profile]');
+  updateProjectLockfileOptions(card);
+  if (input.checked && ['npm','composer'].includes(input.dataset.projectScannerTool)) openLockfileOptions(card);
+}
+
 function readProjectScannerProfile(card) {
   const selected = additional => {
     const checked = $$('[data-project-scanner-tool]:checked', card)
@@ -1391,7 +1749,8 @@ function readProjectScannerProfile(card) {
       .filter(input => input.dataset.profilePreservedTool && input.dataset.profileAdditional === String(additional)).map(input => input.dataset.profilePreservedTool);
     return [...new Set([...checked, ...preserved])];
   };
-  return {mode:$('[data-project-scanner-mode]', card).value, tools:selected(false), additional_tools:selected(true)};
+  const generate = Boolean($('[data-project-generate-lockfiles]', card)?.checked);
+  return {mode:$('[data-project-scanner-mode]', card).value, tools:selected(false), additional_tools:selected(true), ...(generate ? {generate_lockfiles:true} : {}), ...(generate && $('[data-project-ignore-composer-platform]', card)?.checked ? {ignore_composer_platform:true} : {})};
 }
 function changeProjectScannerMode(select) {
   const card = select.closest('[data-repository-profile]');
@@ -1400,6 +1759,7 @@ function changeProjectScannerMode(select) {
   const automatic = $('[data-profile-auto]', card), extras = $('[data-profile-extras]', card);
   if (automatic) automatic.hidden = select.value !== 'auto';
   if (extras) extras.hidden = select.value !== 'auto';
+  updateProjectLockfileOptions(card);
   $('[data-profile-mode-hint]', card).textContent = scannerModeHint(select.value, local);
 }
 function updateRepositoryProfileVisibility(input) {
@@ -1414,15 +1774,45 @@ function updateRepositoryProfileVisibility(input) {
 function projectNeedsCodeScan(project) {
   return Object.values(project.scanner_profiles || {}).some(profile => profile.mode !== 'disabled' && profile.needs_scan);
 }
-function scannerCoverageNotice(project) {
-  return projectNeedsCodeScan(project) ? `<p class="scanner-policy-notice" role="status">${t('scannerProfileNeedsScan')}</p>` : '';
+function assessmentNoticesHTML(key, title, notices) {
+  if (!notices.length) return '';
+  const count = t(notices.length === 1 ? 'noticeCountOne' : 'noticeCount').replace('{count}', formatResultNumber(notices.length));
+
+  return `<details class="assessment-notices" data-notice-group="${esc(key)}" ${expandedNoticeGroups.has(key) ? 'open' : ''}>
+    <summary>${icon('info')}<span class="assessment-notices-title">${esc(t(title))}</span><span class="assessment-notice-count">${esc(count)}</span><span class="assessment-notices-chevron" aria-hidden="true"></span></summary>
+    <ul class="assessment-notice-list">${notices.map(notice => `<li class="assessment-notice-item"><strong>${esc(t(notice.title))}</strong><p>${esc(notice.message)}</p></li>`).join('')}</ul>
+  </details>`;
 }
+
+function scannerRunNotices(run) {
+  const notices = [];
+  if (!run?.scanner_jobs?.length) return notices;
+  if (run.scanner_jobs.some(job => job.generated_lockfile)) notices.push({title:'noticeGeneratedLockfile', message:t('scannerGeneratedLockfileWarning')});
+  if (run.scanner_jobs.some(job => job.ignored_composer_platform)) notices.push({title:'noticeIgnoredComposerPlatform', message:t('scannerIgnoredComposerPlatformWarning')});
+  if (canDismissWorkflow(run) && !run.scanners_completed) notices.push({title:'noticeNoScannerCompleted', message:t('scannerNoWork')});
+  if (run.retained_scanner_findings) notices.push({title:'noticeRetainedFindings', message:t('scannerRetained').replace('{count}', formatResultNumber(run.retained_scanner_findings))});
+
+  return notices;
+}
+
+function projectAssessmentNotices(project) {
+  const latestRun = project.runs?.[0], fullRun = latestFullRun(project);
+  const notices = [], incomplete = run => run && ['partial','failed','interrupted','stopped'].includes(run.status);
+  if (projectNeedsCodeScan(project)) notices.push({title:'noticeScannerSettings', message:t('scannerProfileNeedsScan')});
+  if (incomplete(fullRun)) notices.push({title:'noticeIncompleteAssessment', message:t('incomplete')});
+  if (scopedAssessment(latestRun || {}) && incomplete(latestRun)) {
+    const codeScan = latestRun.mode === 'code';
+    notices.push({title:codeScan ? 'noticeIncompleteCodeScan' : 'noticeIncompleteScopedAssessment', message:t(codeScan ? 'codeScanIncomplete' : 'scopedSyncIncomplete')});
+  }
+  if (projectNeedsAssessment(project)) notices.push({title:'noticeInventoryChanged', message:t('techStackResyncHint')});
+  else if (project.assessed_revision && project.assessed_revision !== project.revision) notices.push({title:'noticeInventoryChanged', message:t('inventoryChanged')});
+  notices.push(...scannerRunNotices(latestRun));
+
+  return assessmentNoticesHTML(`project:${project.id}:${project.revision}:${latestRun?.id || ''}`, 'assessmentNotices', notices);
+}
+
 function scannerRunSummary(run) {
-  if (!run.scanner_jobs?.length) return '';
-  let html = '';
-  if (canDismissWorkflow(run) && !run.scanners_completed) html += `<p class="scanner-policy-notice">${t('scannerNoWork')}</p>`;
-  if (run.retained_scanner_findings) html += `<p class="scanner-policy-notice">${esc(t('scannerRetained').replace('{count}', formatResultNumber(run.retained_scanner_findings)))}</p>`;
-  return html;
+  return assessmentNoticesHTML(`run:${run.id}`, 'scannerNotices', scannerRunNotices(run));
 }
 
 function scannerSettingsHTML(names) {
@@ -1457,10 +1847,13 @@ function scannerGuidanceHTML(name, result) {
 }
 function scannerResultHTML(name, result) {
   const status = result.status;
-  const statusKey = status === 'checking' ? 'scannerChecking' : scannerStatusKeys[status] || 'scannerFailed';
+  const statusKey = name === 'composer-lock' && status === 'ready' ? 'scannerComposerLockReady' : name === 'composer-lock' && status === 'database' ? 'scannerComposerLockNeedsData' : status === 'checking' ? 'scannerChecking' : scannerStatusKeys[status] || 'scannerFailed';
   return `<p class="scanner-status ${status === 'ready' ? 'ready' : status === 'checking' ? '' : 'warning'}">${t(statusKey)}</p>`;
 }
 function scannerInfoHTML(name, result) {
+  if (name === 'composer-lock') {
+    return `${result ? scannerResultHTML(name, result) : ''}<p>${esc(t('scannerComposerLockHint'))}</p><p>${esc(t('scannerComposerLockSetup'))}</p><button type="button" class="button secondary small" data-action="configure-packagist">${esc(t('scannerComposerLockConfigure'))}</button>`;
+  }
   let details = `<p>${t('scannerCheckFirst')}</p>`;
   if (result) {
     details = scannerResultHTML(name, result);
@@ -1483,7 +1876,19 @@ function openScannerInfo(name) {
   $('[data-scanner-info-close]', dialog).setAttribute('aria-label', t('close'));
   $('#scanner-info-body').innerHTML = scannerInfoHTML(name, scannerCheckResults.get(name));
   localize(dialog);
-  dialog.showModal();
+  showDialog(dialog);
+}
+
+function openPackagistConfiguration() {
+  $('#scanner-info-dialog').close();
+  const picker = $('#osv-ecosystem-picker');
+  if (!picker) return;
+  picker.scrollIntoView({block:'center'});
+  picker.open = true;
+  const search = $('[data-scope-search]', picker);
+  search.value = 'Packagist';
+  filterScopeChoices(search);
+  search.focus({preventScroll:true});
 }
 async function checkScanner(input) {
   const name = input.dataset.scannerCheck;
@@ -1642,9 +2047,9 @@ function credentialSettingsHTML() {
 }
 
 function renderSettings(){const s=state.settings;clearing=new Set();scannerCheckResults.clear();$('#main').innerHTML=heading(t('settings'),t('settingsSub'))+`<form id="settings-form" class="settings-layout panel"><section class="settings-section"><h3>${t('general')}</h3><div class="form-grid"><label><span>${t('uiLanguage')}</span><select name="language">${languageOptions()}</select></label></div></section>${sourceSettingsHTML(s)}${cveDatabaseSettingsHTML()}${nvdDatabaseSettingsHTML()}${osvDatabaseSettingsHTML()}${credentialSettingsHTML()}<section class="settings-section"><h3>${t('aiSettings')}</h3><p>${t('aiSettingsHint')}</p><div class="form-grid"><label><span>${t('defaultProvider')}</span><select name="ai_provider">${providerOptions(s.ai_provider)}</select></label><div></div>${field('openai_model','openaiModel',s.openai_model,'text','placeholder="e.g. a model ID enabled for your API account"')}${field('claude_model','claudeModel',s.claude_model,'text','placeholder="e.g. a model ID enabled for your API account"')}</div></section><section class="settings-section"><h3>${t('scannerSettings')}</h3><p>${t('scannerSettingsHint')}</p><div class="form-grid scanner-settings-grid">${scannerSettingsHTML(s.scanners)}</div></section><section class="settings-section"><h3>${esc(t('fileDatabases'))}</h3><p class="storage-note">${t('storageNote')}</p>${storageDirectoryHTML()}${storagePathsHTML()}</section>${advancedSettingsHTML()}<div class="settings-actions"><button class="button primary" type="submit">${t('saveSettings')}</button><span class="form-error" id="settings-error"></span></div></form>`;$('#settings-form').addEventListener('submit',saveSettings);$('#settings-form').addEventListener('invalid',revealInvalidAdvancedSetting,true);$$('[data-scanner-check]:checked').forEach(checkScanner);}
-function render(){if(pendingPageRender)return;renderNav();const [page,id,view]=route();if(location.hash===newProjectHash)renderProjectEditor();else if(page==='projects')$('#main').innerHTML=heading(t('projects'),t('projectsSub'),button('addProject','new-project',true,'plus'))+`<div class="panel"><div class="panel-head"><h2>${t('yourProjects')} <span class="muted">(${state.projects.length})</span></h2></div>${projectList(state.projects, true)}</div>`;else if(page==='vulnerabilities'){$('#main').innerHTML=heading(t('vulnerabilities'),t('vulnsSub'),state.projects.length?syncAllControls(true):'')+filtersHTML(true)+`<div class="panel" id="finding-results">${findingsTable()}</div>`;bindFilters();}else if(page==='activity')$('#main').innerHTML=heading(t('activity'),t('activitySub'))+`<div class="panel">${activityList()}</div>`;else if(page==='settings')renderSettings();else if(page==='project'){if(view==='edit')renderProjectEditor(id);else if(view==='delete')renderProjectDeletion(id);else renderProject(id);}else renderOverview();mountActiveSyncs();}
+function render(){if(pendingPageRender)return;cancelFindingSearch();renderNav();const [page,id,view]=route();if(location.hash===newProjectHash)renderProjectEditor();else if(page==='projects')$('#main').innerHTML=heading(t('projects'),t('projectsSub'),button('addProject','new-project',true,'plus'))+`<div class="panel"><div class="panel-head"><h2>${t('yourProjects')} <span class="muted">(${state.projects.length})</span></h2></div>${projectList(state.projects, true)}</div>`;else if(page==='vulnerabilities'){$('#main').innerHTML=heading(t('vulnerabilities'),t('vulnsSub'),state.projects.length?syncAllControls(true):'')+filtersHTML(true)+`<div class="panel" id="finding-results">${findingsTable()}</div>`;bindFilters();}else if(page==='activity')$('#main').innerHTML=heading(t('activity'),t('activitySub'))+`<div class="panel">${activityList()}</div>`;else if(page==='settings')renderSettings();else if(page==='project'){if(view==='edit')renderProjectEditor(id);else if(view==='delete')renderProjectDeletion(id);else renderProject(id);}else renderOverview();mountActiveSyncs();}
 function componentFields(a={},removable=true){const el=document.createElement('div');el.className='asset-field';el.dataset.id=a.id||'';el.innerHTML=`<div class="asset-top"><label><span>${t('category')}</span><select data-field="kind">${['language','database','container','docker','webserver','ai','library','other'].map(k=>`<option value="${k}" ${(a.kind||'library')===k?'selected':''}>${t(k)}</option>`).join('')}</select></label><label><span>${t('name')}</span><input data-field="name" value="${esc(a.name)}" required placeholder="org.apache.logging.log4j:log4j-core" maxlength="300"></label><label><span>${t('version')}</span><input data-field="version" value="${esc(a.version)}" required placeholder="2.14.1" maxlength="100"></label>${removable?`<button type="button" class="icon-button asset-remove" aria-label="${t('removeComponent')}">×</button>`:''}</div><div class="asset-bottom"><label><span>${t('ecosystem')}</span><select data-field="ecosystem"><option value="">—</option>${['Go','npm','PyPI','Maven','Packagist','crates.io','RubyGems','NuGet','Hex','Pub','Debian','Alpine','GIT'].map(e=>`<option ${a.ecosystem===e?'selected':''}>${e}</option>`).join('')}</select></label><label><span>${t('cpeLabel')}</span><input data-field="cpe" value="${esc(a.cpe)}" placeholder="cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"></label></div>`;return el;}
-function openComponent(id){const p=state.projects.find(p=>p.id===id);if(!p||p.syncing)return false;componentDraft={...p,assets:p.assets.map(a=>({...a}))};$('#component-form').reset();$('#component-error').textContent='';$('#component-project').textContent=t('componentProject').replace('{project}',p.name);const fields=$('#component-fields');fields.innerHTML='';const el=componentFields({},false);fields.append(el);localize($('#component-dialog'));$('#component-dialog').showModal();el.querySelector('[data-field="name"]').focus();return true;}
+function openComponent(id){const p=state.projects.find(p=>p.id===id);if(!p||p.syncing)return false;componentDraft={...p,assets:p.assets.map(a=>({...a}))};$('#component-form').reset();$('#component-error').textContent='';$('#component-project').textContent=t('componentProject').replace('{project}',p.name);const fields=$('#component-fields');fields.innerHTML='';const el=componentFields({},false);fields.append(el);localize($('#component-dialog'));showDialog($('#component-dialog'));el.querySelector('[data-field="name"]').focus();return true;}
 async function saveComponent(e){e.preventDefault();if(!componentDraft)return;const submit=$('#save-component');submit.disabled=true;const p=componentDraft,asset={};$$('[data-field]',$('#component-fields')).forEach(input=>asset[input.dataset.field]=input.value.trim());const body={};for(const key of ['name','description','repository','repository_urls','local_path','schedule','scan_code','revision'])body[key]=p[key];body.assets=[...p.assets,asset];try{await invoke('UpdateProject',p.id,body);$('#component-dialog').close();componentDraft=null;await refresh(false);projectTab='techStack';render();toast(t('saved'));}catch(err){$('#component-error').textContent=formatError(err);}finally{submit.disabled=false;}}
 const projectTextFields = ['name', 'description', 'local_path', 'schedule'];
 
@@ -1947,9 +2352,60 @@ function showFinding(id,asset,project){
   const finding = p?.findings?.find(f => f.id === id && f.asset_id === asset);
   if (!finding) return;
   const f = {...finding, project_id:p.id, project_name:p.name};
-  currentFinding=f;$('#detail-body').innerHTML=`<div class="detail-tags">${pill(t(severityKey(f.severity)),severityKey(f.severity))}${pill(f.id)}${pill(t(f.match),f.match==='review'?'review':'')}${f.score?pill(t('score')+' '+f.score):''}</div><h2 class="detail-title">${esc(f.title||f.id)}</h2><p class="subtitle">${esc(f.component)} ${esc(findingVersionLabel(f))} · ${esc(f.project_name)} · ${esc(f.sources.join(' + '))}</p>${f.match==='review'?`<div class="notice">${t('reviewWarning')}</div>`:f.match==='cpe'?`<div class="notice info">${t('cpeWarning')}</div>`:''}<p class="detail-description">${esc(f.description)}</p><div class="detail-section"><h3>${t('remediation')}</h3><div id="advice-result"></div><div class="advice-actions"><select id="advice-provider" aria-label="${t('defaultProvider')}">${providerOptions(state.settings.ai_provider)}</select><button class="button primary small" data-action="advice">${t('getAdvice')}</button></div><p class="form-note">${t('aiDisclosure')}</p></div><div class="detail-section"><h3>${t('references')}</h3><ul class="reference-list">${f.references?.length?f.references.map(u=>safeURL(u)?`<li><a href="${safeURL(u)}" target="_blank" rel="noreferrer">${esc(u)} ↗</a></li>`:'').join(''):`<li class="muted">${t('noReferences')}</li>`}</ul></div>`;$('#detail-dialog').showModal();getAdvice('public');}
-async function getAdvice(provider){const f=currentFinding,container=$('#advice-result');container.innerHTML=`<div class="advice-box"><p>${t('generating')}</p></div>`;const btn=$('[data-action="advice"]');if(btn)btn.disabled=true;try{const a=await invoke('Advice',f.project_id,{finding_id:f.id,asset_id:f.asset_id,provider});if(currentFinding!==f)return;container.innerHTML=`<div class="advice-box"><h3>${t(a.provider)}</h3><p>${esc(a.text)}</p>${a.warning_message || a.warning?`<p class="form-error">${esc(messageText(a.warning_message || a.warning))}</p>`:''}${a.provider!=='public'?`<p class="form-note">${t('aiReview')}</p>`:''}</div>`;}catch(err){container.innerHTML=`<p class="form-error">${esc(formatError(err))}</p>`;}finally{if(btn)btn.disabled=false;}}
-document.addEventListener('click',async e=>{if(changingDataDirectory)return;const pageButton=e.target.closest('[data-finding-page]');if(pageButton){if(!pageButton.disabled)turnFindingPage(pageButton.dataset.findingPage);return;}const close=e.target.closest('.close-dialog');if(close){close.closest('dialog').close();return;}if(e.target.closest('.asset-remove')){e.target.closest('.asset-field').remove();return;}const clear=e.target.closest('[data-clear-token]');if(clear){clearCredential(clear);return;}const dismiss=e.target.closest('[data-dismiss-workflow]');if(dismiss){dismissWorkflow(dismiss.dataset.projectId,dismiss.dataset.dismissWorkflow);return;}const toggle=e.target.closest('[data-toggle-workflow]');if(toggle){toggleWorkflow(toggle.dataset.toggleWorkflow);return;}const tab=e.target.closest('[data-tab]');if(tab){if(projectTab!==tab.dataset.tab)expandedRuns.clear();projectTab=tab.dataset.tab;render();return;}const row=e.target.closest('[data-finding]');if(row){showFinding(row.dataset.finding,row.dataset.asset,row.dataset.project);return;}const target=e.target.closest('[data-action]');if(!target)return;try{switch(target.dataset.action){case'dismiss-database-warning':dismissDatabaseFreshnessWarning();break;case'clear-scope-search':clearScopeSearch(target);break;case'new-project':openNewProject();break;case'edit-project':location.hash='project/'+target.dataset.id+'/edit';break;case'cancel-project':cancelProject(target.closest('form'));break;case'add-project-asset':{const asset=componentFields();$('[data-project-assets]',target.closest('form')).append(asset);$('[data-field="name"]',asset).focus();break;}case'add-component':openComponent(target.dataset.id);break;case'scan-code':target.disabled=true;await scanProjectCode(target.dataset.id);break;case'sync':target.disabled=true;await syncProject(target.dataset.id,syncSelection[target.dataset.id]||'', $('#sync-mode')?.value||'auto',$('#sync-severity')?.value||'');break;case'sync-asset':target.disabled=true;await syncProject(target.dataset.id,target.dataset.asset,'auto',componentSyncSeveritySelection.get(stackKey(target.dataset.id,target.dataset.asset))||'');break;case'sync-all':{const severity=syncAllSeverity;target.disabled=true;for(const p of state.projects)if(!p.syncing)await invoke('Sync',p.id,severity?{severity}:{});await refresh();toast(t(state.projects.some(p=>p.runs?.[0]&&queuedWorkflow(p.runs[0]))?'syncRequestsSubmitted':'syncStarted'));break;}case'sample':target.disabled=true;await sample();break;case'delete-project':openProjectDeletion(target.dataset.id);break;
+  currentFinding=f;$('#detail-body').innerHTML=`<div class="detail-tags">${pill(t(severityKey(f.severity)),severityKey(f.severity))}${pill(f.id)}${pill(t(f.match),f.match==='review'?'review':'')}${f.score?pill(t('score')+' '+f.score):''}</div><h2 class="detail-title">${esc(f.title||f.id)}</h2><p class="subtitle">${esc(f.component)} ${esc(findingVersionLabel(f))} · ${esc(f.project_name)} · ${esc(f.sources.join(' + '))}</p>${f.generated_lockfile?`<div class="notice">${esc(t('scannerGeneratedLockfileWarning'))}</div>`:''}${f.match==='review'?`<div class="notice">${t('reviewWarning')}</div>`:f.match==='cpe'?`<div class="notice info">${t('cpeWarning')}</div>`:''}<p class="detail-description">${esc(f.description)}</p><div class="detail-section"><h3>${t('remediation')}</h3><div class="advice-actions"><select id="advice-provider" aria-label="${t('defaultProvider')}">${providerOptions(state.settings.ai_provider)}</select><button class="button primary small" data-action="advice">${t('getAdvice')}</button></div><div id="advice-setup-warning" class="notice advice-setup-warning" role="alert" hidden></div><p class="form-note">${t('aiDisclosure')}</p><div id="advice-result"></div></div><div class="detail-section"><h3>${t('references')}</h3><ul class="reference-list">${f.references?.length?f.references.map(u=>safeURL(u)?`<li><a href="${safeURL(u)}" target="_blank" rel="noreferrer">${esc(u)} ↗</a></li>`:'').join(''):`<li class="muted">${t('noReferences')}</li>`}</ul></div>`;updateAdviceSetupWarning(state.settings.ai_provider);showDialog($('#detail-dialog'));getAdvice('public');}
+function adviceProviderIssue(provider) {
+  if (!['openai','claude'].includes(provider)) return null;
+  if (!state?.token_status?.[provider]) return {field:'key', message:t('adviceMissingAPIKey').replace('{provider}', () => t(provider))};
+  if (!state?.settings?.[provider + '_model']?.trim()) return {field:'model', message:t('adviceMissingModel').replace('{provider}', () => t(provider))};
+  return null;
+}
+
+function adviceConfigurationButton(provider, field) {
+  return `<button type="button" class="button secondary small" data-action="configure-advice-provider" data-provider="${esc(provider)}" data-setup-field="${esc(field)}">${esc(t('configureAdviceProvider').replace('{provider}', () => t(provider)))}</button>`;
+}
+
+function updateAdviceSetupWarning(provider) {
+  const issue = adviceProviderIssue(provider), notice = $('#advice-setup-warning');
+  if (notice) {
+    notice.hidden = !issue;
+    notice.innerHTML = issue ? `<p>${esc(issue.message)}</p>${adviceConfigurationButton(provider, issue.field)}` : '';
+  }
+  return issue;
+}
+
+function configureAdviceProvider(provider, field) {
+  if (!['openai','claude'].includes(provider)) return false;
+  $('#detail-dialog').close();
+  location.hash = 'settings/' + provider + (field === 'model' ? '/model' : '');
+  return true;
+}
+
+async function getAdvice(provider) {
+  const f = currentFinding, container = $('#advice-result');
+  if (!f || !container) return;
+  if (provider !== 'public' && updateAdviceSetupWarning(provider)) {
+    $('#advice-setup-warning')?.scrollIntoView({block:'nearest'});
+    return;
+  }
+
+  const request = ++adviceRequestSequence, btn = $('[data-action="advice"]');
+  container.innerHTML = `<div class="advice-box"><p>${t('generating')}</p></div>`;
+  if (btn) btn.disabled = true;
+  try {
+    const a = await invoke('Advice', f.project_id, {finding_id:f.id, asset_id:f.asset_id, provider});
+    if (currentFinding !== f || request !== adviceRequestSequence) return;
+    const warning = a.warning_message || a.warning;
+    const code = a.warning_message?.code;
+    const setup = ['advice_missing_api_key','advice_missing_model','advice_missing_credentials'].includes(code);
+    const field = code === 'advice_missing_model' ? 'model' : 'key';
+    container.innerHTML = `<div class="advice-box">${warning ? `<div class="advice-response-warning" role="alert"><p>${esc(messageText(warning))}</p>${setup ? adviceConfigurationButton(provider, field) : ''}</div>` : ''}<h3>${esc(t(a.provider))}</h3><p>${esc(a.text)}</p>${a.provider !== 'public' ? `<p class="form-note">${t('aiReview')}</p>` : ''}</div>`;
+  } catch (err) {
+    if (currentFinding === f && request === adviceRequestSequence) container.innerHTML = `<p class="form-error" role="alert">${esc(formatError(err))}</p>`;
+  } finally {
+    if (currentFinding === f && request === adviceRequestSequence && btn) btn.disabled = false;
+  }
+}
+document.addEventListener('click',async e=>{if(changingDataDirectory)return;const pageButton=e.target.closest('[data-finding-page]');if(pageButton){if(!pageButton.disabled)turnFindingPage(pageButton.dataset.findingPage);return;}const close=e.target.closest('.close-dialog');if(close){close.closest('dialog').close();return;}if(e.target.closest('.asset-remove')){e.target.closest('.asset-field').remove();return;}const clear=e.target.closest('[data-clear-token]');if(clear){clearCredential(clear);return;}const dismiss=e.target.closest('[data-dismiss-workflow]');if(dismiss){dismissWorkflow(dismiss.dataset.projectId,dismiss.dataset.dismissWorkflow);return;}const toggle=e.target.closest('[data-toggle-workflow]');if(toggle){toggleWorkflow(toggle.dataset.toggleWorkflow);return;}const stepFailure=e.target.closest('[data-step-failure]');if(stepFailure){showWorkflowStepFailure(stepFailure.dataset.projectId,stepFailure.dataset.runId,Number(stepFailure.dataset.stepIndex));return;}const tab=e.target.closest('[data-tab]');if(tab){if(projectTab!==tab.dataset.tab){expandedRuns.clear();expandedNoticeGroups.clear();}projectTab=tab.dataset.tab;render();return;}const row=e.target.closest('[data-finding]');if(row){showFinding(row.dataset.finding,row.dataset.asset,row.dataset.project);return;}const target=e.target.closest('[data-action]');if(!target)return;try{switch(target.dataset.action){case'lockfile-options':openLockfileOptions(target.closest('[data-repository-profile]'));break;case'configure-packagist':openPackagistConfiguration();break;case'dismiss-database-warning':dismissDatabaseFreshnessWarning();break;case'clear-scope-search':clearScopeSearch(target);break;case'new-project':openNewProject();break;case'edit-project':location.hash='project/'+target.dataset.id+'/edit';break;case'cancel-project':cancelProject(target.closest('form'));break;case'add-project-asset':{const asset=componentFields();$('[data-project-assets]',target.closest('form')).append(asset);$('[data-field="name"]',asset).focus();break;}case'add-component':openComponent(target.dataset.id);break;case'scan-code':target.disabled=true;await scanProjectCode(target.dataset.id);break;case'sync':target.disabled=true;await syncProject(target.dataset.id,syncSelection[target.dataset.id]||'', $('#sync-mode')?.value||'auto',$('#sync-severity')?.value||'');break;case'sync-asset':target.disabled=true;await syncProject(target.dataset.id,target.dataset.asset,'auto',componentSyncSeveritySelection.get(stackKey(target.dataset.id,target.dataset.asset))||'');break;case'sync-all':{const severity=syncAllSeverity;target.disabled=true;for(const p of state.projects)if(!p.syncing)await invoke('Sync',p.id,severity?{severity}:{});await refresh();toast(t(state.projects.some(p=>p.runs?.[0]&&queuedWorkflow(p.runs[0]))?'syncRequestsSubmitted':'syncStarted'));break;}case'sample':target.disabled=true;await sample();break;case'delete-project':openProjectDeletion(target.dataset.id);break;
 case'cancel-project-deletion':location.hash='project/'+target.closest('form').dataset.projectId+'/edit';break;
 case'control-sync':target.disabled=true;try{await controlWorkflow(target.dataset.id,target.dataset.run,target.dataset.control);}finally{target.disabled=false;}break;case'delete-activity':target.disabled=true;try{await deleteActivity(target.dataset.id,target.dataset.run);}finally{target.disabled=false;}break;case'browse-data-directory':await browseFolder($('#data-directory'),'chooseDataDirectory',state.data_directory);break;case'add-repository': {
   const row = repositoryField();
@@ -1964,7 +2420,7 @@ case'remove-repository': {
   add.focus();
   break;
 }
-case'configure-github-token':configureGitHubToken(target.closest('form'));break;
+case'configure-github-token':configureGitHubToken(target.closest('form'));break;case'configure-advice-provider':configureAdviceProvider(target.dataset.provider,target.dataset.setupField);break;
 case'scanner-info':openScannerInfo(target.dataset.scanner);break;
 case'database-info':openDatabaseInfo(target.dataset.database);break;
 case'focus-snyk-token': {
@@ -2023,7 +2479,7 @@ case'update-cve-database':case'stop-cve-database':case'rebuild-cve-database':{
   break;
 }
 case'browse-local-repository':await browseFolder(target.closest('form').elements.local_path,'chooseRepositoryFolder');break;case'use-data-directory':{const input=$('#data-directory');if(!input.value.trim()){input.focus();return;}await changeDataDirectory(input.value);break;}case'reset-data-directory':await changeDataDirectory('');break;case'check-scanner':{const input=$('[data-scanner-check="'+target.dataset.scanner+'"]');if(input)await checkScanner(input);break;}case'advice':await getAdvice($('#advice-provider').value);break;}}catch(err){toast(formatError(err),true);target.disabled=false;}});
-document.addEventListener('change',e=>{if(e.target.matches('[data-osv-ecosystem]'))updateOSVEcosystemSelectionSummary();if(e.target.matches('[data-project-scanner-mode]'))changeProjectScannerMode(e.target);if(e.target.matches('[data-scanner-check]'))checkScanner(e.target);if(e.target.matches('[data-sync-project]')){changeAssessmentSelection(e.target);}if(e.target.matches('[data-sync-mode-project]')){syncModeSelection[e.target.dataset.syncModeProject]=e.target.value;updateAssessmentAction(e.target.dataset.syncModeProject);}if(e.target.matches('[data-sync-severity-project]'))syncSeveritySelection[e.target.dataset.syncSeverityProject]=e.target.value;if(e.target.matches('[data-sync-all-severity]'))syncAllSeverity=e.target.value;if(e.target.matches('[data-sync-component-severity]'))componentSyncSeveritySelection.set(stackKey(e.target.dataset.projectId,e.target.dataset.assetId),e.target.value);});
+document.addEventListener('change',e=>{if(e.target.matches('[data-osv-ecosystem]'))updateOSVEcosystemSelectionSummary();if(e.target.matches('[data-project-scanner-mode]'))changeProjectScannerMode(e.target);if(e.target.matches('[data-project-scanner-tool]'))changeProjectScannerTool(e.target);if(e.target.matches('[data-scanner-check]'))checkScanner(e.target);if(e.target.matches('[data-sync-project]')){changeAssessmentSelection(e.target);}if(e.target.matches('[data-sync-mode-project]')){syncModeSelection[e.target.dataset.syncModeProject]=e.target.value;updateAssessmentAction(e.target.dataset.syncModeProject);}if(e.target.matches('[data-sync-severity-project]'))syncSeveritySelection[e.target.dataset.syncSeverityProject]=e.target.value;if(e.target.matches('[data-sync-all-severity]'))syncAllSeverity=e.target.value;if(e.target.matches('[data-sync-component-severity]'))componentSyncSeveritySelection.set(stackKey(e.target.dataset.projectId,e.target.dataset.assetId),e.target.value);});
 document.addEventListener('input', e => {
   const input = e.target;
   if (input.matches('[data-repository-url]') || input.name === 'local_path') updateRepositoryProfileVisibility(input);
@@ -2050,9 +2506,18 @@ window.addEventListener('vulman-select-all', () => {
   const shortcut = new KeyboardEvent('keydown', {key:'a', metaKey:true, bubbles:true, cancelable:true});
   if (document.activeElement?.dispatchEvent(shortcut)) document.execCommand('selectAll');
 });
-$('#component-form').addEventListener('submit',saveComponent);$('#help-button').addEventListener('click',()=>$('#about-dialog').showModal());
+$('#component-form').addEventListener('submit',saveComponent);$('#help-button').addEventListener('click',()=>showDialog($('#about-dialog')));
+$('#detail-dialog').addEventListener('change', event => {
+  if (event.target.id === 'advice-provider') updateAdviceSetupWarning(event.target.value);
+});
+$('#detail-dialog').addEventListener('close', () => {adviceRequestSequence++;});
 $('#language-select').addEventListener('change',async e=>{const select=e.target;if(!state||changingDataDirectory||select.value===lang)return;select.disabled=true;try{await invoke('SaveSettings',{...state.settings,language:select.value});await refresh();}catch(err){select.value=lang;toast(formatError(err),true);}finally{select.disabled=false;}});
 $('#confirm-action').addEventListener('click', () => $('#confirm-dialog').close('confirm'));
+$('#lockfile-options-form').addEventListener('submit', applyLockfileOptions);
+$('#lockfile-options-enabled').addEventListener('change', updateComposerPlatformOption);
+$('#lockfile-options-dialog').addEventListener('close', () => {
+  if (!$('#lockfile-options-dialog').open) lockfileOptionsContext = null;
+});
 const followExternalLink = async event => {
   if (event.type === 'auxclick' && event.button !== 1) return;
   const link = event.target.closest('a[target="_blank"]');
@@ -2069,6 +2534,11 @@ document.addEventListener('auxclick', followExternalLink, true);
 // Dropped links and files must not navigate the privileged WebView.
 document.addEventListener('drop', event => event.preventDefault(), true);
 function renderNavigation() {
+  cancelFindingSearch();
+  if (lockfileOptionsContext && lockfileOptionsContext.hash !== location.hash) {
+    lockfileOptionsContext = null;
+    $('#lockfile-options-dialog').close();
+  }
   if (pendingPageRender) cancelAnimationFrame(pendingPageRender);
   pendingPageRender = 0;
 
@@ -2080,6 +2550,11 @@ function renderNavigation() {
       const token = $('#settings-form input[name="token_github"]');
       token?.scrollIntoView({block:'center'});
       token?.focus({preventScroll:true});
+    } else if (page === 'settings' && ['openai','claude'].includes(severity)) {
+      const field = route()[2] === 'model' ? severity + '_model' : 'token_' + severity;
+      const input = $('#settings-form input[name="' + field + '"]');
+      input?.scrollIntoView({block:'center'});
+      input?.focus({preventScroll:true});
     } else {
       window.scrollTo(0, 0);
     }
@@ -2116,6 +2591,7 @@ window.addEventListener('hashchange', () => {
   const databaseInfo = $('#database-info-dialog');
   if (databaseInfo.open) databaseInfo.close();
   expandedRuns.clear();
+  expandedNoticeGroups.clear();
   filter = {search:'', severity:'', project:'', match:'', stack:''};
   const [page, id, view] = route();
   const editor = $('#project-editor form');
@@ -2140,7 +2616,10 @@ async function pollState() {
   const current = state;
   try {
     const next = await invoke('StateSince', current.version);
-    if (!changingDataDirectory && state === current) applyPollingState(next);
+    if (!changingDataDirectory && state === current && applyPollingState(next) === false) {
+      const full = await invoke('State');
+      if (!changingDataDirectory && state === current) applyPollingState(full);
+    }
   } catch {
     toast(t('connectionLost'), true, 'connection-lost');
   } finally {
@@ -2162,8 +2641,8 @@ async function boot() {
   }
 }
 
-function scopeSearchHTML(disabled = false) {
-  return `<div class="scope-search" role="search">${icon('search')}<input type="search" data-scope-search aria-label="${esc(t('scopeSearch'))}" placeholder="${esc(t('scopeSearch'))}" autocomplete="off" spellcheck="false" ${disabled ? 'disabled' : ''}><button type="button" class="icon-button" data-action="clear-scope-search" aria-label="${esc(t('scopeSearchClear'))}" title="${esc(t('scopeSearchClear'))}" hidden>×</button></div><p class="scope-search-empty" data-scope-empty role="status" aria-live="polite" hidden>${esc(t('scopeSearchEmpty'))}</p>`;
+function scopeSearchHTML(disabled = false, searchKey = 'scopeSearch', emptyKey = 'scopeSearchEmpty') {
+  return `<div class="scope-search" role="search">${icon('search')}<input type="search" data-scope-search aria-label="${esc(t(searchKey))}" placeholder="${esc(t(searchKey))}" autocomplete="off" spellcheck="false" ${disabled ? 'disabled' : ''}><button type="button" class="icon-button" data-action="clear-scope-search" aria-label="${esc(t('scopeSearchClear'))}" title="${esc(t('scopeSearchClear'))}" hidden>×</button></div><p class="scope-search-empty" data-scope-empty role="status" aria-live="polite" hidden>${esc(t(emptyKey))}</p>`;
 }
 
 function filterScopeChoices(input) {
@@ -2231,13 +2710,31 @@ function positionOpenScopePickers(event) {
   if (event?.target?.closest?.('.scope-picker-menu')) return;
   $$('details.scope-picker[open]').forEach(positionScopePicker);
 }
+document.addEventListener('click', event => {
+  const summary = event.target.closest('.assessment-notices > summary');
+  if (!summary) return;
+  const group = summary.parentElement, key = group.dataset.noticeGroup;
+  // Native toggle events are queued; remember this click before polling can redraw the group.
+  if (group.open) expandedNoticeGroups.delete(key);
+  else expandedNoticeGroups.add(key);
+}, true);
 document.addEventListener('toggle', event => {
   if (event.target.matches('details.scope-picker')) scopePickerToggled(event.target);
+  if (event.target.matches('details[data-notice-group]') && event.target.isConnected) {
+    const key = event.target.dataset.noticeGroup;
+    if (event.target.open) expandedNoticeGroups.add(key);
+    else expandedNoticeGroups.delete(key);
+  }
 }, true);
 document.addEventListener('scroll', positionOpenScopePickers, true);
 window.addEventListener('resize', positionOpenScopePickers);
 
 function closeAssessmentPicker(event) {
+  if (event.type === 'keydown' && event.key === 'Enter' && event.target.matches?.('[data-scope-search]')) {
+    event.preventDefault();
+    return;
+  }
+
   for (const picker of $$('details.scope-picker[open]')) {
     if (event.type === 'keydown') {
       if (event.key !== 'Escape' || !picker.contains(event.target)) continue;

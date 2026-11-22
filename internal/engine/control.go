@@ -5,9 +5,10 @@ import (
 
 	"vulman/internal/apperror"
 	"vulman/internal/model"
+	"vulman/internal/store"
 )
 
-var ErrRunNotActive = apperror.New("assessment_is_no_longer_active_reload_its_workflow", "assessment is no longer active; reload its workflow")
+var ErrRunNotActive = store.ErrRunNotFound
 var ErrInvalidControl = apperror.New("invalid_workflow_action", "invalid workflow action")
 
 func activeStatus(status string) bool {
@@ -52,47 +53,36 @@ func (e *Engine) Control(projectID, runID, action string) error {
 		return ErrRunNotActive
 	}
 
-	err := e.Store.Update(func(st *model.State) error {
-		for i := range st.Projects {
-			p := &st.Projects[i]
-			if p.ID != projectID || !p.Syncing {
-				continue
-			}
-
-			for j := range p.Runs {
-				r := &p.Runs[j]
-				if r.ID != runID {
-					continue
-				}
-				switch action {
-				case "pause":
-					if r.Status != "running" {
-						return apperror.New("only_a_running_workflow_can_be_paused", "only a running workflow can be paused")
-					}
-
-					r.Status = "pausing"
-					r.PausedAt = time.Now()
-					addLog(r, "", "pause_requested", "")
-				case "resume":
-					if r.Status != "paused" && r.Status != "pausing" {
-						return apperror.New("only_a_paused_workflow_can_be_resumed", "only a paused workflow can be resumed")
-					}
-
-					finishPause(r)
-					r.Status = "running"
-					addLog(r, "", "run_resumed", "")
-				case "stop":
-					if !activeStatus(r.Status) || r.Status == "stopping" {
-						return ErrRunNotActive
-					}
-
-					r.Status = "stopping"
-					addLog(r, "", "stop_requested", "")
-				}
-				return nil
-			}
+	err := e.Store.UpdateRun(projectID, runID, func(project *store.RunProject, r *model.Run) error {
+		if !project.Syncing {
+			return ErrRunNotActive
 		}
-		return ErrRunNotActive
+		switch action {
+		case "pause":
+			if r.Status != "running" {
+				return apperror.New("only_a_running_workflow_can_be_paused", "only a running workflow can be paused")
+			}
+
+			r.Status = "pausing"
+			r.PausedAt = time.Now()
+			addLog(r, "", "pause_requested", "")
+		case "resume":
+			if r.Status != "paused" && r.Status != "pausing" {
+				return apperror.New("only_a_paused_workflow_can_be_resumed", "only a paused workflow can be resumed")
+			}
+
+			finishPause(r)
+			r.Status = "running"
+			addLog(r, "", "run_resumed", "")
+		case "stop":
+			if !activeStatus(r.Status) || r.Status == "stopping" {
+				return ErrRunNotActive
+			}
+
+			r.Status = "stopping"
+			addLog(r, "", "stop_requested", "")
+		}
+		return nil
 	})
 
 	if err != nil {

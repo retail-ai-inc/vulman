@@ -22,7 +22,7 @@ func newComposerCommand(ctx context.Context, args ...string) (*exec.Cmd, error) 
 }
 
 // Resolve standard batch shims without executing or parsing them. All names,
-// entry points and audit options come from the two fixed invocations above.
+// entry points and command options come from the fixed scanner invocations.
 func newWindowsPackageCommand(ctx context.Context, name, runtimeName, entry string, args ...string) (*exec.Cmd, error) {
 	program, err := absoluteLookPath(name)
 	if err != nil {

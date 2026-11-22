@@ -3,13 +3,7 @@ const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
-const localesPath = path.join(__dirname, '../cmd/vulman/locales');
-const bundledLocalizations = Object.fromEntries(
-  fs.readdirSync(localesPath).filter(name => name.endsWith('.json')).map(name => [
-    path.basename(name, '.json'), JSON.parse(fs.readFileSync(path.join(localesPath, name), 'utf8')),
-  ]),
-);
+const {app, bundledLocalizations} = require('./ui-test-harness.cjs');
 
 // Check rendered test output; this is not an HTML sanitizer.
 const unexpectedHTMLTag = /<\/?(?:script|img)\b/i;
@@ -28,31 +22,178 @@ const htmlEscapingCases = [
   },
 ];
 
-function app(byName) {
-  const elements = new Map();
-  const document = {
-    querySelector(selector) {
-      if (!elements.has(selector)) elements.set(selector, {listeners:{}, addEventListener(type,callback) {this.listeners[type]=callback;}, setAttribute(name,value) {this[name]=value;}, insertAdjacentHTML(position,html) {this.insertedHTML=html;}, innerHTML:''});
-      return elements.get(selector);
-    },
-    querySelectorAll() {return [];},
-    listeners:{},
-    addEventListener(type,callback,capture) {if (!capture) this.listeners[type]=callback;}
-  };
-  const window = {listeners:{}, scrollTo() {}, addEventListener(type,callback) {this.listeners[type]=callback;}};
-  const frames = new Map();
-  let nextFrame = 0;
-  const context = vm.createContext({
-    document, window, history:{scrollRestoration:'auto'}, location:{hash:'#project/p'}, URL, Call:{ByName:byName}, bundledLocalizations,
-    requestAnimationFrame(callback) {const id = ++nextFrame; frames.set(id, callback); return id;},
-    cancelAnimationFrame(id) {frames.delete(id);},
-    paintFrame() {const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(callback => callback());},
-  });
-  const source = fs.readFileSync(path.join(__dirname,'../cmd/vulman/ui/app.js'),'utf8').replace(/^import .*$/m, '').replace(/boot\(\);\s*$/, '');
-  vm.runInContext(source,context);
-  vm.runInContext('localizations = bundledLocalizations', context);
-  return expression => vm.runInContext(expression,context);
+test('reopening a long dialog resets its scroll and gives the content keyboard focus', () => {
+  const run = app();
+  run(`
+    var focused = null;
+    const body = {scrollTop:350,scrollHeight:1200,clientHeight:420,
+      setAttribute(name,value){this[name]=value;},focus(options){focused=options;}};
+    const dialog = {querySelector:selector=>selector === '.dialog-body' ? body : null,
+      showModal(){this.open=true;body.scrollTop=350;}};
+    showDialog(dialog);
+  `);
+  assert.equal(run('dialog.open'), true);
+  assert.equal(run('body.scrollTop'), 0);
+  assert.equal(run('body.tabindex'), '0');
+  assert.equal(run('focused.preventScroll'), true);
+  run(`body.scrollTop=800; showDialog(dialog)`);
+  assert.equal(run('body.scrollTop'), 0);
+});
+
+test('dialog scrolling preserves explicit form autofocus and leaves short content unfocused', () => {
+  const run = app();
+  run(`
+    var focused = 0, autofocus = {};
+    const body = {scrollTop:100,scrollHeight:1200,clientHeight:420,setAttribute(){},focus(){focused++;}};
+    const dialog = {querySelector:selector=>selector === '.dialog-body' ? body : autofocus,showModal(){}};
+    showDialog(dialog);
+  `);
+  assert.equal(run('focused'), 0);
+  assert.equal(run('body.scrollTop'), 0);
+  run(`autofocus=null; body.scrollHeight=body.clientHeight; showDialog(dialog)`);
+  assert.equal(run('focused'), 0);
+});
+
+function adviceFixture(byName) {
+  const run = app(byName);
+  run(`
+    state={settings:{language:'en',ai_provider:'public',openai_model:'fixture',claude_model:'fixture'},token_status:{},saved_token_status:{}};
+    currentFinding={project_id:'p',id:'CVE-2024-0001',asset_id:'component'};
+    $('#advice-setup-warning').scrollIntoView=()=>{};
+  `);
+  return run;
 }
+
+test('selecting an AI provider without a key shows a setup warning and makes no AI request', async () => {
+  const requests=[];
+  const run=adviceFixture(async (...args)=>{requests.push(args);return {provider:'public',text:'Public guidance remains available.'};});
+  await run("getAdvice('public')");
+  const guidance=run("$('#advice-result').innerHTML");
+  for(const provider of ['openai','claude']) {
+    run(`$('#detail-dialog').listeners.change({target:{id:'advice-provider',value:'${provider}'}})`);
+    assert.equal(run("$('#advice-setup-warning').hidden"),false);
+    assert.match(run("$('#advice-setup-warning').innerHTML"),/No API key is configured/);
+    assert.match(run("$('#advice-setup-warning').innerHTML"),new RegExp(`data-provider="${provider}" data-setup-field="key"`));
+    await run(`getAdvice('${provider}')`);
+    assert.equal(run("$('#advice-result').innerHTML"),guidance);
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)),[['main.Desktop.Advice','p',{finding_id:'CVE-2024-0001',asset_id:'component',provider:'public'}]]);
+  run("$('#detail-dialog').listeners.change({target:{id:'advice-provider',value:'public'}})");
+  assert.equal(run("$('#advice-setup-warning').hidden"),true);
+});
+
+test('missing-key warnings survive public guidance arriving after the provider selection', async () => {
+  let finish;
+  const run=adviceFixture(()=>new Promise(resolve=>{finish=resolve;}));
+  const pending=run("getAdvice('public')");
+  await run("getAdvice('openai')");
+  finish({provider:'public',text:'Use the upstream advisory.'});
+  await pending;
+  assert.match(run("$('#advice-result').innerHTML"),/Use the upstream advisory/);
+  assert.match(run("$('#advice-setup-warning').innerHTML"),/OpenAI/);
+  assert.equal(run("$('#advice-setup-warning').hidden"),false);
+  assert.equal(run(`$('[data-action="advice"]').disabled`),false);
+});
+
+test('effective environment or stored keys allow AI advice without exposing saved credentials', async () => {
+  const requests=[];
+  const run=adviceFixture(async (...args)=>{requests.push(args);return {provider:args[2].provider,text:'Verified remediation plan.'};});
+  for(const provider of ['openai','claude']) {
+    run(`state.token_status.${provider}=true;state.saved_token_status.${provider}=false`);
+    await run(`getAdvice('${provider}')`);
+    assert.equal(run("$('#advice-setup-warning').hidden"),true);
+    assert.match(run("$('#advice-result').innerHTML"),/Verified remediation plan/);
+  }
+  assert.deepEqual(requests.map(args=>args[2].provider),['openai','claude']);
+});
+
+test('missing model IDs have a separate warning and Configuration target for each provider', async () => {
+  let requests=0;
+  const run=adviceFixture(()=>{requests++;});
+  for(const provider of ['openai','claude']) {
+    run(`state.token_status.${provider}=true;state.settings.${provider}_model='  '`);
+    await run(`getAdvice('${provider}')`);
+    assert.match(run("$('#advice-setup-warning').innerHTML"),/No model ID is configured/);
+    assert.match(run("$('#advice-setup-warning').innerHTML"),new RegExp(`data-provider="${provider}" data-setup-field="model"`));
+  }
+  assert.equal(requests,0);
+});
+
+test('AI setup shortcuts close the detail dialog and focus the matching key or model field', () => {
+  const run=adviceFixture();
+  run(`var closed=0,focused='',scrolled='';$('#detail-dialog').close=()=>closed++;render=()=>{}`);
+  for(const provider of ['openai','claude']) for(const field of ['key','model']) {
+    const selector=`#settings-form input[name="${field==='key'?'token_'+provider:provider+'_model'}"]`;
+    run(`
+      $('${selector}').scrollIntoView=()=>{scrolled='${provider}/${field}'};
+      $('${selector}').focus=()=>{focused='${provider}/${field}'};
+      configureAdviceProvider('${provider}','${field}');
+      location.hash='#'+location.hash;
+      renderNavigation();
+    `);
+    assert.equal(run('location.hash'),`#settings/${provider}${field==='model'?'/model':''}`);
+    assert.equal(run('focused'),`${provider}/${field}`);
+    assert.equal(run('scrolled'),`${provider}/${field}`);
+  }
+  assert.equal(run('closed'),4);
+  assert.equal(run("configureAdviceProvider('unknown','key')"),false);
+  assert.equal(run('closed'),4);
+});
+
+test('backend configuration fallback warnings appear before public guidance with a setup action', async () => {
+  let response;
+  const run=adviceFixture(async ()=>response);
+  run('state.token_status.openai=true');
+  for(const [code,field] of [['advice_missing_api_key','key'],['advice_missing_model','model']]) {
+    response={provider:'public',text:'Fallback advisory text.',warning_message:{code,params:{arg0:'OpenAI'}}};
+    await run("getAdvice('openai')");
+    const html=run("$('#advice-result').innerHTML");
+    assert.ok(html.indexOf('role="alert"')<html.indexOf('Fallback advisory text.'));
+    assert.match(html,new RegExp(`data-provider="openai" data-setup-field="${field}"`));
+    assert.match(html,/Configuration/);
+  }
+  run("lang='ja'");
+  await run("getAdvice('openai')");
+  assert.match(run("$('#advice-result').innerHTML"),/モデルIDが未設定/);
+});
+
+test('late advice responses, errors and closed dialogs cannot overwrite a newer request', async () => {
+  const pending=[];
+  const run=adviceFixture(()=>new Promise((resolve,reject)=>pending.push({resolve,reject})));
+  run('state.token_status={openai:true,claude:true}');
+  const first=run("getAdvice('openai')"),second=run("getAdvice('claude')");
+  pending[1].resolve({provider:'claude',text:'Current advice'});
+  await second;
+  pending[0].resolve({provider:'openai',text:'Old advice'});
+  await first;
+  assert.match(run("$('#advice-result').innerHTML"),/Current advice/);
+  assert.doesNotMatch(run("$('#advice-result').innerHTML"),/Old advice/);
+  const third=run("getAdvice('openai')"),fourth=run("getAdvice('claude')");
+  pending[3].resolve({provider:'claude',text:'New advice'});
+  await fourth;
+  pending[2].reject(new Error('Old failure'));
+  await third;
+  assert.match(run("$('#advice-result').innerHTML"),/New advice/);
+  const fifth=run("getAdvice('openai')");
+  run("$('#detail-dialog').listeners.close()");
+  const closedHTML=run("$('#advice-result').innerHTML");
+  pending[4].resolve({provider:'openai',text:'Closed dialog response'});
+  await fifth;
+  assert.equal(run("$('#advice-result').innerHTML"),closedHTML);
+});
+
+test('AI setup messages support Japanese and escape provider and service response text', async () => {
+  const run=adviceFixture(async ()=>({provider:'public',text:'<SCRIPT>untrusted advice</SCRIPT>',warning_message:{code:'advice_missing_api_key',params:{arg0:'<IMG SRC="data:,test">'}}}));
+  run("lang='ja';updateAdviceSetupWarning('claude')");
+  assert.match(run("$('#advice-setup-warning').innerHTML"),/Claude/);
+  assert.match(run("$('#advice-setup-warning').innerHTML"),/APIキー/);
+  run('state.token_status.openai=true');
+  await run("getAdvice('openai')");
+  const html=run("$('#advice-result').innerHTML");
+  assert.doesNotMatch(html,unexpectedHTMLTag);
+  assert.match(html,/&lt;SCRIPT&gt;/);
+  assert.match(html,/&lt;IMG/);
+});
 
 test('desktop boots the full workspace through its native bridge', async () => {
   const requests = [];
@@ -324,7 +465,7 @@ test('vulnerability pages render at most 100 findings and filter the entire sort
   await run('document.listeners.click({target:next})');
   assert.match(html(), /Showing 201–226 of 226 vulnerabilities/);
   assert.equal(findingIDs(html()).length, 26);
-  run(`bindFilters(); document.querySelector('#finding-search').listeners.input({target:{value:'match me'}});`);
+  run(`bindFilters(); document.querySelector('#finding-search').listeners.input({target:{value:'match me'}}); advanceTimers(120);`);
   assert.match(html(), /Showing 1–100 of 125 matches \(226 total\)/);
   assert.equal(findingIDs(html())[0], 'CVE-224');
   assert.equal(run('findingsPage'), 1);
@@ -518,12 +659,17 @@ test('database detail progress refreshes independently without replacing notes o
   assert.match(run("$('#database-info-status').innerHTML"), /&lt;error&gt;/);
 });
 
-test('collapsed OSV choices retain checked inputs and report the current selection count', () => {
+test('OSV ecosystems use a searchable dropdown with checked inputs and localized selection counts', () => {
   const run = app();
   run(`state={settings:{osv_ecosystems:['Go','PyPI']},osv_ecosystem_options:['Go','npm','PyPI'],projects:[]}`);
   const html = run('osvDatabaseSettingsHTML()');
-  assert.match(html, /<details class="database-ecosystem-settings"><summary>/);
+  assert.match(html, /<details class="scope-picker" id="osv-ecosystem-picker">/);
+  assert.match(html, /<summary aria-labelledby="osv-ecosystems-label osv-selection-summary">/);
   assert.match(html, /data-osv-selection-summary>2 selected/);
+  assert.match(html, /class="scope-picker-menu" tabindex="0" role="region" aria-label="Downloaded ecosystems"/);
+  assert.match(html, /type="search" data-scope-search aria-label="Search ecosystems…"/);
+  assert.match(html, /data-scope-empty role="status" aria-live="polite" hidden>No ecosystems match this search/);
+  assert.doesNotMatch(html, /osv-ecosystems-grid/);
   assert.match(html, /data-osv-ecosystem value="Go" checked/);
   assert.match(html, /data-osv-ecosystem value="PyPI" checked/);
   run(`
@@ -531,6 +677,62 @@ test('collapsed OSV choices retain checked inputs and report the current selecti
     updateOSVEcosystemSelectionSummary();
   `);
   assert.equal(run("$('[data-osv-selection-summary]').textContent"), '3 selected');
+  run(`lang='ja'`);
+  const japanese = run('osvDatabaseSettingsHTML()');
+  assert.match(japanese, /aria-label="ダウンロード対象のエコシステム"/);
+  assert.match(japanese, /aria-label="エコシステムを検索…"/);
+  assert.match(japanese, /検索条件に一致するエコシステムはありません。/);
+});
+
+test('searching OSV ecosystems preserves hidden selections when saving Configuration', async () => {
+  const run = app();
+  scopeSearchFixture(run, [['Go','npm','PyPI','Packagist']]);
+  run(`
+    state = {settings:{osv_ecosystems:['Go','PyPI']},projects:[]};
+    const inputs = scopeGroups[0].rows.map(row => ({value:row.textContent, checked:['Go','PyPI'].includes(row.textContent)}));
+    const queryAll = document.querySelectorAll;
+    document.querySelectorAll = selector => selector === '[data-osv-ecosystem]:checked' ? inputs.filter(input => input.checked) : queryAll(selector);
+    typeScopeSearch('Ｐａｃｋａｇｉｓｔ');
+    const elements = {};
+    for (const key of ['language','nvd_url','cve_url','osv_url','ai_provider','openai_model','claude_model']) elements[key] = {value:'value'};
+    for (const key of ['nvd','cve','osv']) elements['source_'+key] = {checked:true};
+    for (const {id} of scannerDefinitions()) elements['scanner_'+id] = {checked:false};
+    for (const key of Object.keys(credentialLabels)) elements['token_'+key] = {value:''};
+    elements.osv_update_schedule = {value:'daily'};
+    elements.cache_hours = {value:'6'};
+    elements.cache_max_entries = {value:'10000'};
+    elements.cache_max_mib = {value:'512'};
+    const form = {elements, querySelector:() => ({disabled:false}), querySelectorAll:selector => selector === '[data-osv-ecosystem]:checked' ? inputs.filter(input => input.checked) : []};
+    var saved;
+    invoke = async (method, body) => {assertSaveMethod = method; saved = body;};
+    var assertSaveMethod;
+    refresh = async () => {};
+    toast = () => {};
+  `);
+  assert.equal(run('visibleScopeLabels().join()'), 'Packagist');
+  await run('saveSettings({preventDefault(){},target:form})');
+  assert.equal(run('assertSaveMethod'), 'SaveSettings');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(saved.osv_ecosystems)')), ['Go','PyPI']);
+  assert.equal(run('saved.osv_update_schedule'), 'daily');
+  run(`inputs[3].checked = true; updateOSVEcosystemSelectionSummary()`);
+  assert.equal(run("$('[data-osv-selection-summary]').textContent"), '3 selected');
+  await run('saveSettings({preventDefault(){},target:form})');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(saved.osv_ecosystems)')), ['Go','PyPI','Packagist']);
+});
+
+test('Enter in a dropdown search filters without submitting its surrounding form', () => {
+  const run = app();
+  scopeSearchFixture(run, [['Go','PyPI','npm']]);
+  run(`
+    scopePicker.open = true;
+    typeScopeSearch('Go');
+    var prevented = false;
+    closeAssessmentPicker({type:'keydown',key:'Enter',target:scopeSearch,preventDefault(){prevented = true;}});
+  `);
+  assert.equal(run('prevented'), true);
+  assert.equal(run('scopePicker.open'), true);
+  assert.equal(run('scopeSearch.value'), 'Go');
+  assert.equal(run('visibleScopeLabels().join()'), 'Go');
 });
 
 test('OSV queue cards use only their ecosystem progress and refresh without page rendering', () => {
@@ -1505,7 +1707,7 @@ test('counts update on component, severity, search, and match changes including 
   assert.match(run(`document.querySelector('#finding-results').innerHTML`),/Showing 1 match \(4 total\)/);
   run(`document.querySelector('#match-filter').listeners.change({target:{value:'review'}})`);
   assert.match(run(`document.querySelector('#finding-results').innerHTML`),/Showing 0 matches \(4 total\)/);
-  run(`document.querySelector('#match-filter').listeners.change({target:{value:''}});document.querySelector('#finding-search').listeners.input({target:{value:'no such advisory'}})`);
+  run(`document.querySelector('#match-filter').listeners.change({target:{value:''}});document.querySelector('#finding-search').listeners.input({target:{value:'no such advisory'}});advanceTimers(120)`);
   const empty=run(`document.querySelector('#finding-results').innerHTML`);
   assert.match(empty,/Showing 0 matches \(4 total\)/);
   assert.match(empty,/No findings match these filters/);
@@ -2921,6 +3123,135 @@ test('partial workflows keep the short badge and show a localized completion mes
   assert.match(run('workflowBody(project,workflow)'),/role="status">評価は一部のみ完了しました<\/div>/);
 });
 
+function assessmentNoticeFixture(run) {
+  workflowFixture(run);
+  run(`
+    workflow.status = 'partial';
+    workflow.steps.forEach(step => step.status = 'complete');
+    workflow.scanner_jobs = [{generated_lockfile:true}];
+    workflow.scanners_completed = 2;
+    state = {settings:{language:'en'}, projects:[{
+      ...project, assets:[], findings:[], schedule:'off', revision:2, assessed_revision:1,
+      scanner_profiles:{local:{mode:'custom', needs_scan:true}}, runs:[workflow],
+    }]};
+  `);
+}
+
+test('project assessment warnings share one collapsed notice group without repeating in the workflow', () => {
+  const run = app();
+  assessmentNoticeFixture(run);
+  run(`renderProject('p')`);
+  const html = run(`$('#main').innerHTML`);
+  assert.equal((html.match(/class="assessment-notices"/g) || []).length, 1);
+  assert.match(html, /<details class="assessment-notices" data-notice-group="project:p:2:run-1"\s*>/);
+  assert.match(html, /Assessment notices<\/span><span class="assessment-notice-count">4 notices<\/span>/);
+  for (const key of ['scannerProfileNeedsScan','incomplete','inventoryChanged','scannerGeneratedLockfileWarning']) {
+    const message = run(`esc(t('${key}'))`);
+    assert.equal(html.split(message).length - 1, 1, key);
+  }
+  assert.doesNotMatch(html, /class="(?:scanner-policy-notice|notice(?: info)?)"/);
+  assert.match(html, /<span class="pill partial">Partial<\/span>/);
+  assert.match(html, /role="status">Assessment completed partially<\/div>/);
+  assert.match(html, /3 of 3 steps finished/);
+  assert.match(run('workflowRun(state.projects[0],workflow)'), /data-notice-group="run:run-1"/);
+  run(`dismissedRuns.add(workflow.id); renderProject('p')`);
+  assert.match(run(`$('#main').innerHTML`), /Assessment notices/);
+  assert.doesNotMatch(run(`$('#main').innerHTML`), /data-sync-run=/);
+});
+
+test('notice groups disappear when reassessed and distinguish scoped failures and changed components', () => {
+  const run = app();
+  assessmentNoticeFixture(run);
+  run(`
+    workflow.status = 'complete';
+    workflow.scanner_jobs = [];
+    state.projects[0].scanner_profiles = {};
+    state.projects[0].assessed_revision = 2;
+  `);
+  assert.equal(run('projectAssessmentNotices(state.projects[0])'), '');
+  run(`
+    workflow.mode = 'code';
+    workflow.status = 'failed';
+    state.projects[0].assets = [{id:'a', needs_assessment:true}];
+  `);
+  let html = run('projectAssessmentNotices(state.projects[0])');
+  assert.match(html, /2 notices/);
+  assert.match(html, /The latest code scan is incomplete/);
+  assert.match(html, /The tech stack needs reassessment/);
+  assert.doesNotMatch(html, /The latest full-project assessment is incomplete|Inventory has changed since/);
+  run(`workflow.mode = 'auto'; workflow.selection = {assets:[]}`);
+  html = run('projectAssessmentNotices(state.projects[0])');
+  assert.match(html, /The latest scoped assessment is incomplete/);
+  assert.doesNotMatch(html, /The latest code scan is incomplete/);
+});
+
+test('scanner history notices retain warnings and counts in both languages and escape inserted text', () => {
+  const run = app();
+  workflowFixture(run);
+  run(`Object.assign(workflow, {status:'complete', scanner_jobs:[{generated_lockfile:true}], scanners_completed:0, retained_scanner_findings:1001})`);
+  let html = run('scannerRunSummary(workflow)');
+  assert.match(html, /<details class="assessment-notices" data-notice-group="run:run-1"\s*>/);
+  assert.match(html, /Scanner notices[^]*3 notices/);
+  assert.match(html, /No scanner completed/);
+  assert.match(html, /1,001 previous scanner findings retained/);
+  run(`lang = 'ja'`);
+  html = run('scannerRunSummary(workflow)');
+  assert.match(html, /スキャナの注意事項[^]*3件/);
+  assert.match(html, /生成したロックファイル/);
+  assert.match(html, /以前の検出結果1,001件/);
+  html = run(`assessmentNoticesHTML('<SCRIPT>', 'scannerNotices', [{title:'noticeGeneratedLockfile', message:'<IMG SRC="test">'}])`);
+  assert.doesNotMatch(html, unexpectedHTMLTag);
+  assert.match(html, /data-notice-group="&lt;SCRIPT&gt;"/);
+  assert.match(html, /&lt;IMG SRC=&quot;test&quot;&gt;/);
+  assert.match(html, /assessment-notice-count">1件/);
+});
+
+test('notice expansion survives redraws and polling but resets on navigation and for a new run', () => {
+  const run = app();
+  assessmentNoticeFixture(run);
+  run(`
+    const toggleNotice = (key, open, isConnected = true) => document.captureListeners.toggle.forEach(callback => callback({target:{
+      matches:selector => selector === 'details[data-notice-group]',
+      dataset:{noticeGroup:key}, open, isConnected,
+    }}));
+    toggleNotice('project:p:2:run-1', true);
+    renderProject('p');
+  `);
+  assert.match(run(`$('#main').innerHTML`), /data-notice-group="project:p:2:run-1" open/);
+  run(`renderProject('p')`);
+  assert.match(run(`$('#main').innerHTML`), /data-notice-group="project:p:2:run-1" open/);
+  run(`
+    toggleNotice('run:run-1', true);
+    workflow.status = 'running';
+    const panels = [true, false].map(show => ({
+      dataset:{syncProjectId:'p',syncRun:'run-1', workflowNotices:String(show)}, innerHTML:'', querySelector:() => null,
+    }));
+    document.querySelectorAll = selector => selector === '[data-sync-run]' ? panels : [];
+    updateSyncPanels();
+  `);
+  assert.match(run('panels[0].innerHTML'), /data-notice-group="run:run-1" open/);
+  assert.doesNotMatch(run('panels[1].innerHTML'), /assessment-notices|may differ from deployed/);
+  run(`toggleNotice('project:p:2:run-1', false, false)`);
+  assert.equal(run(`expandedNoticeGroups.has('project:p:2:run-1')`), true);
+  run(`toggleNotice('project:p:2:run-1', false)`);
+  assert.doesNotMatch(run('projectAssessmentNotices(state.projects[0])'), / open/);
+  run(`
+    const noticeGroup = {dataset:{noticeGroup:'project:p:2:run-1'}, open:false};
+    const summary = {parentElement:noticeGroup};
+    const clickNotice = () => document.captureListeners.click.forEach(callback => callback({
+      type:'click', target:{closest:selector => selector === '.assessment-notices > summary' ? summary : null},
+    }));
+    clickNotice();
+  `);
+  assert.match(run('projectAssessmentNotices(state.projects[0])'), / open/);
+  run(`noticeGroup.open = true; clickNotice()`);
+  assert.doesNotMatch(run('projectAssessmentNotices(state.projects[0])'), / open/);
+  run(`toggleNotice('project:p:2:run-1', true); workflow.id = 'run-2'`);
+  assert.doesNotMatch(run('projectAssessmentNotices(state.projects[0])'), / open/);
+  run(`location.hash = '#activity'; window.listeners.hashchange()`);
+  assert.equal(run('expandedNoticeGroups.size'), 0);
+});
+
 test('polling preserves paused and finished workflow panels until their details are toggled',()=>{
   for (const status of ['paused', 'partial']) {
     const run=app();workflowFixture(run);
@@ -3092,6 +3423,185 @@ test('project scanner profiles map saved choices to each URL and local folder', 
   assert.doesNotMatch(run("renderSettings.toString()"), /repositoryScannerSettingsHTML|initializeScannerProfiles/);
 });
 
+test('lockfile generation is off by default and survives each profile draft independently', () => {
+  const run = app();
+  run(`state = {settings:{scanners:{npm:true,composer:true}},scan_repositories:{}};`);
+  let html = run("projectScannerProfileHTML({mode:'custom',tools:['npm']})");
+  assert.match(html, /Generate missing lockfiles for scanning/);
+  assert.doesNotMatch(html, /data-project-generate-lockfiles[^>]*checked/);
+  html = run("projectScannerProfileHTML({mode:'custom',tools:['composer'],generate_lockfiles:true})");
+  assert.match(html, /data-project-generate-lockfiles[^>]*checked/);
+  assert.match(html, /data-profile-lockfile-options[^>]*aria-haspopup="dialog"/);
+  assert.doesNotMatch(html, /scanner-lockfile-option|May contact package registries|<small>/);
+  run(`
+    const generation = {checked:true};
+    const card = {
+      querySelector:selector => selector === '[data-project-scanner-mode]' ? {value:'custom'} : generation,
+      querySelectorAll:selector => selector === '[data-project-scanner-tool]:checked' ? [{dataset:{projectScannerTool:'npm',profileAdditional:'false'}}] : [],
+    };
+    const saved = readProjectScannerProfile(card);
+    const draft = {repository_scanners:[{repository:'https://github.com/org/repo',profile:saved},{local:true,profile:saved}]};
+  `);
+  assert.equal(run('saved.generate_lockfiles'), true);
+  assert.equal(run("repositoryProfileFor(draft,'https://github.com/org/repo').generate_lockfiles"), true);
+  assert.equal(run('localRepositoryProfileFor(draft).generate_lockfiles'), true);
+  assert.equal(run("defaultScannerProfile({scanner_profiles:{local:saved}},'local').generate_lockfiles"), true);
+  run('generation.checked = false');
+  assert.equal(run('Boolean(readProjectScannerProfile(card).generate_lockfiles)'), false);
+  assert.match(run("projectScannerProfileHTML({mode:'disabled',generate_lockfiles:true})"), /data-profile-lockfile-options[^>]* hidden/);
+  assert.match(run("projectScannerProfileHTML({mode:'custom',tools:['govulncheck']})"), /data-profile-lockfile-options[^>]* hidden/);
+  assert.doesNotMatch(run("projectScannerProfileHTML({mode:'auto'},true)"), /data-profile-lockfile-options[^>]* hidden/);
+  run("state.settings.scanners={govulncheck:true};lang='ja'");
+  assert.match(run("projectScannerProfileHTML({mode:'custom',tools:['govulncheck']})"), /data-profile-lockfile-options[^>]* hidden/);
+});
+
+function lockfilePopupFixture(run) {
+  run(`
+    state={settings:{scanners:{npm:true,composer:true,govulncheck:true}}};
+    location.hash='#project/p/edit';
+    localize=()=>{};
+    invoke=()=>{throw new Error('popup must only change the form draft');};
+    const dialog=$('#lockfile-options-dialog');
+    let popupCount=0;
+    dialog.querySelector=()=>({setAttribute(){}});
+    dialog.showModal=()=>{dialog.open=true;popupCount++;};
+    dialog.close=()=>{dialog.open=false;dialog.listeners.close();};
+    const makeCard=()=>{
+      const mode={value:'custom'}, preference={checked:false}, ignore={checked:false}, button={hidden:true};
+      const tools=['npm','composer','govulncheck'].map(id=>({checked:false,dataset:{projectScannerTool:id,profileAdditional:'false'},matches:selector=>selector==='[data-project-scanner-tool]'}));
+      const card={isConnected:true,dataset:{scannerLocation:'github'},mode,preference,ignore,button,tools,
+        querySelector:selector=>({'[data-project-scanner-mode]':mode,'[data-project-generate-lockfiles]':preference,'[data-project-ignore-composer-platform]':ignore,'[data-profile-lockfile-options]':button})[selector],
+        querySelectorAll:selector=>selector==='[data-project-scanner-tool]:checked'?tools.filter(input=>input.checked):[],
+      };
+      tools.forEach(input=>{input.closest=()=>card;});
+      button.dataset={action:'lockfile-options'};
+      button.closest=selector=>selector==='[data-action]'?button:selector==='[data-repository-profile]'?card:null;
+      return card;
+    };
+    const first=makeCard(), second=makeCard();
+    const changeTool=(card,id,checked)=>{
+      const input=card.tools.find(input=>input.dataset.projectScannerTool===id);
+      input.checked=checked;
+      document.listeners.change({target:input});
+    };
+  `);
+}
+
+test('npm and Composer selections prompt for lockfiles without enabling them or affecting other profiles', async () => {
+  const run=app();
+  lockfilePopupFixture(run);
+  run("changeTool(first,'govulncheck',true)");
+  assert.equal(run('popupCount'),0);
+  assert.equal(run('first.button.hidden'),true);
+  run("changeTool(first,'npm',true)");
+  assert.equal(run('popupCount'),1);
+  assert.equal(run("$('#lockfile-options-enabled').checked"),false);
+  assert.equal(run('first.preference.checked'),false);
+  assert.equal(run('first.button.hidden'),false);
+
+  run("$('#lockfile-options-enabled').checked=true;dialog.close()");
+  assert.equal(run('first.preference.checked'),false);
+  assert.equal(run("first.tools.find(input=>input.dataset.projectScannerTool==='npm').checked"),true);
+  run("changeTool(first,'composer',true);$('#lockfile-options-enabled').checked=true;$('#lockfile-options-form').listeners.submit({preventDefault(){}})");
+  assert.equal(run('first.preference.checked'),true);
+  assert.equal(run('dialog.open'),false);
+  assert.equal(run('readProjectScannerProfile(first).generate_lockfiles'),true);
+
+  run("changeTool(second,'npm',true)");
+  assert.equal(run("$('#lockfile-options-enabled').checked"),false);
+  run("$('#lockfile-options-form').listeners.submit({preventDefault(){}})");
+  assert.equal(run('second.preference.checked'),false);
+  assert.equal(run('first.preference.checked'),true);
+  await run('document.listeners.click({target:first.button})');
+  assert.equal(run("$('#lockfile-options-enabled').checked"),true);
+  run('dialog.close();var promptsBeforeUnchecking=popupCount;');
+  run("changeTool(first,'npm',false);changeTool(first,'composer',false)");
+  assert.equal(run('popupCount===promptsBeforeUnchecking'),true);
+  assert.equal(run('first.button.hidden'),true);
+});
+
+test('cancelled or stale lockfile popups cannot change another page or a detached profile', () => {
+  const run=app();
+  lockfilePopupFixture(run);
+  run("changeTool(first,'npm',true);$('#lockfile-options-enabled').checked=true;location.hash='#projects';applyLockfileOptions({preventDefault(){}})");
+  assert.equal(run('first.preference.checked'),false);
+  run("location.hash='#project/p/edit';openLockfileOptions(first);$('#lockfile-options-enabled').checked=true;first.isConnected=false;applyLockfileOptions({preventDefault(){}})");
+  assert.equal(run('first.preference.checked'),false);
+  run("first.isConnected=true;openLockfileOptions(first);$('#lockfile-options-enabled').checked=true;first.mode.value='disabled';applyLockfileOptions({preventDefault(){}})");
+  assert.equal(run('first.preference.checked'),false);
+  assert.equal(run('openLockfileOptions(first)'),false);
+});
+
+test('Composer platform bypass is explicit, scoped to generation, and preserved per repository draft', () => {
+  const run = app();
+  lockfilePopupFixture(run);
+  run("changeTool(first,'npm',true)");
+  assert.equal(run("$('#lockfile-composer-platform-options').hidden"), true);
+  run("dialog.close(); changeTool(first,'composer',true)");
+  assert.equal(run("$('#lockfile-composer-platform-options').hidden"), false);
+  assert.equal(run("$('#lockfile-ignore-composer-platform').checked"), false);
+  assert.equal(run("$('#lockfile-ignore-composer-platform').disabled"), true);
+  run("$('#lockfile-options-enabled').checked=true; $('#lockfile-options-enabled').listeners.change()");
+  assert.equal(run("$('#lockfile-ignore-composer-platform').disabled"), false);
+  run("$('#lockfile-ignore-composer-platform').checked=true; applyLockfileOptions({preventDefault(){}})");
+  assert.equal(run('readProjectScannerProfile(first).ignore_composer_platform'), true);
+  assert.equal(run('Boolean(readProjectScannerProfile(second).ignore_composer_platform)'), false);
+  assert.equal(run("defaultScannerProfile({scanner_profiles:{local:readProjectScannerProfile(first)}},'local').ignore_composer_platform"), true);
+  run("openLockfileOptions(first); $('#lockfile-options-enabled').checked=false; applyLockfileOptions({preventDefault(){}})");
+  assert.equal(run('Boolean(readProjectScannerProfile(first).ignore_composer_platform)'), false);
+  assert.equal(run('first.ignore.checked'), false);
+});
+
+test('native PHP scanner guidance uses local data setup rather than PHP installation instructions', () => {
+  const run = app();
+  run(`state={settings:{scanners:{'composer-lock':true}},projects:[]};`);
+  assert.match(run("scannerInfoHTML('composer-lock',{status:'database'})"), /Download the local OSV Packagist database/);
+  const info = run("scannerInfoHTML('composer-lock',{status:'ready'})");
+  assert.match(info, /No PHP, Composer, dependency installation, or vulnerability API request is needed/);
+  assert.match(info, /including development dependencies/);
+  assert.match(info, /data-action="configure-packagist"/);
+  assert.doesNotMatch(info, /brew install|scanner-command|Installation guide/);
+  assert.match(run("scannerResultHTML('composer-lock',{status:'ready'})"), /local Packagist database is ready/);
+  const profile = run("projectScannerProfileHTML({mode:'custom',tools:['composer-lock']})");
+  assert.match(profile, /data-project-scanner-tool="composer-lock"[^>]*checked/);
+  assert.match(profile, /data-profile-lockfile-options[^>]* hidden/);
+  run(`lang='ja'`);
+  assert.equal(run("scannerLabel('composer-lock')"), 'PHPロックファイル（ローカルOSV）');
+  assert.match(run("scannerInfoHTML('composer-lock',{status:'database'})"), /Packagistエコシステムを選択/);
+});
+
+test('platform-bypassed generated results have an explicit job reason and a collapsible notice', () => {
+  const run = app();
+  run(`var generatedRun={id:'generated',status:'complete',scanners_completed:1,scanner_jobs:[{tool:'composer',status:'complete',findings:0,generated_lockfile:true,ignored_composer_platform:true}]}`);
+  assert.match(run('scannerJobHTML(generatedRun.scanner_jobs)'), /PHP platform requirements ignored/);
+  assert.match(run('scannerRunSummary(generatedRun)'), /2 notices/);
+  assert.match(run('scannerRunSummary(generatedRun)'), /may not be installable/);
+  run(`lang='ja'`);
+  assert.match(run('scannerRunSummary(generatedRun)'), /PHPプラットフォーム要件を無視/);
+});
+
+test('generated-lockfile jobs, findings, and workflow events explain resolved dependency versions', () => {
+  const run = app();
+  run(`
+    state={settings:{scanners:{npm:true}}};
+    const job={tool:'npm',target:'local',status:'complete',findings:0,generated_lockfile:true,reason:'generated_lockfile'};
+    const runWithGeneration={status:'complete',scanners_completed:1,scanner_jobs:[job],logs:[
+      {step_id:'scanner',event:'scanner_lockfile_started',tool:'npm',detail:'npm'},
+      {step_id:'scanner',event:'scanner_lockfile_completed',tool:'npm',detail:'npm'}
+    ]};
+  `);
+  assert.match(run('scannerJobHTML([job])'), /Generated lockfile/);
+  assert.match(run('scannerJobHTML([job])'), />0<\/td>/);
+  assert.match(run('scannerRunSummary(runWithGeneration)'), /may differ from deployed versions/);
+  assert.match(run("findingVersionLabel({version:'1',generated_lockfile:true})"), /Generated lockfile/);
+  assert.doesNotMatch(run("findingVersionLabel({version:'1'})"), /Generated lockfile/);
+  assert.match(run('workflowLogs(runWithGeneration,[])'), /Temporary lockfile generated/);
+  run("lang='ja'");
+  assert.match(run('scannerRunSummary(runWithGeneration)'), /生成したロックファイル/);
+  assert.match(run('scannerJobHTML([job])'), /生成したロックファイル/);
+  assert.doesNotMatch(run('workflowLogs(runWithGeneration,[])'), /event_scanner_/);
+});
+
 test('scanner profile drafts cannot reinterpret an unsupported mode as HTML', () => {
   const run = app();
   run(`
@@ -3232,7 +3742,7 @@ test('GitHub profiles expose two compact modes and local profiles keep all three
   assert.equal((github.match(/<option /g) || []).length,2);
   assert.doesNotMatch(github, /value="auto"|data-profile-auto|data-profile-extras|scanner-auto-tools/);
   assert.match(github, /data-scanner-location="github"/);
-  assert.doesNotMatch(github, /<small>/);
+  assert.doesNotMatch(github.match(/data-profile-custom[^>]*>([^]*?)<\/div>/)[1], /<small>/);
   const local = run("projectScannerProfileHTML({mode:'auto',tools:[],additional_tools:['trivy']},true)");
   assert.equal((local.match(/<option /g) || []).length,3);
   assert.match(local, /value="auto" selected/);

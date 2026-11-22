@@ -98,15 +98,23 @@ func Match(record Record, ecosystem, name, version string) (bool, bool) {
 			if candidate == version {
 				return true, false
 			}
+			if ecosystem == "Packagist" {
+				if result, known := compareComposer(candidate, version); known && result == 0 {
+					return true, false
+				}
+			}
 		}
 
 		for _, r := range affected.Ranges {
-			if r.Type != "SEMVER" {
+			if r.Type != "SEMVER" && (ecosystem != "Packagist" || r.Type != "ECOSYSTEM") {
 				uncertain = true
 				continue
 			}
 
 			matched, known := matchSemver(version, r.Events)
+			if ecosystem == "Packagist" && r.Type == "ECOSYSTEM" {
+				matched, known = matchComposer(version, r.Events)
+			}
 			if matched && known {
 				return true, false
 			}
@@ -124,7 +132,17 @@ func Match(record Record, ecosystem, name, version string) (bool, bool) {
 
 func matchSemver(version string, events []Event) (bool, bool) {
 	v := "v" + strings.TrimPrefix(version, "v")
-	if !semver.IsValid(v) || len(events) == 0 {
+	if !semver.IsValid(v) {
+		return false, false
+	}
+	return matchVersionRange(v, events, func(a, b string) (int, bool) {
+		a, b = "v"+strings.TrimPrefix(a, "v"), "v"+strings.TrimPrefix(b, "v")
+		return semver.Compare(a, b), semver.IsValid(a) && semver.IsValid(b)
+	})
+}
+
+func matchVersionRange(version string, events []Event, compare func(string, string) (int, bool)) (bool, bool) {
+	if len(events) == 0 {
 		return false, false
 	}
 
@@ -161,8 +179,12 @@ func matchSemver(version string, events []Event) (bool, bool) {
 			continue
 		}
 
-		boundary := "v" + bound
-		if !semver.IsValid(boundary) || previous != "" && semver.Compare(boundary, previous) < 0 {
+		boundary := bound
+		order, known := compare(boundary, boundary)
+		if previous != "" {
+			order, known = compare(boundary, previous)
+		}
+		if !known || order < 0 {
 			return false, false
 		}
 
@@ -172,14 +194,21 @@ func matchSemver(version string, events []Event) (bool, bool) {
 				return false, false
 			}
 
-			inside = semver.Compare(v, boundary) >= 0
+			cmp, known := compare(version, boundary)
+			if !known {
+				return false, false
+			}
+			inside = cmp >= 0
 			open = true
 		} else {
 			if !open {
 				return false, false
 			}
 
-			cmp := semver.Compare(v, boundary)
+			cmp, known := compare(version, boundary)
+			if !known {
+				return false, false
+			}
 			matched = matched || inside && (cmp < 0 || cmp == 0 && event.LastAffected != "")
 			inside, open = false, false
 		}

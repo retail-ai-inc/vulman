@@ -72,17 +72,38 @@ type Store struct {
 }
 
 func Open(dir string, aead cipher.AEAD) (*Store, error) {
+	return open(dir, aead, false)
+}
+
+// OpenReadOnly opens a published catalogue without creating or changing files.
+func OpenReadOnly(dir string, aead cipher.AEAD) (*Store, error) {
+	return open(dir, aead, true)
+}
+
+func open(dir string, aead cipher.AEAD, readOnly bool) (*Store, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
 	}
 
 	path := filepath.Join(root.Name(), Filename)
-	db, err := bolt.Open(path, 0600, &bolt.Options{Timeout: time.Second, OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {
+	if readOnly {
+		info, err := root.Lstat(Filename)
+		if err != nil {
+			return nil, errors.Join(err, root.Close())
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.Join(apperror.New("invalid_osv_metadata", "invalid OSV metadata"), root.Close())
+		}
+	}
+	db, err := bolt.Open(path, 0600, &bolt.Options{ReadOnly: readOnly, Timeout: time.Second, OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {
 		if name != path {
 			return nil, apperror.New("unexpected_osv_database_path", "unexpected OSV database path")
 		}
 
+		if readOnly {
+			flags &^= os.O_CREATE
+		}
 		return root.OpenFile(Filename, flags, mode)
 	}})
 
@@ -91,8 +112,14 @@ func Open(dir string, aead cipher.AEAD) (*Store, error) {
 	}
 
 	s := &Store{db: db, root: root, aead: aead}
-	err = db.Update(func(tx *bolt.Tx) error {
+	load := func(tx *bolt.Tx) error {
 		for _, name := range []string{"meta", "catalogues", "pending"} {
+			if readOnly {
+				if tx.Bucket([]byte(name)) == nil {
+					return apperror.New("invalid_osv_metadata", "invalid OSV metadata")
+				}
+				continue
+			}
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return err
 			}
@@ -100,6 +127,9 @@ func Open(dir string, aead cipher.AEAD) (*Store, error) {
 
 		raw := tx.Bucket([]byte("meta")).Get([]byte("state"))
 		if raw == nil {
+			if readOnly {
+				return apperror.New("invalid_osv_metadata", "invalid OSV metadata")
+			}
 			s.meta = metadata{Ecosystems: map[string]ecosystemState{}}
 			return s.writeMetadata(tx, s.meta)
 		}
@@ -113,7 +143,12 @@ func Open(dir string, aead cipher.AEAD) (*Store, error) {
 		}
 
 		return nil
-	})
+	}
+	if readOnly {
+		err = db.View(load)
+	} else {
+		err = db.Update(load)
+	}
 
 	if err != nil {
 		return nil, errors.Join(err, db.Close(), root.Close())

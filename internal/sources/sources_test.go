@@ -12,6 +12,18 @@ import (
 	"vulman/internal/model"
 )
 
+func TestMergeKeepsSuppliedLockfileEvidenceWhenMixedWithGeneratedResults(t *testing.T) {
+	generated := model.Finding{ID: "CVE-example", AssetID: "code:demo", Match: "scanner", GeneratedLockfile: true}
+	actual := generated
+	actual.GeneratedLockfile = false
+	for _, items := range [][]model.Finding{{generated, generated}, {generated, actual}, {actual, generated}} {
+		merged := Merge(items)
+		if len(merged) != 1 || merged[0].GeneratedLockfile != (items[0].GeneratedLockfile && items[1].GeneratedLockfile) {
+			t.Fatalf("merging lost the kind of dependency evidence: %+v", merged)
+		}
+	}
+}
+
 func TestNVDPaginationAndConfidence(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
